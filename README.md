@@ -162,6 +162,12 @@ SpriteSheetTool/
   | `test:` | 冒烟回归、性能基准与校验脚本 |
 
 - 重建前的旧历史保留在 `pre-rebuild-backup` 分支，可随时对照或回退。
+- ⚠️ **重建的诚实说明**：重构那段历史是在**没有 git** 的情况下完成的，我没留中间快照，
+  因此历史是"按主题重建"的 —— **代码**用当时记录的精确改动文本 + 备份文件还原，且
+  每个提交都通过编译、最后一个提交的树与重建前**逐字节一致**；但第一个提交里的
+  `README.md` / `SPLIT_GUIDE.md` / `.gitignore` 用的是**整理后的版本**（这三个文件
+  没有留下原始快照），所以看早期提交时会发现"代码是当时的、文档是最新的"。
+  想看真实起点请看 `backup\main_window_v6222lines_*.py.bak`。
 - **备份不在仓库里**：源码快照（`.bak`）与仓库历史打包（`.bundle`）统一放在
   `E:\projects\SpriteSheetTool\`，该目录下另有 `README.md` 说明恢复方法。
 - `.gitignore` 已排除 `.venv/`、`build/`、`dist/`、`__pycache__/`、`dsh-usage/`、
