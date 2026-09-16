@@ -55,12 +55,13 @@ Name: "{autoprograms}\SpriteSheetTool v{#MyAppVersion}"; Filename: "{app}\{#MyAp
 Root: HKCU; Subkey: "Software\Classes\.sstool"; ValueType: string; ValueName: ""; ValueData: "SpriteSheetTool.Project"; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\SpriteSheetTool.Project"; ValueType: string; ValueName: ""; ValueData: "SpriteSheetTool 工程"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\SpriteSheetTool.Project\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\SSTool.ico"
-Root: HKCU; Subkey: "Software\Classes\SpriteSheetTool.Project\shell\open\command"; ValueType: string; ValueName: ""; ValueData: "\"{app}\{#MyAppExeName}\" \"%1\""
+; 注意：Inno Setup 不支持 \ 转义双引号，字符串里的引号要写成双双写（""）。
+Root: HKCU; Subkey: "Software\Classes\SpriteSheetTool.Project\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 ; ---- 资源管理器缩略图 ----
 ; .sstool 文件以一张合法 PNG 开头（工程里存的那张带角标的画面），把本扩展名挂到
 ; 系统自带的图片缩略图处理器上，资源管理器就能直接显示工程内容缩略图。
-; 注：Inno Setup 里字面大括号要写成 {{ }}。
-Root: HKCU; Subkey: "Software\Classes\.sstool\ShellEx\{{e357fccd-a995-4576-b01f-234630154e96}"; ValueType: string; ValueName: ""; ValueData: "{{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}}"; Flags: uninsdeletekey
+; 注：Inno Setup 里字面左大括号要写成 {{（右大括号不用转义，写一个即可）。
+Root: HKCU; Subkey: "Software\Classes\.sstool\ShellEx\{{e357fccd-a995-4576-b01f-234630154e96}"; ValueType: string; ValueName: ""; ValueData: "{{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}"; Flags: uninsdeletekey
 ; 声明为图片类型，让"按类型分组/排序"和预览窗格也按图片对待。
 Root: HKCU; Subkey: "Software\Classes\.sstool"; ValueType: string; ValueName: "PerceivedType"; ValueData: "image"; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\.sstool"; ValueType: string; ValueName: "Content Type"; ValueData: "image/png"; Flags: uninsdeletevalue
