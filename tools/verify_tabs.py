@@ -78,10 +78,28 @@ def main() -> int:
     win = MainWindow()
     tabs = win.tabs
 
-    print("=== 1. 标签栏基本形态 ===")
+    print("=== 1. 标签栏基本形态与位置 ===")
     print(f"  高度 {tabs.height()}px，起始标签数 {tabs.count()}")
     check("标签栏是矮条（20..32px）", 20 <= tabs.height() <= 32, f"实际 {tabs.height()}px")
     check("启动就有 1 个标签", tabs.count() == 1, f"实际 {tabs.count()}")
+
+    # 位置：菜单栏 -> 软件名 -> 标签栏 -> 内容 -> 状态栏
+    from spritesheet.ui.widgets import AppNameLabel
+
+    name_label = win.findChildren(AppNameLabel)[0]
+    header_bar = name_label.parentWidget()
+    win.resize(1000, 1000)
+    win.show()                 # 不 show 的话布局还没跑，所有 y() 都是 0
+    app.processEvents()
+    header_bottom = header_bar.y() + header_bar.height()
+    print(f"  名称栏 y={header_bar.y()} 底部 y={header_bottom}；"
+          f"标签栏 y={tabs.y()}；内容区 y={win.splitter.y()}；状态栏 y={win.lbl_status.y()}")
+    check("标签栏在名称栏下面", tabs.y() >= header_bottom - 2,
+          f"标签栏 y={tabs.y()}，名称栏底部 {header_bottom}")
+    check("标签栏在软件名下面（名称栏在标签栏之上）", header_bar.y() < tabs.y())
+    check("标签栏在内容区上面", tabs.y() + tabs.height() <= win.splitter.y(),
+          f"标签栏底部 {tabs.y() + tabs.height()}，内容区 y={win.splitter.y()}")
+    check("标签栏在状态栏上面", tabs.y() < win.lbl_status.y())
 
     print()
     print("=== 2. 在标签 0 里造工程 A ===")

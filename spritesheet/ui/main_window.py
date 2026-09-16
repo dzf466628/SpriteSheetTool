@@ -897,21 +897,26 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # 名称栏（已去掉左侧软件图标，只留软件名）
+        # 名称栏（已去掉左侧软件图标，只留软件名；版本号与名字底对齐，画在同一个控件里）
         logo_bar = QWidget()
         logo_bar.setFixedHeight(64)
         logo_bar.setStyleSheet("background-color: #1a1a1a; border-bottom: 1px solid #333;")
         logo_layout = QHBoxLayout(logo_bar)
         logo_layout.setContentsMargins(12, 5, 8, 5)
         logo_layout.setSpacing(8)
-        # 软件名：首字母 S 放大并与其余文字垂直居中（见 AppNameLabel）
-        name_label = AppNameLabel()
-        version_label = QLabel(f"v{__version__}")
-        version_label.setStyleSheet("background: transparent; border: none; color: #9a9a9a; font-size: 11px;")
+        name_label = AppNameLabel(version=f"v{__version__}")
         logo_layout.addWidget(name_label, 0, Qt.AlignmentFlag.AlignVCenter)
-        logo_layout.addWidget(version_label, 0, Qt.AlignmentFlag.AlignBottom)
         logo_layout.addStretch()
         main_layout.addWidget(logo_bar)
+
+        # 工程标签栏紧贴在名称栏下面（菜单栏 → 软件名 → 标签 → 内容 → 状态栏）。
+        # 交互：单击切换 / 双击重命名 / 双击空白处新建 / × 关闭 / + 新建
+        self.tabs = ProjectTabBar()
+        self.tabs.tab_selected.connect(self._switch_tab)
+        self.tabs.tab_close_requested.connect(self._close_tab)
+        self.tabs.tab_renamed.connect(self._rename_tab)
+        self.tabs.new_tab_requested.connect(lambda: self._new_tab())
+        main_layout.addWidget(self.tabs)
 
         # 内容区：侧边栏 | QSplitter(原图区 | 右侧预览)
         content = QHBoxLayout()
@@ -986,15 +991,6 @@ class MainWindow(QMainWindow):
 
         content.addWidget(self.splitter, 1)
         main_layout.addLayout(content, 1)
-
-        # 工程标签栏（矮条，类似 PS 的文档标签）：单击切换 / 双击重命名 /
-        # 双击空白处新建 / × 关闭 / + 新建
-        self.tabs = ProjectTabBar()
-        self.tabs.tab_selected.connect(self._switch_tab)
-        self.tabs.tab_close_requested.connect(self._close_tab)
-        self.tabs.tab_renamed.connect(self._rename_tab)
-        self.tabs.new_tab_requested.connect(lambda: self._new_tab())
-        main_layout.addWidget(self.tabs)
 
         # 状态栏
         self.lbl_status = QLabel(f"{__app_name__} v{__version__}  |  重构版")

@@ -71,25 +71,33 @@ def make_tool_icon(kind: str, size: int = 18) -> QIcon:
 
 
 class AppNameLabel(QWidget):
-    """软件名标签：首字母放大，并与其余文字**垂直居中**。
+    """软件名标签：首字母放大，并与其余文字**垂直居中**；版本号跟在名字后面，
+    与名字**底对齐**（共用同一条基线）。
 
     为什么不用 QLabel 富文本（`<span style="font-size:30px">S</span>`）：
     Qt 的富文本按**基线**对齐，放大首字母后它会整块往上冒 —— 上缘高出很多、
     下缘却和普通文字齐平，看起来是"吊在上面"而不是"上下居中"。
     这里按墨迹盒（capHeight）自己算基线，像素级可控，也便于回归断言。
 
-    单词拆成三段着色：首字母 + 剩余部分 + 尾段（尾段用品牌玫红）。
+    版本号也画在这里（而不是单独一个 QLabel）：两个控件分别用 AlignBottom 摆，
+    底边差多少取决于各自的行高与内边距，调不准；画在同一个基线上下对齐是天然的。
+
+    单词拆成四段：首字母 + 剩余部分 + 尾段（品牌玫红）+ 版本号（灰色小字）。
     """
 
     BASE_PX = 22          # 其余文字字号
     HEAD_PX = 30          # 首字母字号（更大）
+    VERSION_PX = 11       # 版本号字号
+    VERSION_GAP = 8       # 版本号与名字的间距
     COLOR_BODY = "#ffffff"
     COLOR_TAIL = "#E91E63"
+    COLOR_VERSION = "#9a9a9a"
 
     def __init__(self, head: str = "S", rest: str = "priteSheet", tail: str = "Tool",
-                 parent=None) -> None:
+                 version: str = "", parent=None) -> None:
         super().__init__(parent)
         self._head, self._rest, self._tail = head, rest, tail
+        self._version = version
         family = "Microsoft YaHei UI"
         self._f_base = QFont(family)
         self._f_base.setPixelSize(self.BASE_PX)
@@ -97,16 +105,25 @@ class AppNameLabel(QWidget):
         self._f_head = QFont(family)
         self._f_head.setPixelSize(self.HEAD_PX)
         self._f_head.setBold(True)
+        self._f_version = QFont(family)
+        self._f_version.setPixelSize(self.VERSION_PX)
         self._fm_base = QFontMetricsF(self._f_base)
         self._fm_head = QFontMetricsF(self._f_head)
+        self._fm_version = QFontMetricsF(self._f_version)
         self._width = (self._fm_head.horizontalAdvance(head)
                        + self._fm_base.horizontalAdvance(rest)
                        + self._fm_base.horizontalAdvance(tail))
+        if version:
+            self._width += self.VERSION_GAP + self._fm_version.horizontalAdvance(version)
         self.setFixedSize(int(math.ceil(self._width)) + 2, 54)
         self.setStyleSheet("background: transparent;")
 
     def sizeHint(self) -> QSize:
         return QSize(int(math.ceil(self._width)) + 2, 54)
+
+    def version_rect(self) -> QRect:
+        """版本号的墨迹矩形（回归用：断言与名字底对齐）。"""
+        return self._version_ink_rect().toAlignedRect()
 
     def head_rect(self) -> QRect:
         """首字母的墨迹矩形（回归用：断言它与其余文字上下居中）。"""
@@ -160,6 +177,14 @@ class AppNameLabel(QWidget):
         return QRectF(self._fm_head.horizontalAdvance(self._head), base_y + top,
                       self._fm_base.horizontalAdvance(self._rest + self._tail), bottom - top)
 
+    def _version_ink_rect(self) -> QRectF:
+        base_y, _head_y = self._baselines()
+        top, bottom = self._ink_rel(self._fm_version, self._version)
+        x = (self._fm_head.horizontalAdvance(self._head)
+             + self._fm_base.horizontalAdvance(self._rest + self._tail) + self.VERSION_GAP)
+        return QRectF(x, base_y + top,
+                      self._fm_version.horizontalAdvance(self._version), bottom - top)
+
     def paintEvent(self, event) -> None:  # noqa: ARG002 - Qt 接口
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
@@ -177,6 +202,13 @@ class AppNameLabel(QWidget):
 
         painter.setPen(QPen(QColor(self.COLOR_TAIL)))
         painter.drawText(QPointF(x, base_y), self._tail)
+        x += self._fm_base.horizontalAdvance(self._tail)
+
+        if self._version:
+            # 版本号与名字共用同一条基线 —— 这就是"底对齐"
+            painter.setFont(self._f_version)
+            painter.setPen(QPen(QColor(self.COLOR_VERSION)))
+            painter.drawText(QPointF(x + self.VERSION_GAP, base_y), self._version)
         painter.end()
 
 
