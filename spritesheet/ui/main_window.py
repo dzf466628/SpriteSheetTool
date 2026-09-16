@@ -944,17 +944,25 @@ class MainWindow(QMainWindow):
 
         total_frames = 0
         for ai, imported in enumerate(project.actions):
-            color = MACARON_COLORS[ai % len(MACARON_COLORS)]
+            color = imported.color or MACARON_COLORS[ai % len(MACARON_COLORS)]
             action = Action(imported.name, color)
             action.fps = imported.fps
             action.loop_mode = imported.loop
             action.anchor = imported.anchor
+            # 动作类型 / 移动参数 / 地面线（仅本工具格式提供；TP/Aseprite 不含）
+            action.action_type = imported.action_type or "static"
+            if imported.move:
+                action.move_direction, action.move_speed = imported.move
+            if imported.ground:
+                action.ground_enabled, action.ground_offset = imported.ground
             layouts: list[list[tuple[int, int, int]]] = []
+            kept_frames: list = []      # 与 layouts 一一对应（丢弃无有效部件的帧）
             for fr in imported.frames:
                 layout = [(tile_index[p.rect], p.pos[0], p.pos[1])
                           for p in fr.parts if p.rect in tile_index]
                 if layout:
                     layouts.append(layout)
+                    kept_frames.append(fr)
             if layouts:
                 action.frame_layouts = layouts
                 # 导入的帧全部视为基线（非用户复用），Alt 点击不会误取消
@@ -968,6 +976,7 @@ class MainWindow(QMainWindow):
                             ids.append(tile_id)
                 action.selected_indices = ids
             viewer.crop_frames_for_action(action)
+            self._restore_imported_canvas(action, imported, kept_frames)
             total_frames += len(action.frames)
             self.actions.append(action)
             self._append_action_card(action)
@@ -988,6 +997,51 @@ class MainWindow(QMainWindow):
                 self, "导入完成",
                 f"{msg}\n\n提示：\n" + "\n".join(f"· {n}" for n in notices),
             )
+
+    @staticmethod
+    def _restore_imported_canvas(action: Action, imported, kept_frames: list) -> None:
+        """按导入记录还原画布几何（padding + 逐帧偏移）。
+
+        导入后的帧是用图块重建的**紧贴小图**，若直接交给 ``compute_preview_layout``，
+        它会按各帧自身尺寸重新居中 —— 帧尺寸不一致时帧间相对位置就被破坏（动画抖动）。
+        这里用 ``padding``（四周留边）与 ``frame_offsets``（逐帧微调）把内容摆回原先
+        在画布中的位置：
+
+            内容落点 = padding + 居中补偿(max-尺寸)//2 + frame_offset
+
+        令其等于导入记录的目标位置（本工具格式的 frames[].offset；TP/Aseprite 为
+        帧原点 + 部件 pos），反解出 frame_offset 即可。画布留边优先用文件里写明的
+        padding，其次由 sourceSize 与帧尺寸反推。
+        """
+        n = min(len(action.frames), len(kept_frames))
+        if n <= 0:
+            return
+        sizes = [(action.frames[i].width(), action.frames[i].height()) for i in range(n)]
+        max_w = max(s[0] for s in sizes)
+        max_h = max(s[1] for s in sizes)
+
+        pad = imported.padding
+        if pad is None:
+            targets = [f.canvas_size for f in kept_frames[:n] if f.canvas_size]
+            if targets:
+                target_w = max(t[0] for t in targets)
+                target_h = max(t[1] for t in targets)
+                pad = max(0, min((target_w - max_w) // 2, (target_h - max_h) // 2))
+            else:
+                pad = 0
+        action.padding = int(pad)
+
+        offsets: dict[int, tuple[int, int]] = {}
+        for i in range(n):
+            pos = kept_frames[i].canvas_pos
+            if pos is None:
+                continue
+            dx = int(pos[0]) - action.padding - (max_w - sizes[i][0]) // 2
+            dy = int(pos[1]) - action.padding - (max_h - sizes[i][1]) // 2
+            if dx or dy:
+                offsets[i] = (dx, dy)
+        action.frame_offsets = offsets
+        action.invalidate_transforms()
 
     # ---- 拖拽：图片 / JSON ----
 

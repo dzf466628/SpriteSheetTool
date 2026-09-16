@@ -767,6 +767,7 @@ class ExportDialog(QDialog):
         anchor_x, anchor_y = action_anchor_pixels(action, canvas_w, canvas_h)
         result = {
             "name": action.name,
+            "color": action.color,
             "type": action.action_type,
             "fps": action.fps,
             "loop": action.loop_mode,
@@ -855,6 +856,7 @@ class ExportDialog(QDialog):
                 "fields": {
                     "animations[]": {
                         "name": "动作名（用于显示/查找，不一定唯一，按 name 查时取第一个匹配即可）",
+                        "color": "动作的界面标识色（#RRGGBB），仅用于显示，不影响画面",
                         "type": "动作类型：static=静止，move=移动（配合 move 字段描述移动语义）",
                         "fps": "播放帧率（帧/秒）；与 frames[].duration_ms 等价（duration_ms = round(1000/fps)）",
                         "loop": "循环模式：loop/once/pingpong，见 usage.loop_values",

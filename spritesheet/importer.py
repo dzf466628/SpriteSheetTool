@@ -44,6 +44,13 @@ class ImportedPart:
 class ImportedFrame:
     parts: list[ImportedPart]
     duration_ms: int = 100
+    # 该帧内容在「目标画布」中的左上角。本工具格式来自 frames[].offset；
+    # TexturePacker / Aseprite 的帧以 sourceSize 原点为原点（内容偏移已体现在
+    # 部件的 pos 里），因此为 (0, 0)。
+    canvas_pos: tuple[int, int] | None = None
+    # 目标画布尺寸：本工具格式的 animations[].canvas，
+    # TexturePacker / Aseprite 的 sourceSize。用于还原画布留边与帧间相对位置。
+    canvas_size: tuple[int, int] | None = None
 
 
 @dataclass
@@ -54,6 +61,12 @@ class ImportedAction:
     loop: str = "loop"
     anchor: tuple[float, float] = (0.5, 0.5)
     canvas: tuple[int, int] | None = None
+    # ---- 以下字段仅「本工具格式」提供（TP/Aseprite 不含这些编辑语义）----
+    padding: int | None = None
+    ground: tuple[bool, int] | None = None
+    action_type: str = "static"
+    move: tuple[str, int] | None = None
+    color: str | None = None
 
 
 @dataclass
@@ -168,8 +181,18 @@ def _entry_to_frame(entry: dict) -> ImportedFrame | None:
     rect = (int(fr.get("x", 0)), int(fr.get("y", 0)), int(fr.get("w", 0)), int(fr.get("h", 0)))
     sss = entry.get("spriteSourceSize") or {}
     pos = (int(sss.get("x", 0)), int(sss.get("y", 0)))
+    size = entry.get("sourceSize") or {}
+    canvas_size = None
+    if size:
+        cw, ch = int(size.get("w", 0)), int(size.get("h", 0))
+        if cw > 0 and ch > 0:
+            canvas_size = (cw, ch)
+    # 帧原点即 sourceSize 原点（内容偏移已经体现在 pos 里），故 canvas_pos = (0, 0)；
+    # canvas_size 用于还原画布留边，保证各帧的相对位置不错位。
     return ImportedFrame(parts=[ImportedPart(rect=rect, pos=pos)],
-                         duration_ms=int(entry.get("duration") or 100))
+                         duration_ms=int(entry.get("duration") or 100),
+                         canvas_pos=(0, 0),
+                         canvas_size=canvas_size)
 
 
 def _parse_tp(data: dict, warnings: list[str], is_hash: bool) -> tuple[str, list[ImportedAction], list[dict]]:

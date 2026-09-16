@@ -84,7 +84,11 @@ def _frame_entries(action, records, prefix: str) -> list[dict]:
                 x, y, w, h = record["rect"]
             ox, oy = record["offset"]
             cw, ch = record.get("canvas", (w, h))
-            trimmed = bool(record.get("trimmed", False))
+            # trimmed 表示「帧内容是源图的一个子矩形」：内容尺寸小于源图，或内容
+            # 在源图中有偏移。原实现恒为 False，却同时写出非零 spriteSourceSize /
+            # 更大的 sourceSize，二者自相矛盾 —— 只看 trimmed 的第三方引擎会忽略
+            # 偏移、把帧贴到 (0,0)，合成帧就会整体错位。这里按实际关系如实标注。
+            trimmed = bool(w != cw or h != ch or ox or oy)
         else:  # 兼容旧的 4 元组记录
             x, y, w, h = record
             ox, oy, cw, ch, trimmed = 0, 0, w, h, False
