@@ -14,6 +14,9 @@ env/
 build/
 dist/
 *.egg-info/
+release/
+# 打包出来的安装包（30MB 量级，需要时用 build_windows.ps1 重打）
+installer/
 # 注意：这里【不能】写 *.spec —— SpriteSheetTool.spec 是打包必需的源文件
 # （迁移清单要求拷贝，PyInstaller 依赖它），忽略掉会让新克隆缺打包配置。
 
@@ -40,3 +43,6 @@ backup/
 dsh-usage/
 .build/
 .tmp/
+# 调试时随手重定向出来的日志
+build_log.txt
+packaged.err
