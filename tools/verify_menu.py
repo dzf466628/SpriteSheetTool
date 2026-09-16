@@ -2,11 +2,11 @@
 
 Asserts the requested menu layout:
   - 文件 sits on the LEFT, 编辑 on the RIGHT
-  - 文件 order: 添加图片 / 导入 JSON 工程… / — / 打开工程… / 保存工程 / 工程另存为…
-                / — / 退出
+  - 文件 order: 添加图片 / 导入 JSON 工程… / — / 新建工程 / 打开工程… / 保存工程
+                / 工程另存为… / — / 退出
   - 编辑 order: 撤销 / — / 软件设置…
-  - 新建工程 no longer appears in the menu bar
   - 检查更新 is NOT in 文件 any more: it lives inside 编辑 → 软件设置…
+  - 新建工程 is back, and it opens a NEW TAB (see tools/verify_tabs.py)
 
 Usage: .venv\\Scripts\\python.exe tools\\verify_menu.py
 """
@@ -25,8 +25,8 @@ from spritesheet.ui.main_window import MainWindow
 
 EXPECTED_MENUS = ["文件", "编辑"]
 EXPECTED_FILE_ITEMS = [
-    "添加图片", "导入 JSON 工程…", "---", "打开工程…", "保存工程", "工程另存为…",
-    "---", "退出",
+    "添加图片", "导入 JSON 工程…", "---", "新建工程", "打开工程…", "保存工程",
+    "工程另存为…", "---", "退出",
 ]
 EXPECTED_EDIT_ITEMS = ["撤销", "---", "软件设置…"]
 
@@ -69,10 +69,10 @@ def main() -> int:
         print("  [OK]   编辑菜单含「软件设置…」")
 
     if any("新建工程" in t for t in items):
-        ok = False
-        print("  [FAIL] 文件菜单里仍有「新建工程」")
+        print("  [OK]   文件菜单里有「新建工程」（Ctrl+N，新开标签页）")
     else:
-        print("  [OK]   文件菜单已无「新建工程」")
+        ok = False
+        print("  [FAIL] 文件菜单里没有「新建工程」")
 
     if any("检查更新" in t for t in items):
         ok = False

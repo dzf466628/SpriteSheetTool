@@ -36,7 +36,8 @@ from .preview import ActionPreviewWidget
 from .settings_dialog import SettingsDialog
 from .transform import action_frame_pixmap
 from .widgets import (
-    ActionCardWidget, ActionItemDelegate, AppNameLabel, _APP_ROOT, paint_checkerboard,
+    ActionCardWidget, ActionItemDelegate, AppNameLabel, ProjectTabBar, _APP_ROOT,
+    paint_checkerboard,
 )
 
 # 工程文件缩略图：**正方形** 256×256（资源管理器用方形槽位显示，按画面比例输出
@@ -173,9 +174,21 @@ class MainWindow(QMainWindow):
         self._restoring_transform_history = False
         self._project_path: Path | None = None
         self._project_dirty = False
+        # 工程显示名（标签页上那个）与"是否被用户改过名"。改名后不再被文件名覆盖。
+        self._project_name = "未命名工程"
+        self._name_custom = False
+        # 标签页文档表：每项 {name, dirty, state}。state 为 None 表示这份正"活着"
+        # （数据就在 self.actions / image_viewer / preview 里），否则是切走时抓的快照。
+        self._documents: list[dict] = []
+        self._act_undo = None
         self._build_ui()
         self._build_menu()
         self._transform_history_state = self._capture_transform_state()
+        # 起始标签页
+        self._documents.append({"name": self._project_name, "dirty": False, "state": None})
+        self.tabs.add_tab(self._project_name)
+        self._refresh_tab_label()
+        self._set_project_title()
 
     def _capture_transform_state(self):
         """Capture only frame transform fields, keeping undo focused and cheap."""
@@ -416,13 +429,288 @@ class MainWindow(QMainWindow):
         return manifest, sections
 
     def _set_project_title(self) -> None:
-        name = self._project_path.name if self._project_path else "未命名工程"
+        name = self._project_name or "未命名工程"
         marker = " *" if self._project_dirty else ""
         self.setWindowTitle(f"{name}{marker} - {__app_name__} v{__version__}")
 
     def _mark_project_dirty(self) -> None:
+        if self._project_dirty:
+            return
         self._project_dirty = True
+        self._refresh_tab_label()
         self._set_project_title()
+
+    # ---- 标签页：多工程 ----
+
+    def _tab_name_for_path(self, path: Path | None) -> str:
+        return Path(path).stem if path else "未命名工程"
+
+    @staticmethod
+    def _ui_interactive() -> bool:
+        """当前是否在"有人看着"的界面里跑（offscreen = 回归脚本）。"""
+        return os.environ.get("QT_QPA_PLATFORM", "").lower() != "offscreen"
+
+    def _refresh_tab_label(self) -> None:
+        """把当前文档的名字与脏标记同步到标签上。"""
+        index = self.tabs.current_index()
+        if index < 0:
+            return
+        self.tabs.set_name(index, self._project_name or "未命名工程")
+        self.tabs.set_dirty(index, self._project_dirty)
+        self.tabs.set_tooltip(index, str(self._project_path) if self._project_path else "尚未保存")
+
+    def _capture_document(self) -> dict:
+        """把当前文档状态**按引用**装进一个 dict（不做序列化、不复制像素）。
+
+        为什么不用「切换标签时存一次工程文件」：实测 `_project_manifest()` 对一张
+        3.8MB 素材要 **2.1 秒**（原图要重新编码成 PNG），切一次卡两秒没法用。
+        文档本来就是内存里的对象，换标签只需要把引用换过去，再把几个控件刷新一遍。
+        """
+        v = self.image_viewer
+        return {
+            "actions": list(self.actions),
+            "pixmap": v._pixmap,
+            "source_images": list(v._source_images),
+            "frames": list(v._frames),
+            "frame_logical": dict(v._frame_logical),
+            "zoom": v._zoom,
+            "offset": QPointF(v._offset),
+            "bg_mode": v._bg_mode,
+            "compose_mode": v.compose_mode,
+            "manual_compose": v._manual_compose,
+            "current_action": v.current_action,
+            "preview_action": self.preview._action,
+            "preview_frame_index": self.preview._frame_index,
+            "preview_zoom": self.preview.canvas._zoom,
+            "preview_offset": QPointF(self.preview.canvas._offset),
+            "preview_fit": self.preview.canvas._fit,
+            "project_path": self._project_path,
+            "project_dirty": self._project_dirty,
+            "project_name": self._project_name,
+            "name_custom": self._name_custom,
+            "undo_stack": self._undo_stack,
+            "transform_state": self._transform_history_state,
+        }
+
+    @staticmethod
+    def _blank_document() -> dict:
+        """空白文档状态（新建标签页用），字段与 _capture_document 一致。"""
+        return {
+            "actions": [],
+            "pixmap": None,
+            "source_images": [],
+            "frames": [],
+            "frame_logical": {},
+            "zoom": 1.0,
+            "offset": QPointF(0, 0),
+            "bg_mode": "checker",
+            "compose_mode": False,
+            "manual_compose": False,
+            "current_action": None,
+            "preview_action": None,
+            "preview_frame_index": 0,
+            "preview_zoom": 1.0,
+            "preview_offset": QPointF(0, 0),
+            "preview_fit": True,
+            "project_path": None,
+            "project_dirty": False,
+            "project_name": "未命名工程",
+            "name_custom": False,
+            "undo_stack": None,
+            "transform_state": None,
+        }
+
+    def _restore_document(self, doc: dict) -> None:
+        """把文档状态装回控件（与 _capture_document 对称）。
+
+        刷新顺序照着 `_apply_sstool_project` 来：先原图区数据，再动作列表，
+        最后预览区；漏掉任何一处都会出现「切回来画面还是上一个工程」。
+        """
+        self._end_all_renames()
+        viewer = self.image_viewer
+        # 切文档时先掐掉上一份文档还在跑的元素检测，否则结果会落到新文档上
+        viewer._detect_generation += 1
+
+        self.actions = list(doc["actions"])
+        viewer._pixmap = doc["pixmap"]
+        viewer._source_images = list(doc["source_images"])
+        viewer._frames = list(doc["frames"])
+        viewer._frame_logical = dict(doc["frame_logical"])
+        viewer._zoom = float(doc["zoom"])
+        viewer._offset = QPointF(doc["offset"])
+        viewer._bg_mode = doc["bg_mode"]
+        viewer.compose_mode = bool(doc["compose_mode"])
+        viewer._manual_compose = bool(doc["manual_compose"])
+
+        self.action_list.clear()
+        for action in self.actions:
+            self._append_action_card(action)
+        viewer.set_actions(self.actions)
+
+        current = doc["current_action"]
+        viewer.set_current_action(current)
+        if current in self.actions:
+            row = self.actions.index(current)
+            self.action_list.blockSignals(True)
+            self.action_list.setCurrentRow(row)
+            self.action_list.blockSignals(False)
+
+        self.preview.set_actions(self.actions)
+        self.preview.set_source_pixmap(viewer._pixmap)
+        self.preview.set_action(doc["preview_action"])
+        self.preview._frame_index = int(doc["preview_frame_index"])
+        if doc["preview_action"] is not None:
+            self.preview._sync_frame()
+        self.preview.canvas._zoom = float(doc["preview_zoom"])
+        self.preview.canvas._offset = QPointF(doc["preview_offset"])
+        self.preview.canvas._fit = bool(doc["preview_fit"])
+
+        self._project_path = doc["project_path"]
+        self._project_dirty = bool(doc["project_dirty"])
+        self._project_name = doc["project_name"]
+        self._name_custom = bool(doc["name_custom"])
+
+        # 撤销栈每个文档一份；菜单里的「撤销」要跟着换到新的那份上
+        stack = doc["undo_stack"]
+        self._undo_stack = stack if stack is not None else QUndoStack(self)
+        self._transform_history_state = doc["transform_state"]
+        self._transform_history_pending = None
+        if self._act_undo is not None:
+            try:
+                self._act_undo.triggered.disconnect()
+            except TypeError:
+                pass
+            self._act_undo.triggered.connect(self._undo_stack.undo)
+        if self._transform_history_state is None:
+            self._transform_history_state = self._capture_transform_state()
+
+        viewer.canvas.update()
+        viewer._update_rulers()
+        self._refresh_tab_label()
+        self._set_project_title()
+
+    def _switch_tab(self, index: int) -> None:
+        if not (0 <= index < self.tabs.count()):
+            return
+        current = self.tabs.current_index()
+        if index == current:
+            return
+        if 0 <= current < len(self._documents):
+            slot = self._documents[current]
+            slot["state"] = self._capture_document()
+            slot["name"] = self._project_name
+            slot["dirty"] = self._project_dirty
+        self.tabs.set_current(index)
+        doc = self._documents[index]
+        self._restore_document(doc["state"])
+        doc["state"] = None            # 现在它是"活着"的那份
+        self.lbl_status.setText(f"已切换到工程：{self._project_name}")
+
+    def _new_tab(self, name: str | None = None, switch: bool = True) -> int:
+        """新建一个空白工程标签页。"""
+        current = self.tabs.current_index()
+        if 0 <= current < len(self._documents):
+            slot = self._documents[current]
+            slot["state"] = self._capture_document()
+            slot["name"] = self._project_name
+            slot["dirty"] = self._project_dirty
+        doc = self._blank_document()
+        doc["project_name"] = name or self._next_untitled_name()
+        self._documents.append({"name": doc["project_name"], "dirty": False, "state": doc})
+        index = self.tabs.add_tab(doc["project_name"], select=switch)
+        if switch:
+            self._restore_document(doc)
+            self._documents[index]["state"] = None
+            self.lbl_status.setText("已新建空白工程")
+        self._refresh_tab_label()
+        return index
+
+    def _next_untitled_name(self) -> str:
+        used = {slot["name"] for slot in self._documents}
+        index = self.tabs.count() + 1
+        while f"未命名工程{index}" in used:
+            index += 1
+        return f"未命名工程{index}"
+
+    def _rename_tab(self, index: int, name: str) -> None:
+        """双击标签重命名：只改工程在软件里的显示名，**不动磁盘上的文件名**。"""
+        if not (0 <= index < len(self._documents)):
+            return
+        self._documents[index]["name"] = name
+        if index == self.tabs.current_index():
+            self._project_name = name
+            self._name_custom = True
+            self._refresh_tab_label()
+            self._set_project_title()
+        self.lbl_status.setText(f"工程已重命名为「{name}」")
+
+    def _ask_close_tab(self, name: str) -> str:
+        """关闭有改动的标签时询问。返回 "save" / "discard" / "cancel"。
+
+        单独抽出来是为了可测：回归里替换掉它就不必去 mock 模态对话框。
+        offscreen 下不弹窗（理由见 ``_ask_quit_dirty``），按"不保存"处理。
+        """
+        if not self._ui_interactive():
+            return "discard"
+        box = QMessageBox(self)
+        box.setWindowTitle("关闭工程")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(f"「{name}」有未保存的改动。")
+        box.setInformativeText("关闭前要保存吗？")
+        btn_save = box.addButton("保存", QMessageBox.ButtonRole.AcceptRole)
+        btn_discard = box.addButton("不保存", QMessageBox.ButtonRole.DestructiveRole)
+        btn_cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(btn_save)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_cancel or clicked is None:
+            return "cancel"
+        return "save" if clicked is btn_save else "discard"
+
+    def _close_tab(self, index: int) -> None:
+        if not (0 <= index < self.tabs.count()):
+            return
+        is_current = index == self.tabs.current_index()
+        if is_current:
+            name = self._project_name
+            dirty = self._project_dirty
+        else:
+            name = self._documents[index]["name"]
+            dirty = bool(self._documents[index]["state"]["project_dirty"]) if self._documents[index]["state"] else False
+        if dirty:
+            choice = self._ask_close_tab(name)
+            if choice == "cancel":
+                return
+            if choice == "save":
+                if not is_current:
+                    self._switch_tab(index)
+                    is_current = True
+                if not self._save_project():
+                    return
+        self._documents.pop(index)
+        self.tabs.remove_tab(index)
+        if self.tabs.count() == 0:
+            self._new_tab(switch=True)
+            return
+        if is_current:
+            new_index = min(index, self.tabs.count() - 1)
+            self.tabs.set_current(new_index)
+            doc = self._documents[new_index]
+            self._restore_document(doc["state"])
+            doc["state"] = None
+        else:
+            self._refresh_tab_label()
+
+    def _tab_open_target(self) -> int:
+        """打开工程该落到哪个标签：当前标签是"没动过的空白页"就复用它（PS 的做法），
+        否则新开一个标签，避免把正在编辑的工程顶掉。"""
+        current = self.tabs.current_index()
+        if current < 0:
+            return self._new_tab(switch=False)
+        if (not self.actions and self.image_viewer._pixmap is None
+                and not self._project_dirty and self._project_path is None):
+            return current
+        return self._new_tab(name="新工程", switch=False)
 
     def _save_project(self, path: str | Path | None = None) -> bool:
         target = Path(path) if path else self._project_path
@@ -436,6 +724,10 @@ class MainWindow(QMainWindow):
             return False
         self._project_path = target
         self._project_dirty = False
+        # 文件名跟着工程走（除非用户双击标签改过名 —— 那种情况保留用户起的名字）
+        if not self._name_custom:
+            self._project_name = self._tab_name_for_path(target)
+        self._refresh_tab_label()
         self._set_project_title()
         self.lbl_status.setText(f"工程已保存：{target.name}")
         return True
@@ -452,29 +744,11 @@ class MainWindow(QMainWindow):
         return self._save_project(path)
 
     def _new_project(self) -> None:
-        """清空为空白工程。
+        """新建工程 —— 现在会**新开一个标签页**（原来是把当前工程清空）。
 
-        注意：按需求已从「文件」菜单移除（界面不再暴露入口），实现保留以便随时恢复
-        （本机没有 git，删掉就找不回来了）。需要重新挂到菜单时，加一个
-        ``QAction("新建工程")`` 连接到本方法即可。
+        入口在 文件 → 新建工程（Ctrl+N），也可以双击标签栏空白处。
         """
-        self._end_all_renames()
-        self.actions.clear()
-        self.action_list.clear()
-        viewer = self.image_viewer
-        viewer._detect_generation += 1
-        viewer._pixmap = None
-        viewer._source_images = []
-        viewer._frames = []
-        viewer._frame_logical = {}
-        viewer.set_current_action(None)
-        self.preview.set_action(None)
-        self.preview.set_source_pixmap(None)
-        self._project_path = None
-        self._project_dirty = False
-        self._reset_transform_history()
-        self._set_project_title()
-        self.lbl_status.setText("已新建空白工程")
+        self._new_tab()
 
     def _open_project_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "打开 SSTOOL 工程", "", "SSTOOL 工程 (*.sstool)")
@@ -482,16 +756,31 @@ class MainWindow(QMainWindow):
             self._open_project(path)
 
     def _open_project(self, path: str) -> bool:
+        """打开工程。落在哪个标签由 ``_tab_open_target`` 决定：
+
+        当前标签是"没动过的空白页"就直接用它，否则新开一个标签 —— 免得把正在编辑的
+        工程顶掉（PS 也是这个行为）。
+        """
+        index = self._tab_open_target()
+        was_current = index == self.tabs.current_index()
         try:
             manifest, sections = read_project(path)
             self._apply_sstool_project(manifest, sections)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "打开工程失败", str(exc))
             return False
+        self.tabs.set_current(index)
         self._project_path = Path(path)
         self._project_dirty = False
+        self._project_name = self._tab_name_for_path(self._project_path)
+        self._name_custom = False
+        self._documents[index]["state"] = None
+        self._documents[index]["name"] = self._project_name
+        self._documents[index]["dirty"] = False
+        self._refresh_tab_label()
         self._set_project_title()
-        self.lbl_status.setText(f"工程已打开：{self._project_path.name}")
+        self.lbl_status.setText(f"工程已打开：{self._project_path.name}"
+                               + ("" if was_current else "（新标签页）"))
         return True
 
     def _safe_open_project(self, path: str) -> None:
@@ -698,6 +987,15 @@ class MainWindow(QMainWindow):
         content.addWidget(self.splitter, 1)
         main_layout.addLayout(content, 1)
 
+        # 工程标签栏（矮条，类似 PS 的文档标签）：单击切换 / 双击重命名 /
+        # 双击空白处新建 / × 关闭 / + 新建
+        self.tabs = ProjectTabBar()
+        self.tabs.tab_selected.connect(self._switch_tab)
+        self.tabs.tab_close_requested.connect(self._close_tab)
+        self.tabs.tab_renamed.connect(self._rename_tab)
+        self.tabs.new_tab_requested.connect(lambda: self._new_tab())
+        main_layout.addWidget(self.tabs)
+
         # 状态栏
         self.lbl_status = QLabel(f"{__app_name__} v{__version__}  |  重构版")
         self.lbl_status.setStyleSheet("color: #888; font-size: 11px; padding: 2px 8px; background: #1a1a1a; border-top: 1px solid #333;")
@@ -708,8 +1006,8 @@ class MainWindow(QMainWindow):
         menubar.setStyleSheet("QMenuBar { background: #1a1a1a; color: #ddd; font-size: 12px; } QMenuBar::item:selected { background: #E91E63; }")
 
         # 布局：文件在左、编辑在右。
-        # 文件菜单分组：① 导入素材（添加图片 / 导入 JSON 工程）
-        #              ② 工程读写（打开 / 保存 / 另存为）
+        # 文件菜单分组：① 素材（添加图片 / 导入 JSON 工程）—— 按之前的要求放在最上面
+        #              ② 工程（新建 / 打开 / 保存 / 另存为）
         #              ③ 退出
         # 「检查更新」已移进 编辑 → 软件设置…（软件级开关和更新放一起）。
         file_menu = menubar.addMenu("文件")
@@ -721,6 +1019,10 @@ class MainWindow(QMainWindow):
         act_import.triggered.connect(self._import_json_dialog)
         file_menu.addAction(act_import)
         file_menu.addSeparator()
+        act_new = QAction("新建工程", self)
+        act_new.setShortcut(QKeySequence.StandardKey.New)
+        act_new.triggered.connect(self._new_project)
+        file_menu.addAction(act_new)
         act_open_project = QAction("打开工程…", self)
         act_open_project.setShortcut(QKeySequence.StandardKey.Open)
         act_open_project.triggered.connect(self._open_project_dialog)
@@ -743,6 +1045,8 @@ class MainWindow(QMainWindow):
         act_undo.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         act_undo.triggered.connect(self._undo_stack.undo)
         edit_menu.addAction(act_undo)
+        # 撤销栈是「每个文档一份」，切标签时要把它接到当前文档的那份上
+        self._act_undo = act_undo
         edit_menu.addSeparator()
         act_settings = QAction("软件设置…", self)
         act_settings.triggered.connect(self._open_settings)
@@ -878,12 +1182,72 @@ class MainWindow(QMainWindow):
         except RuntimeError:
             pass
 
-    def closeEvent(self, event) -> None:
-        """关闭窗口前先收尾原图区（停检测线程 + 卸下全局事件过滤器）。
+    def _dirty_tab_names(self) -> list[tuple[int, str]]:
+        """列出所有有未保存改动的标签：(索引, 名字)。"""
+        out = []
+        current = self.tabs.current_index()
+        for index in range(self.tabs.count()):
+            if index == current:
+                dirty = self._project_dirty
+                name = self._project_name
+            else:
+                state = self._documents[index]["state"] if index < len(self._documents) else None
+                dirty = bool(state and state["project_dirty"])
+                name = self._documents[index]["name"] if index < len(self._documents) else ""
+            if dirty:
+                out.append((index, name))
+        return out
 
-        不做这两件事会导致随机闪退（原生 access violation）：检测线程在跑时宿主被
+    def _ask_quit_dirty(self, names: list[str]) -> str:
+        """退出前询问多个未保存的工程。返回 "save" / "discard" / "cancel"。
+
+        offscreen（回归脚本）下**不弹窗**，直接按"不保存"处理 —— 否则任何
+        "改点东西再 win.close()" 的脚本都会卡在模态框上，跑批时表现为假死。
+        真实运行时 QT_QPA_PLATFORM 不是 offscreen，照常弹窗。
+        """
+        if not self._ui_interactive():
+            return "discard"
+        shown = "\n".join(f"· {name}" for name in names[:8])
+        more = f"\n… 以及另外 {len(names) - 8} 个" if len(names) > 8 else ""
+        box = QMessageBox(self)
+        box.setWindowTitle("退出前保存")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(f"有 {len(names)} 个工程还没保存：")
+        box.setInformativeText(f"{shown}{more}\n\n退出前要保存它们吗？")
+        btn_save = box.addButton("全部保存", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("不保存退出", QMessageBox.ButtonRole.DestructiveRole)
+        btn_cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(btn_save)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_cancel or clicked is None:
+            return "cancel"
+        return "save" if clicked is btn_save else "discard"
+
+    def _save_all_dirty_tabs(self) -> bool:
+        """逐个保存有改动的标签；任何一个取消就整体放弃（返回 False）。"""
+        for index, _name in self._dirty_tab_names():
+            if index != self.tabs.current_index():
+                self._switch_tab(index)
+            if not self._save_project():
+                return False
+        return True
+
+    def closeEvent(self, event) -> None:
+        """关闭窗口前：先处理未保存的标签，再收尾原图区。
+
+        收尾这两件事不做会导致随机闪退（原生 access violation）：检测线程在跑时宿主被
         析构、或 app 级事件过滤器指向已释放对象。参见 ``ImageViewer.shutdown``。
         """
+        dirty = self._dirty_tab_names()
+        if dirty:
+            choice = self._ask_quit_dirty([name for _i, name in dirty])
+            if choice == "cancel":
+                event.ignore()
+                return
+            if choice == "save" and not self._save_all_dirty_tabs():
+                event.ignore()
+                return
         self._stop_update_thread()
         self.image_viewer.shutdown()
         super().closeEvent(event)
