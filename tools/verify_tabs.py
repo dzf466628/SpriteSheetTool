@@ -224,6 +224,12 @@ def main() -> int:
     bar, img = rendered(["甲工程", "乙工程", "丙工程"], dirty_index=1, current=0)
     rects = bar.tab_rects()
     check("画出来的高度就是 26", img.height() == 26, f"实际 {img.height()}")
+    # 标签右侧的空白必须是标签栏底色，不能是窗口默认底色
+    blank_x = min(img.width() - 5, bar.plus_rect().right() + 40)
+    blank = img.pixelColor(blank_x, img.height() // 2)
+    check("标签栏空白处铺了底色（不是窗口默认色）",
+          (blank.red(), blank.green(), blank.blue()) == (0x1A, 0x1A, 0x1A),
+          f"({blank_x},{img.height() // 2}) 实际 {blank.red(), blank.green(), blank.blue()}")
     # 活动标签顶部那条品牌玫红
     active = rects[0]
     pink = img.pixelColor(active.left() + 10, 0)

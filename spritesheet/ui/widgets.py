@@ -231,6 +231,8 @@ class ProjectTabBar(QWidget):
     CLOSE_W = 14          # 关闭按钮宽度
     GAP = 2               # 标签间距
     PLUS_W = 26
+    BG = "#1a1a1a"
+    LINE = "#333333"
 
     tab_selected = pyqtSignal(int)
     tab_close_requested = pyqtSignal(int)
@@ -336,6 +338,15 @@ class ProjectTabBar(QWidget):
     # ---- 绘制 ----
     def paintEvent(self, event) -> None:  # noqa: ARG002
         painter = QPainter(self)
+        # 自己铺底色，让标签栏真正用它自己声明的 #1a1a1a。
+        # 重写了 paintEvent 的 QWidget 子类不会自动画样式表背景；不铺的话露出来的是
+        # 父控件的底色（#232323），标签栏就和它自己的声明不一致了。
+        # 注：这不是"白条"那类问题 —— 套上全局 QSS 后露出的本来就是深色父底，
+        # 详见 tools/inspect_theme.py 的说明。
+        painter.fillRect(self.rect(), QColor(self.BG))
+        # 上边缘分隔线先画，标签随后盖上去 —— 活动标签那条品牌玫红要能压住它
+        painter.setPen(QPen(QColor(self.LINE)))
+        painter.drawLine(0, 0, self.width(), 0)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         fm = self._fm()
         painter.setFont(QFont("Microsoft YaHei UI", -1, QFont.Weight.Normal, False))
@@ -683,6 +694,10 @@ class _Ruler(QWidget):
 
     def paintEvent(self, event):
         p = QPainter(self)
+        # 注：这里不铺底色。实测（tools/inspect_theme.py + 一个最小复现）：
+        # 套上全局 QSS 后，重写了 paintEvent 的子控件即使什么都不铺，露出来的也是
+        # **父控件的底色**（深色），不是窗口默认的浅灰。之前看到"标尺是浅灰条"是
+        # 测试脚本没套 QSS 造成的假象，不是真实缺陷。
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         # 无图片时用画布尺寸作为虚拟文档尺寸，刻度从0开始（PS 行为）
         if self._viewer._pixmap and not self._viewer._pixmap.isNull():
