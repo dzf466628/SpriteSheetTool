@@ -139,6 +139,45 @@ def synth_cases():
     return cases
 
 
+# ---------------- adversarial detection cases ----------------
+def adversarial_cases():
+    """边界用例：对角接触不得连通、阈值边界、细线、棋盘格等。
+
+    '#'=不透明(255)  '.'=恰好等于阈值(10)  '~'=低于阈值(9)
+    """
+    rng = random.Random(4242)
+    out = []
+
+    def from_mask(name, mask):
+        h = len(mask)
+        w = len(mask[0]) if h else 0
+        img = QImage(w, h, QImage.Format.Format_ARGB32)
+        img.fill(QColor(0, 0, 0, 0))
+        for y, row in enumerate(mask):
+            for x, ch in enumerate(row):
+                if ch == "#":
+                    img.setPixelColor(x, y, QColor(255, 0, 0, 255))
+                elif ch == ".":
+                    img.setPixelColor(x, y, QColor(255, 0, 0, 10))
+                elif ch == "~":
+                    img.setPixelColor(x, y, QColor(255, 0, 0, 9))
+        out.append((name, img))
+
+    from_mask("对角接触（不得连通，应为 3 个）", ["#~~", "~#~", "~~#"])
+    from_mask("单像素散点（应为 4 个）", ["#~#", "~~~", "#~#"])
+    from_mask("细十字（应为 1 个）", ["~~#~~", "~~#~~", "#####", "~~#~~", "~~#~~"])
+    from_mask("阈值边界（. 恰好达标 / ~ 不达标，应为 2 个）", ["#.~", "..~", "~~."])
+    from_mask("全满（应为 1 个）", ["###", "###", "###"])
+    from_mask("回字形含洞（应为 1 个）", ["####", "#~~#", "#~~#", "####"])
+    from_mask("棋盘格（4 连通应为 13 个）",
+              ["#~#~#", "~#~#~", "#~#~#", "~#~#~", "#~#~#"])
+    from_mask("楼梯形阶梯（4 连通应为 1 个）", ["##~~", "~##~", "~~##"])
+    for w, h in ((37, 23), (64, 40)):
+        from_mask(f"随机细碎 {w}x{h}",
+                  ["".join(rng.choice("#~") for _ in range(w)) for _ in range(h)])
+    return out
+
+
 def main():
     app = QApplication(sys.argv)
     import time
@@ -212,10 +251,16 @@ def main():
             p.fillRect(QRect(rng.randrange(w), rng.randrange(h), 3, 2), QColor(255, 0, 0, 255))
         p.end()
         det_cases.append((f"synthetic {w}x{h}", pm))
+    det_cases.extend(adversarial_cases())
 
     bad = 0
     for name, src in det_cases:
-        img = src.toImage() if isinstance(src, QPixmap) else QImage(str(src))
+        if isinstance(src, QPixmap):
+            img = src.toImage()
+        elif isinstance(src, QImage):
+            img = src          # 注意：不能走 QImage(str(src))，那会被当成路径
+        else:
+            img = QImage(str(src))
         t0 = time.perf_counter()
         ref = detect_reference(img)
         t_ref = time.perf_counter() - t0

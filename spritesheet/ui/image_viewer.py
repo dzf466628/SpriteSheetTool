@@ -36,21 +36,24 @@ MAX_ZOOM = 20
 
 
 def _detect_frames_image(img: QImage, alpha_threshold: int = 10) -> list[tuple[int, int, int, int]]:
-    """在工作线程中检测 QImage 的连通区域。
+    """在工作线程中检测 QImage 的连通区域（行程 + 并查集）。
 
-    性能：原实现有两层纯 Python 全图循环（外层扫描 w*h 个像素，内层对每个
-    连通像素做 4 邻域判定），2048x2048 实测约 1.7s。这里做三处**等价**优化：
+    结果与最初的逐像素 4 连通 flood fill **完全等价**：同一批连通域、同样的包围盒、
+    同样的发现顺序（自上行下行、同行自左向右）。区别只在实现：
 
-    1. alpha 通道一次性切出（C 层切片），内层不再做 ``i*4+3`` 索引运算；
-    2. 整行 alpha 都低于阈值时整行跳过（C 层 ``max`` 一次判定）；
-    3. 行内透明像素用 ``lstrip`` 成段跳过，不再逐像素判定。
+    1. alpha 通道一次切出，再用 ``bytes.translate`` 把「是否达标」压成 0/1 掩码
+       （全图一次 C 层调用）；
+    2. 逐行用 ``split(b"\\x00")`` 切出**连续不透明行程**，Python 只遍历行程，
+       不再遍历像素；
+    3. 相邻两行的行程若列区间有重叠（共享至少一列 = 上下相邻 = 4 连通）就合并，
+       用并查集维护连通域。
 
-    透明像素永远不会被入栈（邻域判定本身就带阈值），因此跳过它们**不影响**
-    连通域结果；元素发现顺序（自上而下、自左而右）与原实现完全一致。
+    复杂度从 O(w*h) 次 Python 迭代降到 O(行程数) 次；2048x2048 实测约 1.4s → 数十毫秒。
     """
     if img is None or img.isNull():
         return []
-    if alpha_threshold > 255:
+    threshold = int(alpha_threshold)
+    if threshold > 255:
         return []  # alpha 上限 255，不可能有像素达标（与原实现等价）
     img = img.convertToFormat(QImage.Format.Format_ARGB32)
     w, h = img.width(), img.height()
@@ -67,55 +70,75 @@ def _detect_frames_image(img: QImage, alpha_threshold: int = 10) -> list[tuple[i
         alpha = b"".join(
             data[y * stride + 3:y * stride + w * 4:4] for y in range(h)
         )
-    # 低于阈值的字节集合，供 lstrip 成段跳过透明像素
-    below = bytes(range(max(0, min(255, int(alpha_threshold)))))
-    visited = bytearray(w * h)
-    frames = []
-    for sy in range(h):
-        row_base = sy * w
-        row = alpha[row_base:row_base + w]
-        if max(row) < alpha_threshold:
-            continue                 # 整行有效像素为 0：跳过
-        sx = 0
-        while sx < w:
-            if row[sx] < alpha_threshold:
-                rest = row[sx:]
-                sx += len(rest) - len(rest.lstrip(below))
-                continue
-            start = row_base + sx
-            if visited[start]:
-                sx += 1
-                continue
-            stack = [start]
-            visited[start] = 1
-            min_x = max_x = sx
-            min_y = max_y = sy
-            while stack:
-                pos = stack.pop()
-                cy, cx = divmod(pos, w)   # divmod 返回 (商, 余数) = (行, 列)
-                if cx < min_x: min_x = cx
-                if cx > max_x: max_x = cx
-                if cy < min_y: min_y = cy
-                if cy > max_y: max_y = cy
-                if cx > 0:
-                    ni = pos - 1
-                    if not visited[ni] and alpha[ni] >= alpha_threshold:
-                        visited[ni] = 1; stack.append(ni)
-                if cx + 1 < w:
-                    ni = pos + 1
-                    if not visited[ni] and alpha[ni] >= alpha_threshold:
-                        visited[ni] = 1; stack.append(ni)
-                if cy > 0:
-                    ni = pos - w
-                    if not visited[ni] and alpha[ni] >= alpha_threshold:
-                        visited[ni] = 1; stack.append(ni)
-                if cy + 1 < h:
-                    ni = pos + w
-                    if not visited[ni] and alpha[ni] >= alpha_threshold:
-                        visited[ni] = 1; stack.append(ni)
-            frames.append((min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
-            sx += 1
-    return frames
+
+    # 达标 → 1，不达标 → 0；threshold <= 0 时全部为 1（与 alpha >= threshold 等价）
+    table = bytes(1 if v >= threshold else 0 for v in range(256))
+    mask = alpha.translate(table)
+
+    # ---- 1) 逐行切出行程 (y, x0, x1)，均为闭区间 ----
+    runs: list[tuple[int, int, int]] = []
+    for y in range(h):
+        row = mask[y * w:(y + 1) * w]
+        if b"\x01" not in row:           # 整行无有效像素（C 层一次判定）
+            continue
+        pos = 0
+        for seg in row.split(b"\x00"):
+            length = len(seg)
+            if length:
+                runs.append((y, pos, pos + length - 1))
+            pos += length + 1            # +1 跳过被 split 吃掉的这个分隔字节
+    if not runs:
+        return []
+
+    # ---- 2) 相邻行行程两两合并（并查集 + 双指针）----
+    parent = list(range(len(runs)))
+
+    def find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]   # 路径折半
+            a = parent[a]
+        return a
+
+    by_row: dict[int, list[int]] = {}
+    for idx, (y, _x0, _x1) in enumerate(runs):
+        by_row.setdefault(y, []).append(idx)
+
+    for idx, (y, x0, x1) in enumerate(runs):
+        prev = by_row.get(y - 1)
+        if not prev:
+            continue
+        j = 0
+        while j < len(prev) and runs[prev[j]][2] < x0:
+            j += 1                       # 跳过在上行中、结束于本行程左侧的行程
+        k = j
+        while k < len(prev) and runs[prev[k]][1] <= x1:
+            ra, rb = find(idx), find(prev[k])
+            if ra != rb:
+                parent[ra] = rb
+            k += 1
+
+    # ---- 3) 汇总包围盒 + 复现发现顺序 ----
+    boxes: dict[int, list[int]] = {}     # root -> [left, top, right, bottom]
+    first: dict[int, tuple[int, int]] = {}   # root -> 发现点（最上行、该行最左列）
+    for idx, (y, x0, x1) in enumerate(runs):
+        root = find(idx)
+        box = boxes.get(root)
+        if box is None:
+            boxes[root] = [x0, y, x1, y]
+            first[root] = (y, x0)
+        else:
+            if x0 < box[0]:
+                box[0] = x0
+            if x1 > box[2]:
+                box[2] = x1
+            if y > box[3]:
+                box[3] = y
+
+    found = [(first[root][0], first[root][1],
+              box[0], box[1], box[2] - box[0] + 1, box[3] - box[1] + 1)
+             for root, box in boxes.items()]
+    found.sort(key=lambda f: (f[0], f[1]))   # 与逐像素扫描的发现顺序一致
+    return [(left, top, width, height) for _, _, left, top, width, height in found]
 
 
 class _FrameDetectThread(QThread):
