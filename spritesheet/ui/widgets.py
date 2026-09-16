@@ -46,14 +46,19 @@ _APP_ROOT = Path(__file__).resolve().parent.parent.parent
 _ICONS_DIR = _APP_ROOT / "icons"
 
 
-def make_tool_icon(kind: str, size: int = 18) -> QIcon:
+def make_tool_icon(kind: str, size: int = 18, color: str | None = None) -> QIcon:
+    """从 icons/ 目录加载 SVG 图标。
+
+    染色：``color`` 指定时整枚图标染成该色（SourceIn）；不指定时
+    bg_black / bg_white 这两个按名字染黑/白（历史行为，别动）。
+    """
     path = _ICONS_DIR / f"{kind}.svg"
     if not path.exists():
         # fallback: 简单绘制
         pm = QPixmap(size, size)
         pm.fill(Qt.GlobalColor.transparent)
         p = QPainter(pm)
-        p.setPen(QPen(QColor("#d8d8d8"), 1.5))
+        p.setPen(QPen(QColor(color or "#d8d8d8"), 1.5))
         p.drawRect(2, 2, size - 4, size - 4)
         p.end()
         return QIcon(pm)
@@ -63,12 +68,13 @@ def make_tool_icon(kind: str, size: int = 18) -> QIcon:
     p = QPainter(pm)
     renderer.render(p)
     p.end()
-    # bg_black / bg_white 需要染色
-    if kind in ("bg_black", "bg_white"):
-        color = QColor("#000000") if kind == "bg_black" else QColor("#FFFFFF")
+    tint = color
+    if tint is None and kind in ("bg_black", "bg_white"):
+        tint = "#000000" if kind == "bg_black" else "#FFFFFF"
+    if tint:
         p3 = QPainter(pm)
         p3.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-        p3.fillRect(pm.rect(), color)
+        p3.fillRect(pm.rect(), QColor(tint))
         p3.end()
     return QIcon(pm)
 
@@ -256,6 +262,8 @@ class ProjectTabBar(QWidget):
     GAP = 4               # 标签间距
     PLUS_W = 26
     TEXT_DROP = 2         # 文件名整体下移的像素数
+    # 关闭叉号再往下压一点，与工程名的文字横向对齐（用户要求 ~3px）
+    CLOSE_DROP = 3
     MIN_W = 96            # 标签最小宽度（比原来宽，名字短的也不会挤成一小块）
     BG = "#1a1a1a"
     LINE = "#333333"
@@ -388,7 +396,7 @@ class ProjectTabBar(QWidget):
 
     def _close_rect(self, index: int) -> QRect:
         rect = self.tab_rects()[index]
-        return QRect(rect.right() - self.CLOSE_W - 2, rect.top() + 5,
+        return QRect(rect.right() - self.CLOSE_W - 2, rect.top() + 5 + self.CLOSE_DROP,
                      self.CLOSE_W - 2, rect.height() - 10)
 
     def _index_at(self, pos) -> int:
@@ -899,6 +907,28 @@ _SLIDER_QSS = (
     "QSlider::handle:horizontal:hover { background: #F06292; }"
     # 垂直：与水平完全同款（圆点手柄，尺寸一致）
     "QSlider::groove:vertical { width: 2px; background: #3d3d3d; border-radius: 1px; }"
+    "QSlider::handle:vertical { width: 8px; height: 8px; margin: 0 -3px;"
+    " background: #E91E63; border-radius: 4px; }"
+    "QSlider::handle:vertical:hover { background: #F06292; }"
+)
+
+# 双向滑块的样式：和上面同款，但**不填 sub-page**。
+# 为什么：QSlider 的 sub-page 是"从最左端填到当前值"的进度条，用在 0~N 的滑块上很对
+# （fps / 透明度就用那个），但偏移这类**以 0 为中心**的滑块上，值为 0 时会左半边全亮、
+# 右半边全暗 —— 看着像"只填了一半"而不是"在中间"（用户报的"左右滑块好像不是居中的"
+# 就是这个观感；实测手柄本身其实正好在中线，偏差 0.5px）。
+# 去掉填充后，"是不是居中"完全由手柄位置表达，没有歧义。
+_BIPOLAR_SLIDER_QSS = (
+    "QSlider { background: transparent; border: none; }"
+    "QSlider::groove:horizontal { height: 2px; background: #3d3d3d; border-radius: 1px; }"
+    "QSlider::sub-page:horizontal { background: transparent; }"
+    "QSlider::add-page:horizontal { background: transparent; }"
+    "QSlider::handle:horizontal { width: 8px; height: 8px; margin: -3px 0;"
+    " background: #E91E63; border-radius: 4px; }"
+    "QSlider::handle:horizontal:hover { background: #F06292; }"
+    "QSlider::groove:vertical { width: 2px; background: #3d3d3d; border-radius: 1px; }"
+    "QSlider::sub-page:vertical { background: transparent; }"
+    "QSlider::add-page:vertical { background: transparent; }"
     "QSlider::handle:vertical { width: 8px; height: 8px; margin: 0 -3px;"
     " background: #E91E63; border-radius: 4px; }"
     "QSlider::handle:vertical:hover { background: #F06292; }"

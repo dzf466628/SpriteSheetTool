@@ -236,6 +236,35 @@ def main() -> int:
           f"0° 差 {mask_diff(idle_mask, zero)} vs 30° 差 {mask_diff(idle_mask, thirty)}")
 
     print()
+    print("=== 6. 关闭叉号与工程名横向对齐（用户要求下移约 3px）===")
+    # 工程名的墨迹范围：从文字起点到叉号左边（留出间隙）
+    name_rect = close_bar.tab_rects()[0]
+    name_left = name_rect.left() + ProjectTabBar.PAD_X
+    name_right = close_rect.left() - 4
+    # 从第 4 行起量：0~1 行是活动标签顶部那条品牌玫红，会把范围撑到整条标签。
+    name_rows = [y for y in range(4, close_bar.height())
+                 for x in range(name_left, name_right)
+                 if idle_image.pixelColor(x, y).alpha() > 60
+                 and idle_image.pixelColor(x, y).lightness() > 110]
+    close_rows = [y for y in range(close_rect.top() - 4, close_rect.bottom() + 4)
+                  for x in range(close_rect.left(), close_rect.right())
+                  if idle_image.pixelColor(x, y).alpha() > 60
+                  # 未悬停的叉号是灰的 #6a6a6a（lightness 106），阈值要比名字低一点，
+                  # 但又要高于标签底色 #2b2b2b（43）。
+                  and idle_image.pixelColor(x, y).lightness() > 90]
+    if name_rows and close_rows:
+        name_center = (min(name_rows) + max(name_rows)) / 2
+        close_center = (min(close_rows) + max(close_rows)) / 2
+        print(f"  工程名墨迹 y[{min(name_rows)},{max(name_rows)}] 中心 {name_center:.1f}；"
+              f"叉号墨迹 y[{min(close_rows)},{max(close_rows)}] 中心 {close_center:.1f}")
+        check("叉号与工程名横向对齐（中心相差 <= 2px）",
+              abs(name_center - close_center) <= 2.0,
+              f"差 {abs(name_center - close_center):.1f}px")
+    else:
+        check("能量到工程名与叉号的墨迹", False,
+              f"name_rows={bool(name_rows)} close_rows={bool(close_rows)}")
+
+    print()
     if FAILURES:
         print("GLYPHS FAILED：", *FAILURES, sep="\n  - ")
         return 1

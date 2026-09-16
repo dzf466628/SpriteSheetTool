@@ -128,6 +128,26 @@ def main() -> int:
     win.preview.setFixedWidth(420)
     app.processEvents()
 
+    print()
+    print("=== 4. 「清空变换」是红色的（与其他按钮反着，证明它是动作不是模式）===")
+    clear = panel.btn_clear_transform
+    sheet = clear.styleSheet()
+    print(f"  按钮宽 {clear.width()} 高 {clear.height()}")
+    check("平时就是红字红边（color / border 都是品牌红）",
+          "color: #E91E63" in sheet and "border: 1px solid #E91E63" in sheet)
+    check("悬停时反相成红底（background: #E91E63）",
+          ":hover" in sheet and "background: #E91E63" in sheet)
+    icon_image = clear.icon().pixmap(14, 14).toImage()
+    red_pixels = 0
+    for y in range(icon_image.height()):
+        for x in range(icon_image.width()):
+            c = icon_image.pixelColor(x, y)
+            if c.alpha() > 60 and c.red() - c.green() > 40 and c.red() - c.blue() > 20:
+                red_pixels += 1
+    print(f"  图标里的红色像素 {red_pixels}")
+    check("按钮图标也是红色的", red_pixels >= 3, f"红色像素 {red_pixels}")
+    check("按钮够宽放得下「清空变换」四个字", clear.width() >= 72, f"宽 {clear.width()}")
+
     win.close()
     print()
     if FAILURES:

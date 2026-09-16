@@ -35,7 +35,7 @@ from .transform import (
 )
 from .widgets import (
     CompactComboBox, CompactSpinBox, EditableNumberLabel, ResponsiveButtonGrid,
-    _GROUP_QSS, _SLIDER_QSS, make_tool_icon, paint_checkerboard,
+    _BIPOLAR_SLIDER_QSS, _GROUP_QSS, _SLIDER_QSS, make_tool_icon, paint_checkerboard,
 )
 
 # 四角顺序（与 DEFAULT_QUAD 一致）：0=左上 1=右上 2=右下 3=左下。
@@ -1129,8 +1129,20 @@ class AnimAdjustPanel(QWidget):
         self.btn_mode_distort = self._small_btn("扭曲", "扭曲：点击后在预览上拖角点（单角自由）；按住 Shift 锁横/竖", "distort")
         self.btn_mirror_h = self._small_btn("水平镜像", "水平镜像（左右翻转）", "mirror_h")
         self.btn_mirror_v = self._small_btn("垂直镜像", "垂直镜像（上下翻转）", "mirror_v")
-        self.btn_clear_transform = self._small_btn("清空变换", "清空当前帧的 旋转 / 镜像 / 透视 / 旋转中心（帧偏移不动）", "clear")
-        self.btn_clear_transform.setCheckable(False)
+        # 清空变换：**红色**（与其他按钮"反着"）—— 别的按钮平时是灰字灰边、悬停才显红，
+        # 它平时就是红字红边 + 红色图标，悬停反相成红底白字，一眼能看出它是个"动作"
+        # 而不是模式。所以不走 _small_btn（那个是 24x24 定尺、灰底样式）。
+        self.btn_clear_transform = QPushButton("清空变换")
+        self.btn_clear_transform.setToolTip(
+            "清空当前帧的 旋转 / 镜像 / 透视 / 旋转中心（帧偏移不动）")
+        self.btn_clear_transform.setIcon(make_tool_icon("reset", 14, color="#E91E63"))
+        self.btn_clear_transform.setIconSize(QSize(14, 14))
+        self.btn_clear_transform.setStyleSheet(
+            "QPushButton { background: #2b2b2b; border: 1px solid #E91E63; border-radius: 3px;"
+            " color: #E91E63; font-size: 11px; font-weight: bold; }"
+            "QPushButton:hover { background: #E91E63; border-color: #E91E63; color: #ffffff; }"
+            "QPushButton:pressed { background: #C2185B; border-color: #C2185B; color: #ffffff; }"
+        )
         self._mode_group = QButtonGroup(self)
         self._mode_group.setExclusive(True)
         mode_buttons = (self.btn_mode_rotate, self.btn_mode_scale, self.btn_mode_skew,
@@ -1234,20 +1246,22 @@ class AnimAdjustPanel(QWidget):
         self.btn_reset = self._small_btn("", "重置当前帧偏移", "reset")
         self.btn_reset.clicked.connect(self._reset_frame_offset)
 
-        # 水平滑块（下方）与垂直滑块（右侧）：用于大幅调节偏移
+        # 水平滑块（下方）与垂直滑块（右侧）：用于大幅调节偏移。
+        # 用**双向**样式（不填 sub-page）：这两个滑块以 0 为中心（-200~+200），
+        # 用普通样式时值为 0 会左半边全亮，看着像"只填了一半"而不是"在中间"。
         self.slider_off_h = QSlider(Qt.Orientation.Horizontal)
         self.slider_off_h.setRange(-200, 200)
         self.slider_off_h.setValue(0)
         self.slider_off_h.setFixedHeight(20)
-        self.slider_off_h.setStyleSheet(_SLIDER_QSS)
-        self.slider_off_h.setToolTip("大幅调节水平偏移（-200 ~ +200）")
+        self.slider_off_h.setStyleSheet(_BIPOLAR_SLIDER_QSS)
+        self.slider_off_h.setToolTip("大幅调节水平偏移（-200 ~ +200，居中为 0）")
         self.slider_off_h.valueChanged.connect(self._on_offset_slider_h)
         self.slider_off_v = QSlider(Qt.Orientation.Vertical)
         self.slider_off_v.setRange(-200, 200)
         self.slider_off_v.setValue(0)
         self.slider_off_v.setFixedWidth(20)
-        self.slider_off_v.setStyleSheet(_SLIDER_QSS)
-        self.slider_off_v.setToolTip("大幅调节垂直偏移（-200 ~ +200，向上为负）")
+        self.slider_off_v.setStyleSheet(_BIPOLAR_SLIDER_QSS)
+        self.slider_off_v.setToolTip("大幅调节垂直偏移（-200 ~ +200，居中为 0，向上为负）")
         self.slider_off_v.valueChanged.connect(self._on_offset_slider_v)
 
         offset_grid = QGridLayout()
@@ -1484,8 +1498,19 @@ class AnimAdjustPanel(QWidget):
         self.changed.emit()
 
     def set_current_frame(self, idx: int):
+        """切帧：同步变换控件**和偏移控件**。
+
+        偏移控件以前没同步 —— 切到没有偏移的帧，滑块还停在上一个帧的位置。
+        后果是看起来"偏移是所有帧共用的"、而且"滑块不居中"（用户报的就是这两句）。
+        实测：第 0 帧设 (30,-12) 后切到第 1 帧，滑块仍显示 (30,-12)、数字框也一样，
+        而 frame_offsets 里其实只有 0 号帧。数据层一直是逐帧的，坏的是显示。
+        """
         self._current_frame = idx
         self._sync_transform_widgets()
+        if self._action and 0 <= idx < len(self._action.frames):
+            self._sync_offset_widgets(*self._action.frame_offsets.get(idx, (0, 0)))
+        else:
+            self._sync_offset_widgets(0, 0)
 
     def set_actions(self, actions: list):
         """提供动作列表引用，用于"数据复用"跨动作传播旋转/镜像。"""
