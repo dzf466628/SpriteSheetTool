@@ -810,10 +810,13 @@ class MainWindow(QMainWindow):
             self._show_update_dialog(info)
         elif self._notify_no_update:
             if status == "latest":
+                # 服务器版本与本地相同时不必赘述；只有服务器更旧（本地是自编译/未发布的
+                # 版本）时才补一句，否则会出现「已是最新 v1.1.21（服务器最新 v1.1.18）」
+                # 这种自相矛盾的提示。
+                server = str(info.get("version", ""))
+                detail = f"（服务器最高 v{server}）" if server and server != __version__ else ""
                 QMessageBox.information(
-                    self, "检查更新",
-                    f"当前已是最新版本 v{__version__}"
-                    f"（服务器最新 v{info.get('version', '')}）",
+                    self, "检查更新", f"当前已是最新版本 v{__version__}{detail}"
                 )
             elif status == "no_installer":
                 QMessageBox.warning(
