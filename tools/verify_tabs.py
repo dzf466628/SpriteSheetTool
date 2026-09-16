@@ -281,11 +281,12 @@ def main() -> int:
         check(f"第 {i} 个标签画出了文字", ink_count(img, rect) > 20,
               f"墨迹像素 {ink_count(img, rect)}")
 
-    # 脏标记：同一个标签，标脏后墨迹一定更多
+    # 未保存标记不画在标签上（曾经画过一个小圆点；详见 §11），所以标脏前后
+    # 这一格的渲染必须完全一样。标签渲染函数默认还是传 dirty_index=1，正好当反例用。
     _bar2, clean_img = rendered(["甲工程", "乙工程", "丙工程"], dirty_index=None, current=0)
     dirty_ink = ink_count(img, rects[1])
     clean_ink = ink_count(clean_img, rects[1])
-    check("脏标签比干净标签多画了标记", dirty_ink > clean_ink,
+    check("标脏不再改变标签外观（圆点已删）", dirty_ink == clean_ink,
           f"脏 {dirty_ink} vs 干净 {clean_ink}")
 
     print()
@@ -374,12 +375,13 @@ def main() -> int:
           f"进度 {bar2._close_progress:.2f}")
 
     print()
-    print("=== 11. 未保存圆点：选中的标签用品牌红，没选中的保持灰 ===")
-    # 用户原话：「选中工程名字后面的白点改成我们的红色 未选中工程不用管」。
-    # 改之前是把 " ●" 拼在名字后面当文字画 —— 于是它跟着文字色走，活动标签上是**白**的。
-    # 现在圆点单独绘制，颜色按"是不是当前标签"取。
-    def dot_scan(image, rect):
-        """在标签正文带（避开顶部玫红条）里数红色像素，并给出红像素的最右位置。"""
+    print("=== 11. 标签上**不画**未保存圆点（用户后来要求删掉）===")
+    # 历史：那个点最早是 `text += " ●"` 拼在名字后面当文字画的（跟着文字色 → 活动标签上
+    # 是白的）；v1.1.33 曾按"改成红色"的要求改成单独绘制，用户随后确认它不是有意设计的
+    # （「原来点不是你故意加的…不要了 删掉吧」），v1.1.34 整个删除。
+    # 未保存状态改由窗口标题的 " *" 表示，这条同时守住"别再手滑画回来"。
+    def band_scan(image, rect):
+        """扫标签正文带（避开顶部玫红条）里的红色像素与最右位置。"""
         red = 0
         rightmost = None
         for y in range(rect.top() + 3, rect.bottom() - 1):
@@ -389,35 +391,36 @@ def main() -> int:
                     rightmost = x if rightmost is None else max(rightmost, x)
         return red, rightmost
 
-    bar3, dirty_img = rendered(["甲工程", "乙工程"], dirty_index=None, current=0)
+    bar3, clean_img2 = rendered(["甲工程", "乙工程"], dirty_index=None, current=0)
+    rect_active, rect_idle = bar3.tab_rects()[0], bar3.tab_rects()[1]
+    clean_active_ink = ink_count(clean_img2, rect_active)
+    clean_idle_ink = ink_count(clean_img2, rect_idle)
     bar3.set_dirty(0, True)
     bar3.set_dirty(1, True)
     app.processEvents()
     dirty_img = bar3.grab().toImage()
-    rect_active, rect_idle = bar3.tab_rects()[0], bar3.tab_rects()[1]
-    red_active, right_active = dot_scan(dirty_img, rect_active)
-    red_idle, _ = dot_scan(dirty_img, rect_idle)
-    print(f"  两个标签都标脏：选中标签红色像素 {red_active}（最右 x={right_active}），"
-          f"未选中标签红色像素 {red_idle}")
-    check("选中的标签：圆点是品牌红", red_active >= 8, f"红色像素 {red_active}")
-    check("未选中的标签：圆点不红（保持灰）", red_idle == 0, f"红色像素 {red_idle}")
-    close_rect_active = bar3._close_rect(0)
-    check("红点画在名字之后、关闭叉号之前（不是叉号变红）",
-          right_active is not None and right_active < close_rect_active.left(),
-          f"红点最右 x={right_active}，叉号左边界 {close_rect_active.left()}")
-
-    # 干净标签不该有红点
-    bar4, clean_img2 = rendered(["甲工程", "乙工程"], dirty_index=None, current=0)
-    red_clean, _ = dot_scan(clean_img2, bar4.tab_rects()[0])
-    check("干净标签没有红点", red_clean == 0, f"红色像素 {red_clean}")
-
-    # 未选中标签标脏后墨迹要变多（证明灰点确实画了）
-    bar5, idle_clean = rendered(["甲工程", "乙工程"], dirty_index=None, current=0)
-    ink_clean = ink_count(idle_clean, bar5.tab_rects()[1])
-    ink_dirty = ink_count(dirty_img, rect_idle)
-    print(f"  未选中标签：干净 {ink_clean} 墨迹 -> 标脏 {ink_dirty} 墨迹")
-    check("未选中标签标脏后确实多画了灰点", ink_dirty > ink_clean,
-          f"{ink_clean} -> {ink_dirty}")
+    red_active, right_active = band_scan(dirty_img, rect_active)
+    red_idle, _ = band_scan(dirty_img, rect_idle)
+    print(f"  两个标签都标脏：选中标签红色像素 {red_active}，未选中 {red_idle}；"
+          f"选中标签墨迹 {clean_active_ink} -> {ink_count(dirty_img, rect_active)}")
+    check("选中的标签不再画红点", red_active == 0, f"红色像素 {red_active}")
+    check("未选中的标签也不再画灰点（脏/干净渲染完全一致）",
+          ink_count(dirty_img, rect_idle) == clean_idle_ink,
+          f"{clean_idle_ink} -> {ink_count(dirty_img, rect_idle)}")
+    check("选中标签的渲染也不受脏标记影响",
+          ink_count(dirty_img, rect_active) == clean_active_ink,
+          f"{clean_active_ink} -> {ink_count(dirty_img, rect_active)}")
+    check("标签栏仍然记得脏状态（只是不画出来）",
+          bar3.is_dirty(0) is True and bar3.is_dirty(1) is True)
+    # 未保存状态仍然可见：窗口标题带 " *"（圆点删了之后，这是唯一的常驻提示）
+    win._project_dirty = False
+    win._set_project_title()
+    clean_title = win.windowTitle()
+    win._mark_project_dirty()
+    dirty_title = win.windowTitle()
+    print(f"  窗口标题：干净 {clean_title!r} -> 脏 {dirty_title!r}")
+    check("干净工程的标题没有 * 号", "*" not in clean_title, clean_title)
+    check("未保存标记改在窗口标题上（* 号）", "*" in dirty_title, dirty_title)
 
     print()
     print(f"TABS FAILED {len(FAILURES)}" if FAILURES else "TABS OK")

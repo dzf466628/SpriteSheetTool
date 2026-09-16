@@ -251,7 +251,8 @@ class ProjectTabBar(QWidget):
       * 点末尾的 +    -> ``new_tab_requested``
 
     自己画而不是用 QTabBar：QTabBar 的最小高度跟着样式走（系统样式下三十多像素），
-    这里要的是"矮"一条；而且需要标签上的脏标记与就地改名。
+    这里要的是"矮"一条；而且需要就地改名与自绘的关闭叉号。
+    （未保存圆点曾经也画在这里，v1.1.34 按用户要求删掉了。）
     """
 
     HEIGHT = 26
@@ -272,9 +273,6 @@ class ProjectTabBar(QWidget):
     CLOSE_HOVER_MS = 130         # 悬停动画时长
     CLOSE_ROTATE = 30.0          # 悬停时叉号旋转的角度（用户要求：转 30° 变红，不要红底）
     CLOSE_GLYPH = "✕"            # 叉号字符（U+2715；想用更细的 × 改成 "×"）
-    DIRTY_R = 2.5                # 未保存小圆点的半径
-    DIRTY_GAP = 4                # 名字与圆点之间的间距
-    DIRTY_IDLE = "#9a9a9a"       # 未选中标签的圆点颜色（跟着名字的灰）
 
     tab_selected = pyqtSignal(int)
     tab_close_requested = pyqtSignal(int)
@@ -334,6 +332,11 @@ class ProjectTabBar(QWidget):
         return self._tabs[index]["name"]
 
     def is_dirty(self, index: int) -> bool:
+        """该标签对应的文档有没有未保存的改动。
+
+        注：这个标记**不再画在标签上**（曾经是名字后面的一个小圆点，v1.1.34 删除）。
+        标签栏只保存状态供主窗口/回归读取；未保存提示在窗口标题的 " *" 上。
+        """
         return bool(self._tabs[index]["dirty"])
 
     def add_tab(self, name: str, dirty: bool = False, tooltip: str = "",
@@ -445,7 +448,6 @@ class ProjectTabBar(QWidget):
                 painter.drawRect(rect.left() + 4, rect.top(), rect.width() - 8, 2)
 
             text = self._tabs[index]["name"]
-            dirty = bool(self._tabs[index]["dirty"])
             painter.setPen(QPen(QColor("#e8e8e8" if active else "#9a9a9a")))
             # 文字整体下移 TEXT_DROP：竖直居中时贴着上面那条玫红/分隔线太挤。
             # 上下边都要 +TEXT_DROP（只加 top 的话是把矩形压扁、文字只挪半格）。
@@ -453,15 +455,12 @@ class ProjectTabBar(QWidget):
             painter.drawText(text_rect, int(Qt.AlignmentFlag.AlignVCenter |
                                             Qt.AlignmentFlag.AlignLeft), text)
 
-            # 未保存标记：单独画一个小圆点（以前是名字后面拼 " ●" 当文字画，
-            # 于是它跟着文字色 —— 活动标签上是白的）。用户要求：**选中的标签**用软件
-            # 强调色玫红，没选中的保持原样（灰点）。所以这里必须脱离文字色单独绘制。
-            if dirty:
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(self.CLOSE_RED if active else self.DIRTY_IDLE))
-                dot_x = rect.left() + self.PAD_X + fm.horizontalAdvance(text) + self.DIRTY_GAP + self.DIRTY_R
-                dot_y = text_rect.center().y() + 1
-                painter.drawEllipse(QPointF(dot_x, dot_y), self.DIRTY_R, self.DIRTY_R)
+            # 标签上**不再画**未保存圆点。
+            # 那个点最早是 `text += " ●"` 拼在名字后面当文字画的（跟着文字色，
+            # 活动标签上就是白的），v1.1.33 曾改成单独绘制、活动标签用品牌红；
+            # 用户随后确认这个点本来就不是有意设计的（"原来点不是你故意加的…不要了 删掉吧"），
+            # 于是整个删掉。未保存状态仍然可见：窗口标题带 " *"（见 _set_project_title），
+            # 关闭标签/退出时也仍会问要不要保存。
 
             # 关闭按钮：正常的叉号字形；悬停时**转 30° 并变红**（不带红底）
             close = self._close_rect(index)
