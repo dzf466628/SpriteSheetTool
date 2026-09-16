@@ -379,8 +379,9 @@ class ProjectTabBar(QWidget):
             if self._tabs[index]["dirty"]:
                 text += " ●"
             painter.setPen(QPen(QColor("#e8e8e8" if active else "#9a9a9a")))
-            # 文字整体下移一点（TEXT_DROP）：竖直居中时贴着上面那条玫红/分隔线太挤
-            text_rect = rect.adjusted(self.PAD_X, self.TEXT_DROP, -self.NAME_GAP, 0)
+            # 文字整体下移 TEXT_DROP：竖直居中时贴着上面那条玫红/分隔线太挤。
+            # 上下边都要 +TEXT_DROP（只加 top 的话是把矩形压扁、文字只挪半格）。
+            text_rect = rect.adjusted(self.PAD_X, self.TEXT_DROP, -self.NAME_GAP, self.TEXT_DROP)
             painter.drawText(text_rect, int(Qt.AlignmentFlag.AlignVCenter |
                                             Qt.AlignmentFlag.AlignLeft), text)
 
