@@ -27,11 +27,13 @@ from spritesheet import __app_name__, __version__
 from spritesheet.project_file import (
     _pixmap_bytes, _pixmap_from_bytes, _rect_from_dict, read_project, write_project,
 )
+from spritesheet.settings import show_project_thumbnail
 from spritesheet.updater import UPDATE_URL, UpdateCheckThread, UpdateDownloadThread
 
 from .image_viewer import SUPPORTED_IMAGE_EXT, ImageViewer
 from .models import Action, MACARON_COLORS
 from .preview import ActionPreviewWidget
+from .settings_dialog import SettingsDialog
 from .transform import action_frame_pixmap
 from .widgets import (
     ActionCardWidget, ActionItemDelegate, _APP_ROOT, make_logo_pixmap, paint_checkerboard,
@@ -330,11 +332,14 @@ class MainWindow(QMainWindow):
 
         thumb = None
         current_action_index = self.actions.index(viewer.current_action) if viewer.current_action in self.actions else -1
-        if viewer.current_action and viewer.current_action.frames:
-            index = min(self.preview._frame_index, len(viewer.current_action.frames) - 1)
-            thumb = add_pixmap("thumbnail.png", action_frame_pixmap(viewer.current_action, index))
-        if thumb is None:
-            thumb = add_pixmap("thumbnail.png", viewer._pixmap)
+        # 缩略图受「软件设置 → 工程文件显示缩略图」控制：关掉时整个区段都不写，
+        # 资源管理器就会回退到文件类型图标（SSTool.ico）。
+        if show_project_thumbnail():
+            if viewer.current_action and viewer.current_action.frames:
+                index = min(self.preview._frame_index, len(viewer.current_action.frames) - 1)
+                thumb = add_pixmap("thumbnail.png", action_frame_pixmap(viewer.current_action, index))
+            if thumb is None:
+                thumb = add_pixmap("thumbnail.png", viewer._pixmap)
         # 工程文件缩略图：正方形画布 + 灰色棋盘格铺底 + 内容居中 + 黑白粉描边 + 右下角标。
         # .sstool 以这张 PNG 开头，资源管理器（配好图片缩略图处理器后）直接显示它。
         if thumb and "thumbnail.png" in sections:
@@ -737,7 +742,8 @@ class MainWindow(QMainWindow):
         # 布局：文件在左、编辑在右。
         # 文件菜单分组：① 导入素材（添加图片 / 导入 JSON 工程）
         #              ② 工程读写（打开 / 保存 / 另存为）
-        #              ③ 杂项（检查更新 / 退出）
+        #              ③ 退出
+        # 「检查更新」已移进 编辑 → 软件设置…（软件级开关和更新放一起）。
         file_menu = menubar.addMenu("文件")
         act_open = QAction("添加图片", self)
         act_open.triggered.connect(self._open_image)
@@ -759,10 +765,6 @@ class MainWindow(QMainWindow):
         act_save_as.triggered.connect(self._save_project_as)
         file_menu.addAction(act_save_as)
         file_menu.addSeparator()
-        act_check_update = QAction("检查更新", self)
-        act_check_update.triggered.connect(self._check_update_manual)
-        file_menu.addAction(act_check_update)
-        file_menu.addSeparator()
         act_quit = QAction("退出", self)
         act_quit.triggered.connect(self.close)
         file_menu.addAction(act_quit)
@@ -773,6 +775,10 @@ class MainWindow(QMainWindow):
         act_undo.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         act_undo.triggered.connect(self._undo_stack.undo)
         edit_menu.addAction(act_undo)
+        edit_menu.addSeparator()
+        act_settings = QAction("软件设置…", self)
+        act_settings.triggered.connect(self._open_settings)
+        edit_menu.addAction(act_settings)
 
         # 启动后延迟自动检查一次更新（不阻塞界面；失败时静默）
         self._update_thread: UpdateCheckThread | None = None
@@ -786,8 +792,13 @@ class MainWindow(QMainWindow):
         self._start_update_check(notify_no_update=False)
 
     def _check_update_manual(self):
-        """菜单手动检查：始终弹窗反馈结果。"""
+        """手动检查：始终弹窗反馈结果（入口在 编辑 → 软件设置…）。"""
         self._start_update_check(notify_no_update=True)
+
+    def _open_settings(self) -> None:
+        """编辑 → 软件设置…：工程缩略图开关 + 检查更新。"""
+        dialog = SettingsDialog(self, check_update=self._check_update_manual)
+        dialog.exec()
 
     def _start_update_check(self, notify_no_update: bool):
         if getattr(self, "_update_thread", None) is not None and self._update_thread.isRunning():
