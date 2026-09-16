@@ -265,28 +265,38 @@ class _Canvas(QWidget):
                     # 合成组的帧号在整体边框上统一绘制；源元素仍保留
                     # 各自的细边框，但不再重复显示同一个帧号。
                     if selected_actions:
-                        for idx, act in enumerate(selected_actions):
+                        # 帧号色块沿元素左边缘从左到右连续排布：每个色块占一格
+                        # （步进 sq+2），而一个动作可能占**多格**——该元素被复用
+                        # 一次就多一个帧号。所以下一个动作必须从上一个动作画完
+                        # 之后的游标位置开始，不能按动作序号预留固定格位；否则
+                        # 复用帧的色块会被下一个动作的色块盖住（一格内挤两个序号）。
+                        sq = 16
+                        sy = rect.top()
+                        cursor_x = rect.left()
+                        p.setPen(QColor("#FFFFFF"))
+                        p.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+                        for act in selected_actions:
                             # 属于多元素合成组的元素不单独画色块，由合成粗框统一绘制
                             (_, _act_cr, _) = _act_info.get(act, ({}, {}, {}))
                             if i in _act_cr:
                                 continue
-                            sq = 16
-                            sy = rect.top()
-                            base_x = rect.left() + idx * (sq + 2)
                             # 帧号序列：首帧号 + 每个复用帧号各一个同样的小方块，
                             # 与前一块间隔 2px（步进 sq+2）。
                             (_act_fn, _, _act_fns) = _act_info.get(act, ({}, {}, {}))
                             nos = _act_fns.get(i) or [act.selected_indices.index(i) + 1]
-                            p.setPen(QColor("#FFFFFF"))
-                            p.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-                            for k, no in enumerate(nos):
-                                sx = base_x + k * (sq + 2)
-                                p.fillRect(QRectF(sx, sy, sq, sq), QColor(act.color))
-                                p.drawText(QRectF(sx, sy, sq, sq), Qt.AlignmentFlag.AlignCenter, str(no))
+                            for no in nos:
+                                p.fillRect(QRectF(cursor_x, sy, sq, sq), QColor(act.color))
+                                p.drawText(QRectF(cursor_x, sy, sq, sq),
+                                           Qt.AlignmentFlag.AlignCenter, str(no))
+                                cursor_x += sq + 2
 
-                # 合成帧粗框：所有动作的合成组都绘制（当前动作粗实线，非当前动作虚线）
+                # 合成帧粗框：所有动作的合成组都绘制（当前动作粗实线，非当前动作虚线）。
+                # 前置遍历：按「未加偏移的框几何」把合成框分组并分配色块档位 slot——
+                # 两个动作合成同一组元素时框的位置完全相同，若把帧号都画在框左上角
+                # 就会互相遮盖，因此同框组内第 k 个动作的色块顺延 k*(sq+2)。
+                _composite_draw = []
+                _slots: dict = {}
                 for _act in self._viewer.actions:
-                    _is_current = (_act is current_action)
                     for group in _act.composite_groups:
                         if len(group) < 2:
                             continue
@@ -297,38 +307,47 @@ class _Canvas(QWidget):
                         gy0 = min(y for x, y, w, h in valid)
                         gx1 = max(x + w for x, y, w, h in valid)
                         gy1 = max(y + h for x, y, w, h in valid)
-                        group_rect = QRectF(
+                        base_rect = QRectF(
                             offset.x() + gx0 * zoom,
                             offset.y() + gy0 * zoom,
                             (gx1 - gx0) * zoom,
                             (gy1 - gy0) * zoom,
                         )
-                        if _is_current:
+                        if _act is current_action:
                             pen = QPen(QColor(_act.color), 1.5, Qt.PenStyle.SolidLine)
+                            draw_rect = base_rect
                         else:
                             # 非当前动作：虚线，轻微偏移避免与当前动作框完全重叠
-                            _act_idx = self._viewer.actions.index(_act)
-                            _off = _act_idx * 2
+                            _off = self._viewer.actions.index(_act) * 2
                             pen = QPen(QColor(_act.color), 1.0, Qt.PenStyle.DashLine)
-                            group_rect = group_rect.adjusted(_off, _off, _off, _off)
-                        p.setPen(pen)
-                        p.setBrush(Qt.BrushStyle.NoBrush)
-                        p.drawRect(group_rect)
+                            draw_rect = base_rect.adjusted(_off, _off, _off, _off)
+                        # 同一几何位置归为一组（整数量化，避免浮点误差把同框拆开）
+                        key = (round(base_rect.x()), round(base_rect.y()),
+                               round(base_rect.width()), round(base_rect.height()))
+                        slot = len(_slots.setdefault(key, []))
+                        _slots[key].append(_act)
+                        _composite_draw.append((_act, group, pen, draw_rect, slot))
 
-                        # 帧号：在合成框左上角统一画一个色块
-                        (_act_fn, _, _) = _act_info.get(_act, ({}, {}, {}))
-                        _frame_no = _act_fn.get(group[0])
-                        if _frame_no is not None:
-                            sq = 16
-                            p.fillRect(QRectF(group_rect.left(), group_rect.top(), sq, sq),
-                                       QColor(_act.color))
-                            p.setPen(QColor("#FFFFFF"))
-                            p.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-                            p.drawText(
-                                QRectF(group_rect.left(), group_rect.top(), sq, sq),
-                                Qt.AlignmentFlag.AlignCenter,
-                                str(_frame_no),
-                            )
+                for _act, group, pen, draw_rect, slot in _composite_draw:
+                    p.setPen(pen)
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawRect(draw_rect)
+
+                    # 帧号：自合成框左上角起依次画色块（同框多动作时顺延，避免遮盖）
+                    (_act_fn, _, _) = _act_info.get(_act, ({}, {}, {}))
+                    _frame_no = _act_fn.get(group[0])
+                    if _frame_no is not None:
+                        sq = 16
+                        bx = draw_rect.left() + slot * (sq + 2)
+                        p.fillRect(QRectF(bx, draw_rect.top(), sq, sq),
+                                   QColor(_act.color))
+                        p.setPen(QColor("#FFFFFF"))
+                        p.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+                        p.drawText(
+                            QRectF(bx, draw_rect.top(), sq, sq),
+                            Qt.AlignmentFlag.AlignCenter,
+                            str(_frame_no),
+                        )
 
             # 绘制框选矩形
             if self._selection_rect is not None:
