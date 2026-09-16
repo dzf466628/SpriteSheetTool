@@ -1,0 +1,5 @@
+# Runtime dependencies
+-r requirements.txt
+
+# Build tooling used by build_windows.ps1
+PyInstaller>=6.0,<7

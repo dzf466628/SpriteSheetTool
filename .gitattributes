@@ -1,0 +1,28 @@
+# 行尾与二进制规则（显式声明，避免依赖各机器的 core.autocrlf 设置）
+#
+# 仓库内统一用 LF 存储；检出到工作区时按平台处理（Windows 得到 CRLF）。
+# 之所以要写死这些：项目里既有 CRLF 的老文件、也有 LF 的新文件，
+# 不声明的话换机器/重新 checkout 会整片改写文件内容。
+
+* text=auto
+
+# Windows 批处理必须是 CRLF，否则 cmd.exe 解析可能出问题
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制资源：禁止任何行尾/编码转换
+*.png binary
+*.ico binary
+*.webp binary
+*.gif binary
+*.jpg binary
+*.jpeg binary
+*.bmp binary
+*.exe binary
+*.zip binary
+
+# 文本资源明确归类（便于 diff / merge）
+*.svg text
+*.iss text
+*.isl text
+*.spec text

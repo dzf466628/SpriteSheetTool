@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 虚拟环境
+venv/
+env/
+.venv/
+
+# 构建产物
+build/
+dist/
+*.egg-info/
+# 注意：这里【不能】写 *.spec —— SpriteSheetTool.spec 是打包必需的源文件
+# （迁移清单要求拷贝，PyInstaller 依赖它），忽略掉会让新克隆缺打包配置。
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 导出产物（工具运行时的输出，不是源码）
+out_*.png
+out_*.json
+spritesheet.png
+spritesheet.json
+
+# 临时文件 / 缓存 / 备份
+# 备份统一放在 E:\projects\SpriteSheetTool\backup\，不放进仓库
+*.bak
+backup/
+dsh-usage/
+.build/
+.tmp/
