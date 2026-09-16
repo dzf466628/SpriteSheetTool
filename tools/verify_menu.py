@@ -80,6 +80,10 @@ def main() -> int:
     else:
         print("  [OK]   检查更新已从文件菜单移走")
 
+    # 必须关窗口：closeEvent 里才会走 ImageViewer.shutdown()。
+    # 不关就走，元素检测线程会与窗口析构撞车（0xC0000005，实测连续跑套件时必现）。
+    win.close()
+
     print()
     print("MENU OK" if ok else "MENU MISMATCH")
     return 0 if ok else 1
