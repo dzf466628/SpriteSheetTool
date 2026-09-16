@@ -215,6 +215,7 @@ models ← transform ← widgets ← image_viewer / export_dialog ← preview �
 | `verify_composite_badges.py` | 合成帧色块排版回归（多动作合成同一组元素时不得互相遮盖） |
 | `verify_menu.py` | 菜单结构与顺序回归 |
 | `verify_roundtrip.py` | 导出→导入逐字段往返审计（四种 JSON 格式，含逐帧像素与帧间位移） |
+| `profile_hotpaths.py` | 热路径采样（先测再改：重绘 / 打包 / 导出 / 检测） |
 
 
 ## 换电脑 / 迁移清单

@@ -203,12 +203,27 @@ models ← transform ← widgets ← image_viewer / export_dialog ← preview �
 - `paint_checkerboard` 要求 `rect.topLeft()` 就是图案原点（当前三处都是 `self.rect()`）。
   `ActionThumbPlayer` 的滚动棋盘格带 translate 相位，**故意未改**。
 
-### 8.2 仍未解决的瓶颈（留给下一轮）
-- **元素检测的内层 flood fill** 仍是逐像素 Python 邻域判定，2048² 约 1.5s。
-  它在后台线程执行（不阻塞 UI），但仍是单次载图的最长耗时。要再上一个数量级需要
-  numpy 向量化或 C 扩展（会引入新依赖，需产品决策）。
-- `PreviewCanvas` 在移动类型动作播放时每 8ms 触发一次背景重绘（现已很便宜），
-  但整帧重绘仍是全量 `paintEvent`。
+### 8.2 第二轮优化（先测再改，避免凭感觉）
+
+上一轮之后重新采样，**原来的四个热点全部不在榜单上了**，新的绝对瓶颈只有一个：
+
+| 位置 | 测前 | 测后 | 做法 |
+| --- | --- | --- | --- |
+| `_detect_frames_image` 2048² | 1413 ms | **196 ms（7.2×）** | 逐像素 flood fill → 行程切分 + 并查集（见 §9.4） |
+| 同上 800×400 | 226 ms | **19.9 ms（11.4×）** | 同上 |
+
+实测确认「不是」瓶颈的（省下无谓改动）：
+- `_Canvas.paintEvent` 里为所有动作 × 所有帧重算帧号信息：**仅 0.06 ms**
+  （该重绘总耗时 6.7 ms，主体是绘制本身）；
+- 图集打包 2.5 ms、`PreviewCanvas.paintEvent` 0.58 ms、完整导出（含 GIF）100 ms —— 均无需优化。
+
+### 8.3 仍未解决的项（留待后续）
+- `_detect_frames_image` 剩余 196 ms 主要是**内存搬运**（QImage 缓冲 16 MB 拷贝 +
+  步长切片取 alpha + 掩码 translate，合计约 28 MB 拷贝），已不是算法问题；
+  要再降需要 numpy / C 扩展（引入新依赖，需产品决策）。
+- `_Canvas.paintEvent` 6.7 ms 尚可接受，但元素/动作数量再翻几倍会线性上升；
+  可加**视口裁剪**（跳过完全不可见的元素）——属渲染等价优化，必须做像素级验证。
+- `PreviewCanvas` 在移动类型动作播放时每 8ms 触发一次背景重绘（现已很便宜）。
 
 ## 9. 缺陷修复记录
 
@@ -281,4 +296,54 @@ A、A、B 且第 2、3 格之间有 2px 间隙。修复前该测试失败（第 
 **注意**：`frame_offsets` / `padding` 是「帧在画布中落点」的唯一载体，改导入逻辑时
 不要绕过 `_restore_imported_canvas`，否则动画会抖动（`verify_roundtrip.py` 的
 「帧间相对位移」一项会立刻发现）。
+
+### 9.4 关闭窗口 / 退出程序时随机闪退（2026-09-16 修复）
+
+**现象**：同一进程内先关一个主窗口、再新建一个（或加载大图后很快关程序）时随机
+崩溃，退出码 `0xC0000005`（原生 access violation）。修复前实测 **2/3 ~ 5/6 概率复现**，
+是「偶发闪退、重启就好」这类最难查的问题。
+
+**两个成因**（都在 `image_viewer.py`）：
+1. `ImageViewer._build_ui` 把自己装成了 **app 级事件过滤器**
+   （`app.installEventFilter(self)` + `installNativeEventFilter(原生 Alt 过滤器)`），
+   却**从不卸载** —— 控件析构后过滤器仍指向已释放内存，下一次事件投递即崩溃；
+2. **元素检测线程**（`_FrameDetectThread`）的 parent 是 ImageViewer，窗口先被析构
+   而线程还在跑：继续访问 `self._image`，并向已释放的接收者 emit 信号。
+
+**修复**：
+- 新增 `ImageViewer.shutdown()`（幂等）：置取消标志 → `wait()` 等检测线程结束 →
+  卸下 app 级 / 原生事件过滤器；
+- 检测支持**协作式取消**：`_detect_frames_image(..., cancel=None)` 逐行检查取消回调，
+  `_FrameDetectThread.cancel()` 触发；取消后不再 emit。默认 `None`，行为与之前完全一致；
+- `MainWindow.closeEvent` 调用 `shutdown()`，并接 `app.aboutToQuit` 覆盖未走
+  `close()` 的退出路径。
+
+**验证**：往返测试（同一进程连开 8 个主窗口）连跑 6 次全部 `exit 0`；修复前 5/6 崩溃。
+
+**给后续的提醒**：任何 `app.installEventFilter(x)` / `installNativeEventFilter(x)`
+都必须有对应的卸载时机，否则就是一颗定时炸弹（`theme.py` 的 `DarkTitleBarFilter`
+已在 `aboutToQuit` 卸载，可作参考写法）。
+
+### 9.5 元素检测：逐像素 flood fill → 行程 + 并查集（2026-09-16）
+
+**背景**：检测是上一轮之后剩下的唯一大热点（2048² 约 1.4s，占绝对主导），
+原实现是逐像素 Python 4 连通 flood fill。
+
+**新实现**（`_detect_frames_image`）：
+1. alpha 通道一次切出 → `bytes.translate` 压成 0/1 掩码（全图一次 C 层调用）；
+2. 逐行 `split(b"\x00")` 切出连续不透明**行程**，Python 只遍历行程；
+3. 相邻行行程列区间有重叠（共享至少一列 = 上下相邻 = 4 连通）即合并，并查集维护；
+4. 包围盒与**发现顺序**（自上行下行、同行自左向右）与原实现一致。
+
+复杂度从 O(w·h) 次 Python 迭代降到 O(行程数)；2048² 实测 1413 → 196 ms。
+
+**等价性证据**：`tools/verify_perf_equiv.py` 对照「原逐像素实现」逐项比对 19 个用例
+全部一致，含对抗用例：对角接触**不得连通**（3 个）、单像素散点（4 个）、
+棋盘格（13 个）、阈值边界（alpha 恰好等于阈值算达标）、楼梯形阶梯（1 个）、
+随机细碎图（71 / 192 个连通域逐一吻合）。
+
+**踩过的坑**：① 测试台原来用 `QImage(str(src))` 处理非 QPixmap 用例，把 QImage 当成了
+路径，导致对抗用例**空转**（全返回 0）；② 用例里用 `.` 表示「恰好等于阈值」，
+而那是**不透明**的，几何用例因此退化成一整块 —— 两处都是「测试没在测该测的东西」，
+现已修正并写明期望数量。
 
