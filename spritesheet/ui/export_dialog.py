@@ -309,8 +309,15 @@ class ExportDialog(QDialog):
         right_layout.addWidget(lbl_extra)
         # 顺序即优先级：SSTOOL 工程排第一位（它是最完整的产物），JSON 紧随其后。
         self.cb_project = QCheckBox("导出 SSTOOL 工程")
-        self.cb_project.setChecked(True)   # 默认导出：工程文件是最完整的交付物
-        self.cb_project.setToolTip("导出一个包含全部原图和编辑状态的单文件工程")
+        # 默认导出：工程文件是最完整的交付物。但工程数据得有人提供 ——
+        # 没注入 provider 的调用方（脚本/性能采样）不能默认勾上，否则点导出直接报错。
+        has_project = self._project_provider is not None
+        self.cb_project.setChecked(has_project)
+        self.cb_project.setEnabled(has_project)
+        self.cb_project.setToolTip(
+            "导出一个包含全部原图和编辑状态的单文件工程" if has_project
+            else "当前窗口没有提供工程数据，无法导出 SSTOOL 工程"
+        )
         self.cb_json = QCheckBox("导出 JSON")
         self.cb_json.setChecked(True)  # 默认打开导出 JSON
         self.cb_gif = QCheckBox("导出 GIF（预览）")

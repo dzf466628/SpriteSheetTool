@@ -54,7 +54,7 @@ def make_sheet(elements=3, size=40):
     return pm, rects
 
 
-def build_dialog(separate: bool, apply_overrides: bool = True):
+def build_dialog(separate: bool, apply_overrides: bool = True, with_provider: bool = True):
     from spritesheet.ui.main_window import MainWindow
     win = MainWindow()
     pm, rects = make_sheet()
@@ -72,7 +72,8 @@ def build_dialog(separate: bool, apply_overrides: bool = True):
         win._append_action_card(act)
         act.selected_indices = [i]
         viewer.crop_frames_for_action(act)
-    dlg = ExportDialog(win.actions, viewer._pixmap, project_provider=win._project_manifest)
+    dlg = ExportDialog(win.actions, viewer._pixmap,
+                       project_provider=win._project_manifest if with_provider else None)
     if apply_overrides:
         dlg.cb_gif.setChecked(True)
         dlg.cb_project.setChecked(True)
@@ -148,6 +149,13 @@ def check_defaults() -> None:
     planned = [p.name for p in dlg._planned_names(tmp)]
     check("默认就会写入 project.sstool", "project.sstool" in planned, f"实际 {planned}")
     win.close()
+
+    # 没有注入工程数据提供者时不能默认勾选（否则点导出直接报「未提供工程数据」）
+    win2, dlg2 = build_dialog(separate=False, apply_overrides=False, with_provider=False)
+    check("没有工程数据时该选项自动取消勾选",
+          not dlg2.cb_project.isChecked() and not dlg2.cb_project.isEnabled(),
+          f"checked={dlg2.cb_project.isChecked()} enabled={dlg2.cb_project.isEnabled()}")
+    win2.close()
 
 
 def main() -> int:
