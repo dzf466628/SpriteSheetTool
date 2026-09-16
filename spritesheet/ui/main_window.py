@@ -13,7 +13,7 @@ import hashlib
 from pathlib import Path
 
 from PyQt6.QtCore import (
-    QAbstractNativeEventFilter, QByteArray, QBuffer, QEvent, QPoint, QPointF, QRect, QRectF, Qt,
+    QAbstractNativeEventFilter, QByteArray, QBuffer, QEvent, QPointF, QRect, QRectF, Qt,
     QElapsedTimer, QTimer, QSize, QThread, QIODevice, pyqtSignal,
 )
 from PyQt6.QtGui import (
@@ -22,9 +22,9 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
-    QApplication, QAbstractItemView, QAbstractSpinBox, QButtonGroup, QCheckBox, QComboBox, QDialog,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
     QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QListView, QMessageBox, QListWidget, QListWidgetItem, QMainWindow, QPushButton, QRadioButton,
+    QMessageBox, QListWidget, QListWidgetItem, QMainWindow, QPushButton, QRadioButton,
     QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStyledItemDelegate, QStyle, QProgressBar,
     QProgressDialog, QVBoxLayout, QWidget,
 )
@@ -160,18 +160,6 @@ def _detect_frames_image(img: QImage, alpha_threshold: int = 10) -> list[tuple[i
                         visited[ni] = 1; stack.append(ni)
             frames.append((min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
     return frames
-
-
-def detect_frames(pixmap: QPixmap, alpha_threshold: int = 10) -> list[tuple[int, int, int, int]]:
-    """检测精灵图中每个独立元素的 bounding box。
-
-    通过 alpha 通道做 4 连通 flood fill，每个非透明连通区域为一个元素。
-    返回 [(x, y, w, h), ...] 列表。
-    """
-    if pixmap is None or pixmap.isNull():
-        return []
-
-    return _detect_frames_image(pixmap.toImage(), alpha_threshold)
 
 
 class _FrameDetectThread(QThread):
@@ -3305,51 +3293,6 @@ class ExportDialog(QDialog):
         painter.end()
         return canvas, positions
 
-    @staticmethod
-    def _dedupe_frames(frames: list[QPixmap]) -> tuple[list[QPixmap], list[list[int]]]:
-        """按像素内容去重最终帧。
-
-        多个动作/帧若内容完全相同（同一元素被多个动作复用、或动作内重复帧），
-        只保留一份用于打包，返回 (唯一帧列表, 索引分组)：
-        - unique: 去重后的帧列表（每份只出现一次）
-        - groups: 与原 frames 一一对应，groups[i] 是该帧在 unique 中的下标
-
-        去重对象是已烘焙合成/居中/padding/单帧偏移的最终画布帧：
-        只有像素逐字节完全一致的帧才会合并；hash 仅作快速索引，
-        命中后会用原始像素字节再次确认，避免任何碰撞导致误合并。
-        """
-        import hashlib as _hl
-
-        unique: list[QPixmap] = []
-        unique_bytes: list[bytes] = []
-        index_map: dict[str, list[int]] = {}  # hash -> 该 hash 下的所有 unique 下标
-
-        def content_bytes(pm: QPixmap) -> bytes:
-            img = pm.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
-            buf = img.constBits()
-            buf.setsize(img.sizeInBytes())
-            return bytes(buf)
-
-        groups: list[list[int]] = []
-        for pm in frames:
-            raw = content_bytes(pm)
-            key = _hl.sha1(raw).hexdigest()
-            matched = None
-            for candidate in index_map.get(key, ()):
-                if unique_bytes[candidate] == raw:
-                    matched = candidate
-                    break
-            if matched is not None:
-                groups.append([matched])
-                continue
-            # 未命中，或 hash 命中但字节不一致（理论碰撞）→ 新增一份
-            idx = len(unique)
-            index_map.setdefault(key, []).append(idx)
-            unique.append(pm)
-            unique_bytes.append(raw)
-            groups.append([idx])
-        return unique, groups
-
     def _build_packed_atlas(self, actions: list[Action]):
         """重构打包：普通帧以「元素图块」为单位打包并内容去重；合成帧直接打包整块。
 
@@ -6202,7 +6145,7 @@ class MainWindow(QMainWindow):
         self._mark_project_dirty()
 
     def _on_selection_changed(self):
-        """根据昐否已加载图片切换按钮文字。"""
+        """根据是否已加载图片切换按钮文字。"""
         if self.image_viewer.current_action:
             self.image_viewer.crop_frames_for_action(self.image_viewer.current_action)
             self.preview.set_action(self.image_viewer.current_action)

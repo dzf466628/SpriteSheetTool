@@ -171,11 +171,6 @@ def build_aseprite_array(actions, records, atlas_name: str, atlas_w: int, atlas_
     return {"frames": frames, "meta": meta}
 
 
-def _action_prefix(action) -> str:
-    """动作在 JSON 中的命名前缀：直接使用动作名（调用方需保证唯一）。"""
-    return action.name or "action"
-
-
 def build_payload(fmt: str, actions, records, atlas_name: str, atlas_w: int, atlas_h: int, app_label: str, prefixes: dict | None = None) -> dict:
     """按格式标识生成对应 JSON 字典。"""
     if fmt == FMT_TP_HASH:
