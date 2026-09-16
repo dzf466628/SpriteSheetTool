@@ -1,9 +1,13 @@
 """启动时自动检查更新 + 自动下载更新。
 
-服务器端零配置：把安装包（SpriteSheetTool_v.X.Y.Z.exe）直接上传到
-http://duadu.cc/download/SpriteSheetTool/ 目录即可，Web 服务器会自动生成目录索引。
-客户端请求该目录索引，从文件名中解析出版本号最高的安装包，
-与本地版本比较，有新版本时通知 UI 引导下载并自动安装。
+服务器端零配置：把安装包（SpriteSheetTool_v.X.Y.Z.exe）直接上传到源站目录即可
+（源站用 .index.php 生成目录列表），客户端请求该列表，从文件名中解析出版本号最高的
+安装包，与本地版本比较，有新版本时通知 UI 引导下载并自动安装。
+
+**关于证书**：源站 dudua.synology.me:8443 已部署对应证书（Let's Encrypt，
+CN=dudua.synology.me），因此这里**严格校验证书、不做任何回落** —— 证书一旦失效或不被
+信任，"检查更新"会明确报错，而不是静默降级去接受来路不明的安装包。
+（此前源站出示的是 duadu.cc 的证书、主机名不匹配，临时加过回落；证书修好后已移除。）
 """
 from __future__ import annotations
 
@@ -15,12 +19,22 @@ import urllib.parse
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-# 更新检查目录（服务器自动列出安装包文件）
-UPDATE_URL = "http://duadu.cc/download/SpriteSheetTool/.index.php"
+# 更新检查目录：源站地址，**必须带端口号 8443**；.index.php 负责生成目录列表
+# （直接访问目录会 403，只能走 .index.php）
+UPDATE_URL = "https://dudua.synology.me:8443/download/SpriteSheetTool/.index.php"
 CHECK_TIMEOUT = 8  # 秒；网络异常/超时都静默跳过，不打扰用户
 
 # 安装包文件名模式：SpriteSheetTool_v.1.2.3.exe
 _INSTALLER_RE = re.compile(r"SpriteSheetTool_v\.(\d+(?:\.\d+)*)\.exe", re.IGNORECASE)
+
+
+def _open(url: str, timeout: int, accept: str = "text/html") -> object:
+    """按规范严格校验证书地打开 URL（自动更新的链路上绝不放宽 TLS）。"""
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "SpriteSheetTool-Updater/1.0", "Accept": accept},
+    )
+    return urllib.request.urlopen(request, timeout=timeout)
 
 
 def _parse_version(text: str) -> tuple[int, ...]:
@@ -71,13 +85,9 @@ class UpdateCheckThread(QThread):
 
     def run(self) -> None:
         try:
-            req = urllib.request.Request(
-                self._url,
-                headers={"User-Agent": "SpriteSheetTool-Updater/1.0", "Accept": "text/html"},
-            )
-            with urllib.request.urlopen(req, timeout=CHECK_TIMEOUT) as resp:
+            with _open(self._url, CHECK_TIMEOUT) as resp:
                 html = resp.read().decode("utf-8", errors="replace")
-                final_url = resp.geturl()  # 跟随重定向后的真实地址（http->https 等）
+                final_url = resp.geturl()  # 跟随重定向后的真实地址
             latest = _pick_latest(html, final_url)
             if latest is None:
                 self.result_ready.emit({"status": "no_installer", "url": final_url})
@@ -116,11 +126,8 @@ class UpdateDownloadThread(QThread):
             os.makedirs(self._target_dir, exist_ok=True)
             filename = urllib.parse.unquote(self._url.rstrip("/").split("/")[-1]) or "update.exe"
             target = os.path.join(self._target_dir, filename)
-            req = urllib.request.Request(
-                self._url,
-                headers={"User-Agent": "SpriteSheetTool-Updater/1.0"},
-            )
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            resp = _open(self._url, 60, accept="application/octet-stream")
+            with resp:
                 total = int(resp.headers.get("Content-Length") or 0)
                 done = 0
                 with open(target, "wb") as fh:
