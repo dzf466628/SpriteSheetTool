@@ -2,25 +2,46 @@
 
 > **状态：拆分已完成（步骤 1-7 全部执行并验证）。** 本文档保留为拆分记录与
 > 后续维护依据；新功能请直接改对应模块，不要再让 `main_window.py` 膨胀。
+>
+> 本文档现在不只是"拆分记录"，也是**缺陷与踩坑档案**（§9 有 14 条），
+> 改对应模块前先扫一眼有没有相关条目，能省一次返工。
+
+**目录**：[1 规模](#1-拆分后的文件规模) · [2 结构](#2-最终结构) · [3 依赖侦察](#3-依赖侦察结果本次实测拆分依据) ·
+[4 拆分顺序](#4-建议拆分顺序低风险--高风险每步独立可验证) · [5 注意要点](#5-注意要点-核心) ·
+[6 收益](#6-拆分后的收益) · [7 素材](#7-素材) · [8 性能优化](#8-性能优化记录2026-09-16与拆分为同一轮) ·
+[9 缺陷与踩坑档案](#9-缺陷修复记录)
 
 ---
 
-## 1. 现状（拆分完成后）
+## 1. 拆分后的文件规模
 
-| 文件 | 行数 | 大小 | 备注 |
+拆分完成时（v1.1.16）与当前（v1.1.34）的行数对照 —— 功能一直在加，所以现在的数字
+比拆分当天大，重点看的是"**没有哪个文件重新膨胀成巨无霸**"：
+
+| 文件 | 拆分完成时 | **v1.1.34** | 备注 |
 | --- | --- | --- | --- |
-| `spritesheet/ui/main_window.py` | **1192** | 56 KB | 拆分前 6222 行 → 只留 MainWindow + 更新弹窗 + 撤销命令 |
-| `spritesheet/ui/preview.py` | 1948 | 89 KB | 预览画布 / 自由变换手柄 / 动画调节组 / 预览窗口 |
-| `spritesheet/ui/image_viewer.py` | 1336 | 64 KB | 元素检测 / 标尺画布 / 浮动工具条 / 帧复用 |
-| `spritesheet/ui/export_dialog.py` | 1160 | 56 KB | 导出弹窗 / 预览区 / 图集打包 / GIF / JSON |
-| `spritesheet/ui/widgets.py` | 694 | 28 KB | 通用控件 / 图标工具 / 棋盘格背景 |
-| `spritesheet/ui/theme.py` | 377 | 10 KB | 深色玫红主题 QSS |
-| `spritesheet/ui/transform.py` | 266 | 11.5 KB | 帧变换/预览布局纯函数 |
-| `spritesheet/importer.py` | 259 | 10 KB | JSON 工程导入 |
-| `spritesheet/ui/exporters.py` | 165 | 7.6 KB | 第三方 JSON 导出器 |
-| `spritesheet/updater.py` | 131 | 5.8 KB | 自动更新 |
-| `spritesheet/ui/models.py` | 114 | 5.8 KB | Action 数据模型 + 主题色 |
-| `spritesheet/project_file.py` | 110 | 4.3 KB | .sstool 读写 + QPixmap 片段辅助 |
+| `spritesheet/ui/main_window.py` | 1192 | **1776** | 拆分前 6222 行 → 只留 MainWindow + 更新弹窗 + 撤销命令 |
+| `spritesheet/ui/preview.py` | 1948 | **2218** | 预览画布 / 自由变换手柄 / 动画调节组 / 预览窗口 |
+| `spritesheet/ui/image_viewer.py` | 1336 | **1464** | 元素检测 / 标尺画布 / 浮动工具条 / 帧复用 |
+| `spritesheet/ui/export_dialog.py` | 1160 | **1291** | 导出弹窗 / 预览区 / 图集打包 / GIF / JSON |
+| `spritesheet/ui/widgets.py` | 694 | **1434** | 通用控件 / 图标工具 / 棋盘格背景（后加：Toast、等宽按钮网格、悬停图标按钮） |
+| `spritesheet/ui/theme.py` | 377 | **392** | 深色玫红主题 QSS |
+| `spritesheet/ui/transform.py` | 266 | **266** | 帧变换/预览布局纯函数（无 UI 依赖，最该写单测的模块） |
+| `spritesheet/importer.py` | 259 | **307** | JSON 工程导入 |
+| `spritesheet/ui/exporters.py` | 165 | **191** | 第三方 JSON 导出器 |
+| `spritesheet/ui/models.py` | 114 | **114** | Action 数据模型 + 主题色 |
+| `spritesheet/updater.py` | 131 | **152** | 自动更新 |
+| `spritesheet/project_file.py` | 110 | **166** | .sstool 读写 + QPixmap/JSON 片段辅助 |
+| `spritesheet/settings.py` | — | **78** | QSettings 键值（后加的：上次目录 / 缩略图开关） |
+| `spritesheet/single_instance.py` | — | **154** | 单实例守卫（后加的） |
+| `spritesheet/ui/settings_dialog.py` | — | **99** | 软件设置弹窗（后加的） |
+
+复现这张表（行数会随开发变动，别当成硬指标）：
+
+```powershell
+Get-ChildItem -Recurse spritesheet -Filter *.py |
+  ForEach-Object { "{0,5} {1}" -f (Get-Content $_.FullName | Measure-Object -Line).Lines, $_.FullName }
+```
 
 ## 2. 最终结构
 
@@ -30,12 +51,17 @@ spritesheet/ui/
 ├── main_window.py       # MainWindow + UpdateDownloadDialog + _TransformHistoryCommand
 ├── models.py            # Action 数据模型 + MACARON_COLORS + 常量
 ├── transform.py         # 变换/布局纯函数（无 UI 依赖）
-├── widgets.py           # 通用小部件 + 图标/像素工具 + 棋盘格背景
+├── widgets.py           # 通用小部件 + 图标/像素工具 + 棋盘格背景 + HintToast/HoverIconButton
 ├── image_viewer.py      # ImageViewer + _Canvas + FloatingToolBar + _AltNativeFilter + 检测
 ├── export_dialog.py     # ExportDialog + PreviewArea + _safe_export_name + _pixmap_to_pil
 ├── preview.py           # PreviewFloatingBar/PreviewCanvas/AnimAdjustPanel/ActionPreviewWidget
-├── exporters.py         # 不变
-└── theme.py             # 不变
+├── settings_dialog.py   # 软件设置弹窗（后加，叶子模块）
+├── exporters.py         # 拆分时未动
+└── theme.py             # 拆分时未动
+
+spritesheet/             # 包根：与 UI 平级，供 main.py / 单实例 / 更新使用
+├── settings.py          # QSettings 键值（后加，叶子）
+└── single_instance.py   # 单实例守卫（后加，叶子）
 ```
 
 依赖方向（**运行时单向，禁止反向 import**）：
@@ -46,7 +72,6 @@ models ← transform ← widgets ← image_viewer / export_dialog ← preview �
 
 `spritesheet/project_file.py` 另收 `_rect_from_dict` / `_pixmap_bytes` / `_pixmap_from_bytes`
 （工程序列化语义，按 §5.3 归属）。
-
 
 ## 3. 依赖侦察结果（本次实测，拆分依据）
 
@@ -126,7 +151,6 @@ models ← transform ← widgets ← image_viewer / export_dialog ← preview �
 - 额外清理：删除死代码 `_dedupe_frames`（43 行）/ `detect_frames`（10 行）/
   `_action_prefix`（3 行）与 4 个未使用 Qt 导入。
 
-
 ## 5. 注意要点（★ 核心）
 
 ### 5.1 循环 import（最大的坑）
@@ -165,7 +189,10 @@ models ← transform ← widgets ← image_viewer / export_dialog ← preview �
    - 启动 MainWindow（image_viewer / preview / action_list 非空）
    - 加载图 → 添加动作 → 选择元素 → 变换（rotation/quad）→ 复用（reuse_frame_at / toggle_reuse_at）
    - 导出：ExportDialog 构造 + `_export_to_directory` 生成 PNG/GIF/JSON/`project.sstool`
-4. 若有测试：`python -m pytest`（当前已删 tests，重建单测时优先给 transform.py 写）
+4. 当前没有 pytest 单测，等价物是 `tools/verify_*.py`（每个都是可独立运行的断言集合，
+   退出码 0 = 全过）—— 拆分期间改到哪个模块，就跑对应的那个（见 §9 索引表）；
+   一次跑完全部：见 README「开发与验证 → 专项回归脚本」。
+   若要补单测，优先给 `transform.py`（纯函数、无 UI 依赖、回归成本最低）写。
 
 ### 5.6 过程管理
 - ✅ 已 `git init`（分支 `main`，仓库在桌面工作区）。后续改动**每步一个 commit**，
@@ -174,9 +201,12 @@ models ← transform ← widgets ← image_viewer / export_dialog ← preview �
 - 拆完更新 `README.md` 的「项目结构」章节。
 
 ## 6. 拆分后的收益
-- 单文件从 5693 行降到 <1200 行，定位/审查/维护成本大幅下降。
+- 单文件从 6222 行降到 1192 行（现在 1776 行 —— 之后又加了不少功能），
+  定位/审查/维护成本大幅下降；**没有哪个文件重新变成巨无霸**。
 - `transform.py`（纯函数）可独立单测，回归成本最低。
 - 未来加功能只改对应模块，不再让 main_window.py 继续膨胀。
+- 副作用（也是收益）：模块边界清楚之后，回归脚本可以贴着模块写，
+  不必每次拉起整个窗口（例如 `verify_transform_modes.py` 只碰 `transform` 的数值）。
 
 ## 7. 素材
 - 大图（非代码）：`mage_sprite_keyed.png`（3.6 MB）、`sprite_demo_keyed.png`（1.36 MB）—— 测试素材，与拆分无关。
@@ -226,6 +256,25 @@ models ← transform ← widgets ← image_viewer / export_dialog ← preview �
 - `PreviewCanvas` 在移动类型动作播放时每 8ms 触发一次背景重绘（现已很便宜）。
 
 ## 9. 缺陷修复记录
+
+按"改哪个模块先扫一眼"排的索引（每条都含：现象 → 根因 → 修复 → 回归证据）：
+
+| # | 问题 | 涉及模块 | 版本 |
+| --- | --- | --- | --- |
+| [9.1](#91-多动作共用元素时帧号色块互相遮盖2026-09-16-修复) | 多动作共用元素时帧号色块互相遮盖 | `image_viewer` | 2026-09-16 |
+| [9.2](#92-多动作合成同一组元素时帧号色块互相遮盖2026-09-16-修复) | 合成同一组元素时色块互相遮盖 | `image_viewer` | 2026-09-16 |
+| [9.3](#93-导出--导入规则的往返缺陷2026-09-16-修复) | 导出/导入往返丢字段、帧尺寸错位 | `importer` / `export_dialog` | 2026-09-16 |
+| [9.4](#94-关闭窗口--退出程序时随机闪退2026-09-16-修复) | 关闭/退出时随机闪退（线程撞车） | `image_viewer` | 2026-09-16 |
+| [9.5](#95-元素检测逐像素-flood-fill--行程--并查集2026-09-16) | 元素检测太慢（→ 行程 + 并查集） | `image_viewer` | 2026-09-16 |
+| [9.6](#96-工程文件改为png--容器资源管理器显示工程缩略图v1117) | 工程文件改成「PNG + 容器」显示缩略图 | `project_file` | v1.1.17 |
+| [9.7](#97-缩略图描边与工程文件图标比例v1121--v1122) | 缩略图描边 / 图标比例被拉伸 | 资源 / 注册表 | v1.1.21→22 |
+| [9.8](#98-关闭窗口--退出程序时随机闪退复现于回归脚本v1122-补) | 闪退第 2 例：脚本不 `close()` 必崩 | 回归脚本 | v1.1.22 |
+| [9.9](#99-设置项放哪怎么存v1122) | 设置项放哪、怎么存（即时生效） | `settings` | v1.1.22 |
+| [9.10](#910-工程标签页多工程v1124) | 工程标签页（切标签"换引用"而非存读） | `main_window` / `widgets` | v1.1.24 |
+| [9.11](#911-单实例只跑一个进程其余都开成标签页v1125) | 单实例（命名管道 + ACK 协议） | `single_instance` | v1.1.25 |
+| [9.12](#912-界面细节三连v1127) | 直角标签 / 叉号动画 / 按钮两列 | `widgets` | v1.1.27 |
+| [9.13](#913-offscreen-没有字体字形类断言必须在真实平台验v1127-发现) | offscreen 没有字体，字形断言失效 | 回归方法 | v1.1.27 |
+| [9.14](#914-四连修偏移拖动无动作提示按钮等宽脏点变红v1133--v1134) | 偏移拖动 / 无动作提示 / 按钮等宽 / 脏点 | `preview` / `widgets` | v1.1.33→34 |
 
 ### 9.1 多动作共用元素时帧号色块互相遮盖（2026-09-16 修复）
 
@@ -389,7 +438,6 @@ A、A、B 且第 2、3 格之间有 2px 间隙。修复前该测试失败（第 
 **注意**：`PerceivedType` / `Content Type` 只是让「按类型分组」和预览窗格把 `.sstool`
 当图片看待；真正决定缩略图的是那个 ShellEx CLSID。改注册项时别删错。
 
-
 ### 9.7 缩略图描边与「工程文件图标」比例（v1.1.21 → v1.1.22）
 
 **需求**：① 缩略图描边太细，红色要用软件自己的红；② `SSTool.ico` 不要做成正方形，
@@ -446,7 +494,6 @@ A、A、B 且第 2、3 格之间有 2px 间隙。修复前该测试失败（第 
   返回 0**（四个组合里只有 CoInit=yes 能拿到图标）；`GetDIBits` 读图标里的 HBITMAP
   （DDB）两种 `biHeight` 都返回 0，要改用 `DrawIconEx` 画进自上而下的 DIB。
 
-
 ### 9.8 关闭窗口 / 退出程序时随机闪退（复现于回归脚本，v1.1.22 补）
 
 9.4 修的是程序内的路径（`closeEvent` + `aboutToQuit`）。这一轮发现回归脚本里
@@ -454,7 +501,6 @@ A、A、B 且第 2、3 格之间有 2px 间隙。修复前该测试失败（第 
 建窗口后直接退出，元素检测线程与窗口析构撞车，报 `0xC0000005`，
 **单独跑通常碰不到，连跑整套必现**。两个脚本结尾都补 `win.close()` 后才稳定
 （连跑 5 次全 0）。凡是「建 MainWindow 但不 close」的脚本都有同一个坑。
-
 
 ### 9.9 设置项放哪、怎么存（v1.1.22）
 
@@ -465,7 +511,6 @@ A、A、B 且第 2、3 格之间有 2px 间隙。修复前该测试失败（第 
 
 开关设计成**即时生效**（勾选就写 QSettings），不设「确定 / 应用」——
 只有一个开关时，多一步确认只会让人怀疑到底存没存。
-
 
 ### 9.10 工程标签页（多工程，v1.1.24）
 
@@ -513,7 +558,6 @@ A、A、B 且第 2、3 格之间有 2px 间隙。修复前该测试失败（第 
 windows 平台验。另外 offscreen 下 Qt 报的字体度量与真正画出的墨迹差 ~2.5px，
 两种画法（共用矩形 AlignVCenter vs 按墨迹盒算基线）结果**逐像素相同**，
 说明这点偏差来自环境而不是算法 —— 所以断言容差放到 4px，真正卡住的是"两者中心对齐"。
-
 
 ### 9.11 单实例：只跑一个进程，其余都开成标签页（v1.1.25）
 
@@ -568,7 +612,6 @@ QGridLayout 不会自动换行，所以在 resizeEvent 里算列数再重排。
 **踩坑**：网格的 min_button 阈值必须和按钮实际最小宽度对齐 —— 阈值写 92、按钮实际 84，
 结果明明放得下也只排 1 列（默认宽度下就退化成了单列）。
 
-
 ### 9.13 offscreen 没有字体：字形类断言必须在真实平台验（v1.1.27 发现）
 
 做关闭叉号时发现一个把之前测量结论都"打折"的事实：
@@ -599,8 +642,7 @@ QGridLayout 不会自动换行，所以在 resizeEvent 里算列数再重排。
 不是 Explorer 画图标用的接口），这次是同一类问题的第二个面：不只是选错 API，
 **选错平台/字体环境**也会让测量"看着对、其实假"。
 
-
-### 9.14 四连修：偏移拖动、无动作提示、按钮等宽、脏点变红（v1.1.33）
+### 9.14 四连修：偏移拖动、无动作提示、按钮等宽、脏点变红（v1.1.33 → v1.1.34）
 
 #### ① 拖偏移滑块时"帧不动、只有区域在动"
 
@@ -693,5 +735,3 @@ enter/leave/toggled 时换图标）。清空变换：平时红图标，悬停/�
 再按它提需求（"改成红色"）。**做交互/视觉改动时先问一句"这是你要的吗"，
 比自己猜着改两轮更省事**；同时也说明自绘控件里"拼字符串当图标"这种实现
 会让后续的样式调整失去着力点（颜色跟着文字走，没法单独改）。
-
-

@@ -3,10 +3,17 @@
 精灵图（Sprite Sheet）打包工具：自动检测原图元素、按动作逐帧编排动画，支持
 自由变换（旋转/缩放/斜切/透视/扭曲）、帧复用，一键导出图集 PNG / GIF / 多种 JSON。
 
-- 技术栈：Python 3.10+ · PyQt6 · Pillow（GIF 导出）
+- 技术栈：Python 3.10+（开发/打包用 **3.12.10**）· PyQt6 6.11 · Pillow 12.3（GIF 导出）
 - 主题：深色界面 + 单一玫红强调色
-- 当前版本：**v1.1.34**
-- 许可证：**GNU GPL v3**（开源免费，可自由使用/修改/再分发）
+- 当前版本：**v1.1.34**　|　许可证：**GNU GPL v3**（开源免费，可自由使用/修改/再分发）
+
+**目录**：[功能特性](#功能特性) · [环境要求](#环境要求) · [新电脑部署](#新电脑部署快速开始) ·
+[日常使用](#日常使用) · [打包发布](#打包发布生成安装包) · [自动更新](#自动更新) ·
+[项目结构](#项目结构) · [开发与验证](#开发与验证) · [版本历史](#版本历史近期) ·
+[迁移清单](#换电脑--迁移清单) · [许可证](#许可证)
+
+> 想直接动手：装好 Python → 双击 `启动.bat` → 拖入图片 → `+ 添加动作` → 选元素 → 导出。
+> 出问题或要改代码，先看 [开发与验证](#开发与验证) 里的三步自检。
 
 ---
 
@@ -30,13 +37,14 @@
 ## 环境要求
 
 - Windows 10/11（64 位）
-- Python 3.10+（开发环境为 3.11，未打包运行时需要）
+- Python 3.10+ —— 开发与打包环境是 **3.12.10**（`启动.bat` 会拒绝低于 3.10 的解释器）；
+  只在**未打包**运行时才需要本机 Python，装好的用户直接跑 exe 即可
 
 ## 新电脑部署（快速开始）
 
 > 本工具设计为"拷贝即用"：只需要源码 + Python，不需要手工装任何东西。
 
-1. **安装 Python**：从 <https://www.python.org/downloads/> 下载 3.11 或更新版本，
+1. **安装 Python**：从 <https://www.python.org/downloads/> 下载 **3.12**（3.10 及以上都可以），
    安装时务必勾选 **Add python.exe to PATH**。
 2. **拷贝项目文件夹**到新电脑任意位置（无需 .venv、build、dist 等目录，见下方迁移清单）。
 3. **双击 `启动.bat`**：脚本会自动
@@ -251,7 +259,6 @@ python -m venv .venv
 .venv\Scripts\python.exe tools\verify_icon_imagelist.py            # shell 层：真实显示不变形
 ```
 
-
 ### 导入 / 往返保真度
 
 拖入 JSON（连同配套 PNG）即可还原为工程，格式自动识别。往返保真度已用
@@ -314,9 +321,10 @@ SpriteSheetTool/
 ├── SSTool_源图.png             # .sstool 图标原图（185×256，生成 ico 的输入）
 ├── icons/                      # 工具栏 SVG 图标
 ├── update_server/              # 自动更新服务器部署说明
-├── smoke_test.py               # offscreen 冒烟回归（17 项，跨全部主流程）
+├── installer/                  # 产出的安装包（SpriteSheetTool_v.X.Y.Z.exe，不进版本库）
+├── smoke_test.py               # offscreen 冒烟回归（18 项，跨全部主流程）
 ├── bench.py                    # 性能基准（关键热路径 A/B）
-├── tools/                      # 开发辅助脚本（静态扫描/搬移验证/等价性验证）
+├── tools/                      # 开发辅助脚本（回归 / 静态扫描 / 搬移与等价性取证）
 └── spritesheet/
     ├── __init__.py             # 版本号（__version__）
     ├── importer.py             # JSON 工程导入（TP/Aseprite/本工具格式）
@@ -398,46 +406,99 @@ settings_dialog / settings   是叶子（只被 main_window 引用），不反�
 .venv\Scripts\python.exe bench.py
 ```
 
-`tools/` 下的辅助脚本（纯开发用，不参与打包）：
+要一次跑完**整套**专项回归（下面表格里 21 个 `verify_*.py`，实测约 **20 秒**，
+全部通过时没有输出；有失败会打印 `FAILED: 脚本名`）：
+
+```powershell
+Get-ChildItem tools\verify_*.py | Where-Object { $_.Name -notin @('verify_move.py','verify_class_members.py') } |
+  ForEach-Object { .venv\Scripts\python.exe $_.FullName; if ($LASTEXITCODE -ne 0) { "FAILED: $($_.Name)" } }
+```
+
+### 专项回归脚本
+
+每个 `verify_*.py` 都是**可独立运行**的断言集合（退出码 0 = 全过），末尾打印 `XXX OK` / `XXX FAILED`。
+界面的断言尽量用**真入口 + 真像素**（QTest 真点击/真拖动、渲染成图后数像素），
+而不是只读内部状态 —— 上一版"点标签不切工程"就是因为回归绕开真实入口而漏掉的。
 
 | 脚本 | 用途 |
 | --- | --- |
+| `smoke_test.py` | offscreen 冒烟回归（18 项，跨全部主流程：载图/检测/动作/变换/复用/导出/工程往返） |
+| `verify_tabs.py` | 工程标签页（位置 / 新建 / 切换不串味 / 改名 / 关闭 / 标签栏逐像素 / 标签上不画未保存点） |
+| `verify_offset_drag.py` | 帧偏移拖动（拖动时**帧真的动**、画布区域冻结、松手才重算并集；真滑块 + 真像素） |
+| `verify_no_action_hint.py` | 无动作提示（点图片/变换按钮/合成按钮都要提示「先添加动作」，且不留下脏数据） |
+| `verify_frame_offset.py` | 逐帧偏移（一个帧一个偏移量、互不影响、切帧同步控件） |
+| `verify_adjust_panel.py` | 变换按钮布局（每行两个 / 摘要独占一行 / 窄了换行 / **8 个按钮等宽** / 清空变换悬停图标转白） |
+| `verify_transform_modes.py` | 自由变换各模式的**角点数值**回归（旋转/缩放/斜切/透视/扭曲各自该怎么联动） |
+| `verify_glyphs.py` | **字形**回归（必须跑真实 windows 平台：叉号不是缺字方框、三段文字对齐、标签不因标脏改变外观） |
+| `verify_header.py` | 顶部名称栏（无图标 / 首字母更大 / 两段按大写带垂直对齐） |
+| `verify_menu.py` | 菜单结构与顺序（含「检查更新」已移出文件菜单） |
+| `verify_frame_badges.py` | 帧号色块排版（多动作复用同一元素时不得互相遮盖） |
+| `verify_composite_badges.py` | 合成帧色块排版（多动作合成同一组元素时不得互相遮盖） |
+| `verify_settings.py` | 软件设置（默认值 / 关掉后不写缩略图 / 描边分层 / 弹窗接线） |
+| `verify_project_format.py` | 工程文件格式（新布局 / 旧布局兼容 / 缩略图退回 / 损坏文件） |
+| `verify_export_names.py` | 导出选项默认值与顺序 + 同名文件处理 |
+| `verify_roundtrip.py` | 导出→导入逐字段往返审计（四种 JSON 格式，含逐帧像素与帧间位移） |
+| `verify_single_instance.py` | 单实例（协议 / 探测 / 真起第二个进程的端到端转发） |
+| `verify_updater.py` | 更新检查端到端核对（地址可达 / 证书严格校验 / 版本列表解析） |
+| `verify_checker.py` | 棋盘格平铺改造的逐像素等价验证 |
+| `verify_perf_equiv.py` | 性能优化等价性验证（对照原算法，含真实素材） |
+| `verify_icon_ratio.py` | 图标文件层（方形帧 / 图比例不变 / 按高度铺满 / 逐档独立缩放） |
+| `verify_icon_imagelist.py` | 图标**显示**层（走 `SHGetFileInfo` 真实路径，确认没被拉伸压扁；含自检） |
+
+### 诊断与一次性工具
+
+这些不参与上面的整套回归：平时排查用的诊断工具，加上重构期间做**取证**用的一次性脚本
+（它们不是"没写好的回归"，是不需要每次都跑）。其中需要传文件路径的几个，不带参数运行时
+会报用法错误或 `IndexError`，这是预期的 —— 用法见各脚本文件头。
+
+| 脚本 | 用途 |
+| --- | --- |
+| `inspect_theme.py` | 界面配色**诊断**（不是断言）：整窗渲染找"成条的浅色区域"并打印各部件颜色 |
+| `profile_hotpaths.py` | 热路径采样（先测再改：重绘 / 打包 / 导出 / 检测） |
+| `inspect_project_file.py` | 实存一个工程并检查其文件布局与缩略图 |
+| `bench.py` | 性能基准（关键热路径 A/B，仓库根目录） |
+| `make_icons.py` | 从源 PNG 生成多尺寸 `.ico`（方形帧；`--extract` 取原图；`--frames` 导出等比缩放序列） |
+| `inspect_icon.py` | 打印 `.ico` 内嵌尺寸表并校验是否全是标准方形尺寸 |
 | `static_scan.py` | 扫描未使用导入 / 疑似死代码（AST） |
 | `check_spacing.py` | 检查顶层与类内定义的空行规范 |
 | `block_tool.py` | 按限定名定位 / 剪切 / 抽取代码块（含 AST 一致性比对） |
+| `free_names.py` | 列出某个代码块引用的自由名字（据此确定新模块需要哪些 import，不靠猜） |
+| `assemble.py` | 用"手写文件头 + 抽取的代码块"拼出新模块 |
 | `verify_move.py` | 证明代码块在文件间搬移前后 AST 完全一致（纯搬移证据） |
-| `verify_perf_equiv.py` | 性能优化等价性验证（对照原算法，含真实素材） |
-| `verify_checker.py` | 棋盘格平铺改造的逐像素等价验证 |
-| `verify_frame_badges.py` | 帧号色块排版回归（多动作复用同一元素时不得互相遮盖） |
-| `verify_composite_badges.py` | 合成帧色块排版回归（多动作合成同一组元素时不得互相遮盖） |
-| `verify_menu.py` | 菜单结构与顺序回归（含「检查更新」已移出文件菜单） |
-| `verify_header.py` | 顶部名称栏回归（无图标 / 首字母更大 / 两段垂直中心对齐） |
-| `verify_glyphs.py` | **字形**回归（必须跑真实 windows 平台：叉号不是缺字方框、三段文字对齐） |
-| `verify_adjust_panel.py` | 变换按钮布局回归（每行两个 / 摘要独占一行 / 窄了换行 / **8 个按钮等宽** / 清空变换悬停图标转白） |
-| `verify_tabs.py` | 工程标签页回归（位置 / 新建 / 切换不串味 / 改名 / 关闭 / 标签栏逐像素 / **标签上不画未保存点**） |
-| `verify_offset_drag.py` | 帧偏移拖动回归（拖动时**帧真的动**、画布区域冻结、松手才重算并集；真滑块 + 真像素） |
-| `verify_no_action_hint.py` | 无动作提示回归（点图片/变换按钮/合成按钮都要提示「先添加动作」，且不会留下脏数据） |
-| `verify_single_instance.py` | 单实例回归（协议 / 探测 / 真起第二个进程的端到端转发） |
-| `inspect_theme.py` | 界面配色**诊断**（不是断言）：整窗渲染找"成条的浅色区域"并打印各部件颜色 |
-| `verify_settings.py` | 软件设置回归（默认值 / 关掉后不写缩略图 / 描边分层 / 弹窗接线） |
-| `verify_roundtrip.py` | 导出→导入逐字段往返审计（四种 JSON 格式，含逐帧像素与帧间位移） |
-| `profile_hotpaths.py` | 热路径采样（先测再改：重绘 / 打包 / 导出 / 检测） |
-| `verify_project_format.py` | 工程文件格式回归（新布局 / 旧布局兼容 / 缩略图退回 / 损坏文件） |
-| `verify_export_names.py` | 导出选项默认值与顺序 + 同名文件处理回归 |
-| `verify_updater.py` | 更新检查端到端核对（地址可达 / 证书严格校验 / 版本列表解析） |
-| `inspect_project_file.py` | 实存一个工程并检查其文件布局与缩略图 |
-| `make_icons.py` | 从源 PNG 生成多尺寸 `.ico`（方形帧；`--extract` 取原图；`--frames` 导出等比缩放序列） |
-| `inspect_icon.py` | 打印 `.ico` 内嵌尺寸表并校验是否全是标准方形尺寸 |
-| `verify_icon_ratio.py` | 图标文件层回归（方形帧 / 图比例不变 / 按高度铺满 / 逐档独立缩放） |
-| `verify_icon_imagelist.py` | 图标**显示**层回归（走 `SHGetFileInfo` 真实路径，确认没被拉伸压扁；含自检） |
+| `verify_class_members.py` | 逐个类成员比对两个文件，点名差异项 |
+| `diff_vs_baseline.py` | 与清理前的基线逐块比对，让每处差异都能归因到某个已知改动 |
+| `patch_checker.py` | 一次性：把三处棋盘格绘制换成 `paint_checkerboard`（找不到预期片段会明确报错） |
 
-> `verify_move.py` / `verify_class_members.py` 需要传入「改动前 / 改动后」两个文件路径，
-> 是重构期间的一次性取证工具，不带参数运行会以 `IndexError` 退出，这是预期的。
+> `verify_move.py` / `verify_class_members.py` / `diff_vs_baseline.py` / `assemble.py` /
+> `free_names.py` 需要传入文件路径（见各自文件头的 Usage），是重构期间的取证工具。
 
-> 界面类脚本（`verify_menu.py` / `verify_settings.py` / `verify_export_names.py`）结尾
+> 界面类脚本（`verify_menu.py` / `verify_settings.py` / `verify_export_names.py` 等）结尾
 > 必须 `win.close()`：只有关窗口才会走 `closeEvent → ImageViewer.shutdown()`，
 > 否则元素检测线程会与窗口析构撞车（`0xC0000005`，连续跑整套回归时必现）。
 
+## 版本历史（近期）
+
+每个版本都在 `installer/` 下留了安装包（目前保留 v1.1.20 起共 15 个）；**缺陷的成因、
+修复方式与回归证据**记在 `SPLIT_GUIDE.md §9`（下面"详见"列就是对应的条目）。
+
+| 版本 | 主要变化 | 详见 |
+| --- | --- | --- |
+| v1.1.34 | 删掉工程标签上的未保存圆点（那个点本来就不是有意设计的） | §9.14 ④ |
+| v1.1.33 | 拖偏移时帧真的移动（松手才重算画布区域）；无动作时点图片/控件给提示；变换按钮等宽 + 清空变换悬停图标转白 | §9.14 ①②③ |
+| v1.1.32 | 「清空变换」改红色；关闭叉号下移 3px 与工程名对齐；修当前帧微调的显示不同步 | — |
+| v1.1.31 | 斜切恢复（"加清空变换"不是"替换斜切"）；清空变换挪进按钮网格 | — |
+| v1.1.30 | 新增「清空变换」；Shift 三种吸附（锁轴 / 等比 / 15°） | — |
+| v1.1.29 | 透视联动修正（邻角反向收放才是梯形）；关闭叉号悬停转 30° 变红 | — |
+| v1.1.28 | 叉号改用真符号 ✕；首字母按**大写带**对齐；新增字形回归 | §9.13 |
+| v1.1.27 | 标签改直角；关闭叉号换真符号 + 红色悬停动画；变换按钮两个一行 | §9.12 |
+| v1.1.26 | 标签栏自己铺底色；文件对话框记住上次目录；导出以工程名命名/成夹；修「点标签不切工程」 | — |
+| v1.1.25 | 标签栏移到软件名下方、版本号与名字底对齐；单实例（只跑一个进程） | §9.11 |
+| v1.1.24 | 工程标签页（多工程：切换不串味、双击改名）；顶部名称栏去掉图标 | §9.10 |
+| v1.1.23 | `SSTool.ico` 回退到方形帧（非方形会被资源管理器拉伸压扁）；无工程数据时不勾"导出 SSTOOL 工程" | §9.7 |
+| v1.1.22 | 新增「软件设置」（缩略图开关 + 检查更新移入）；默认导出 SSTOOL 工程并排在 JSON 之前 | §9.7 9.8 9.9 |
+| v1.1.17 | 工程文件改成「PNG + 容器」，资源管理器直接显示缩略图 | §9.6 |
+
+更早的版本（v1.1.16 及以前）见 `pre-rebuild-backup` 分支的历史。
 
 ## 换电脑 / 迁移清单
 
