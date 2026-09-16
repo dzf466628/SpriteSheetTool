@@ -142,21 +142,30 @@ class AppNameLabel(QWidget):
         rect = fm.tightBoundingRect(text)
         return rect.top(), rect.bottom()
 
+    @staticmethod
+    def _cap_height(fm: QFontMetricsF) -> float:
+        """大写字母高度：拿 "H" 的墨迹高当基准。
+
+        为什么不用 ``fm.capHeight()``：offscreen 下它和字号一样大（度量退化）；
+        为什么要专门找一个**没有降部**的字符：正文 "priteSheetTool" 里的 p 会往下伸，
+        直接量它的墨迹盒会把降部也算进去，首字母就会被"居中"到偏低的位置
+        （真实字体下实测偏低 3px —— 眼神看就是 S 站得偏下）。
+        """
+        rect = fm.tightBoundingRect("H")
+        return rect.bottom() - rect.top()
+
     def _baselines(self) -> tuple[float, float]:
         """返回 (正文基线 y, 首字母基线 y)。
 
         两步：
-          ① 先让**两块墨迹的垂直中心对齐**（这样首字母是"上下居中"而不是被基线吊上去）；
-          ② 再把合并后的整块墨迹放到控件竖直中线上。
-        用墨迹盒而不是 capHeight：渲染出来的实际墨迹比 capHeight 高一点点
-        （抗锯齿外扩），只用 capHeight 算会整体偏高几个像素。
+          ① 首字母的墨迹盒中心对齐**正文的大写带中心**（大写顶 → 基线），降部不参与；
+          ② 再把两块（正文大写带 + 首字母盒）合起来放到控件竖直中线上。
         """
-        body_top, body_bot = self._ink_rel(self._fm_base, self._rest + self._tail)
-        head_top, head_bot = self._ink_rel(self._fm_head, self._head)
-        # 首字母基线相对正文基线的偏移：让两块墨迹中心重合
-        delta = ((body_top + body_bot) / 2.0) - ((head_top + head_bot) / 2.0)
-        top = min(body_top, delta + head_top)
-        bottom = max(body_bot, delta + head_bot)
+        cap_base = self._cap_height(self._fm_base)
+        cap_head = self._cap_height(self._fm_head)
+        delta = (cap_head - cap_base) / 2.0        # 首字母基线相对正文基线的下移量
+        top = min(-cap_base, delta - cap_head)
+        bottom = max(0.0, delta)
         base_y = self.height() / 2.0 - (top + bottom) / 2.0
         return base_y, base_y + delta
 
@@ -243,7 +252,7 @@ class ProjectTabBar(QWidget):
     CLOSE_RED = "#E91E63"        # 关闭按钮悬停时的红色（软件强调色）
     CLOSE_IDLE = "#6a6a6a"       # 未悬停时的叉号颜色
     CLOSE_HOVER_MS = 130         # 悬停动画时长
-    CLOSE_GLYPH = "×"            # 叉号字符（U+00D7；想用 ✕ 就改这里）
+    CLOSE_GLYPH = "✕"            # 叉号字符（U+2715；想用更细的 × 改成 "×"）
 
     tab_selected = pyqtSignal(int)
     tab_close_requested = pyqtSignal(int)
@@ -273,9 +282,13 @@ class ProjectTabBar(QWidget):
         self._close_font.setPixelSize(13)
         self._close_font.setBold(True)
         # 叉号用真正的符号字形画（原来是用两条斜线拼的，看着不像正常叉号）。
-        # 用 ×(U+00D7)：Windows 字体里必有这个字形。
-        # 想换成更好看的 ✕(U+2715) 就改这一处 —— 但**别用 QFontMetricsF.inFont 判断**
-        # 字形是否存在：实测（offscreen 下）它对 ASCII 'x' 也返回 False，判断不可靠。
+        # 用 ✕(U+2715)：在真实 Windows 字体下渲染成 11x10 的粗叉、居中好看。
+        # 想换成 ×(U+00D7) 就改 CLOSE_GLYPH 一处（更小更细）。
+        #
+        # ⚠️ 字形不能用 QFontMetricsF.inFont() 判断是否存在，也别在 offscreen 下量：
+        #    - inFont 实测对 ASCII 'x' 都返回 False；
+        #    - offscreen 平台**没有真实字体**，任何字符都画成同一个方框（tofu）。
+        #    字形是否正常由 tools/verify_glyphs.py（跑在真实 windows 平台）验证。
         self._close_glyph = self.CLOSE_GLYPH
 
     def _on_close_anim(self, value) -> None:

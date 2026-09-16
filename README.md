@@ -1,4 +1,4 @@
-﻿# SpriteSheetTool
+# SpriteSheetTool
 
 精灵图（Sprite Sheet）打包工具：自动检测原图元素、按动作逐帧编排动画，支持
 自由变换（旋转/缩放/斜切/透视/扭曲）、帧复用，一键导出图集 PNG / GIF / 多种 JSON。
@@ -118,6 +118,17 @@ python -m venv .venv
 不用 QLabel 富文本的原因：Qt 富文本按基线对齐，放大首字母会整块往上冒，
 看起来是"吊在上面"而不是上下居中 —— 所以这里按墨迹盒自己算基线。
 名称控件高 54、名称栏高 64，下边缘留 5px，不会越界去盖住下面的标签栏。
+
+对齐基准是**大写带**（大写顶 → 基线），不是整块墨迹盒：正文 "SpriteSheet" 里的 `p`
+有降部，把它算进去首字母会被"居中"到偏低的位置（真实字体下实测偏低 3px）。
+大写高度用 `tightBoundingRect("H")` 量，不用 `capHeight()`（offscreen 下后者退化到
+和字号一样大）。真实字体实测：首字母墨迹 24px、正文到大写高度 18px，两者中心差 **1.0px**；
+版本号下缘与名字基线差 **0.6px**。
+
+> ⚠️ **offscreen 平台没有真实字体**：`QT_QPA_PLATFORM=offscreen` 下任何字符
+> （连 ASCII `x`）都被画成同一个方框。所以回归里"文字画出来了 / 墨迹多少像素"这类断言
+> 只能证明**位置与尺寸**，证明不了字形本身 —— 字形由 `tools/verify_glyphs.py`
+> 在真实 windows 平台下验证（它只往 QPixmap 上画，不显示窗口，不会闪屏）。
 
 ### 导出格式
 
@@ -393,6 +404,8 @@ settings_dialog / settings   是叶子（只被 main_window 引用），不反�
 | `verify_composite_badges.py` | 合成帧色块排版回归（多动作合成同一组元素时不得互相遮盖） |
 | `verify_menu.py` | 菜单结构与顺序回归（含「检查更新」已移出文件菜单） |
 | `verify_header.py` | 顶部名称栏回归（无图标 / 首字母更大 / 两段垂直中心对齐） |
+| `verify_glyphs.py` | **字形**回归（必须跑真实 windows 平台：叉号不是缺字方框、三段文字对齐） |
+| `verify_adjust_panel.py` | 变换按钮布局回归（每行两个 / 摘要独占一行 / 窄了换行） |
 | `verify_tabs.py` | 工程标签页回归（位置 / 新建 / 切换不串味 / 改名 / 关闭 / 标签栏逐像素） |
 | `verify_single_instance.py` | 单实例回归（协议 / 探测 / 真起第二个进程的端到端转发） |
 | `inspect_theme.py` | 界面配色**诊断**（不是断言）：整窗渲染找"成条的浅色区域"并打印各部件颜色 |
