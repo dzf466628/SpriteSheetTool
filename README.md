@@ -5,7 +5,8 @@
 
 - 技术栈：Python 3.10+ · PyQt6 · Pillow（GIF 导出）
 - 主题：深色界面 + 单一玫红强调色
-- 当前版本：**v1.1.16**
+- 当前版本：**v1.1.24**
+- 许可证：**GNU GPL v3**（开源免费，可自由使用/修改/再分发）
 
 ---
 
@@ -407,3 +408,23 @@ settings_dialog / settings   是叶子（只被 main_window 引用），不反�
   - `__pycache__/`、`.pytest_cache/`、`dsh-usage/` —— 缓存，可随时删除
   - 根目录示例图（`003-妙蛙花.png` 等）—— 仅调试素材，可删
 - 新电脑首次运行：装好 Python（勾选 PATH）→ 双击 `启动.bat` 即可。
+
+## 许可证
+
+本软件以 **GNU General Public License v3.0**（GPL v3）开源。
+
+你可以自由使用、修改和再分发本软件，包括收费销售二进制版本——但必须同时向接收者提供完整源代码，且接收者有权在 GPL v3 条款下自由再分发。程序按"原样"提供，不附带任何担保。
+
+完整许可证文本见项目根目录的 LICENSE 文件。
+
+### 第三方开源组件
+
+| 组件 | 版本 | 许可证 | 说明 |
+| --- | --- | --- | --- |
+| PyQt6 | 6.11 | GPL v3 / Commercial | GUI 框架（Riverbank Computing） |
+| Pillow | 12.3 | HPND License | 图像处理 / GIF 导出 |
+| PyInstaller | 6.22 | GPL v2+ with Bootloader Exception | 打包为 Windows 可执行文件 |
+| Inno Setup 6 | — | Inno Setup License | 安装包制作（Jordan Russell） |
+| ChineseSimplified.isl | — | Inno Setup 社区翻译 | 安装向导简体中文（kira-96） |
+
+PyInstaller 的 GPL 例外条款明确允许用其构建和分发非自由（包括商业）程序，因此 PyInstaller 本身不会使本软件受到 GPL 传染；本软件选择 GPL v3 是因为使用了 PyQt6 的 GPL 版本。
