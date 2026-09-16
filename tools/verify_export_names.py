@@ -54,7 +54,7 @@ def make_sheet(elements=3, size=40):
     return pm, rects
 
 
-def build_dialog(separate: bool):
+def build_dialog(separate: bool, apply_overrides: bool = True):
     from spritesheet.ui.main_window import MainWindow
     win = MainWindow()
     pm, rects = make_sheet()
@@ -73,11 +73,12 @@ def build_dialog(separate: bool):
         act.selected_indices = [i]
         viewer.crop_frames_for_action(act)
     dlg = ExportDialog(win.actions, viewer._pixmap, project_provider=win._project_manifest)
-    dlg.cb_gif.setChecked(True)
-    dlg.cb_project.setChecked(True)
-    dlg.cb_separate.setChecked(separate)
-    dlg._json_fmt_checks[FMT_NATIVE].setChecked(True)
-    dlg._json_fmt_checks[FMT_TP_HASH].setChecked(True)
+    if apply_overrides:
+        dlg.cb_gif.setChecked(True)
+        dlg.cb_project.setChecked(True)
+        dlg.cb_separate.setChecked(separate)
+        dlg._json_fmt_checks[FMT_NATIVE].setChecked(True)
+        dlg._json_fmt_checks[FMT_TP_HASH].setChecked(True)
     return win, dlg
 
 
@@ -121,9 +122,38 @@ def run_case(label: str, separate: bool) -> None:
     win.close()
 
 
+def check_defaults() -> None:
+    """导出选项的默认值与顺序：默认导出 SSTOOL 工程，且排在 JSON 之前。"""
+    print("\n=== 导出选项默认值与顺序 ===")
+    win, dlg = build_dialog(separate=False, apply_overrides=False)
+    check("默认勾选「导出 SSTOOL 工程」", dlg.cb_project.isChecked())
+    check("默认勾选「导出 JSON」", dlg.cb_json.isChecked())
+    check("默认不勾选 GIF / 分别导出",
+          not dlg.cb_gif.isChecked() and not dlg.cb_separate.isChecked())
+
+    # 读出「附加选项」里的复选框顺序（布局顺序 = 用户看到的顺序）
+    order = []
+    layout = dlg.cb_project.parentWidget().layout()
+    for i in range(layout.count()):
+        widget = layout.itemAt(i).widget()
+        if widget in (dlg.cb_project, dlg.cb_json, dlg.cb_gif, dlg.cb_separate):
+            order.append(widget.text())
+    print(f"    附加选项顺序: {order}")
+    check("SSTOOL 工程排在 JSON 之前",
+          order.index(dlg.cb_project.text()) < order.index(dlg.cb_json.text()),
+          f"实际 {order}")
+
+    # 默认导出就应该产出 project.sstool
+    tmp = Path(tempfile.mkdtemp(prefix="sstool_export_default_"))
+    planned = [p.name for p in dlg._planned_names(tmp)]
+    check("默认就会写入 project.sstool", "project.sstool" in planned, f"实际 {planned}")
+    win.close()
+
+
 def main() -> int:
     app = QApplication(sys.argv)
     patch_policy()
+    check_defaults()
     run_case("整体导出（不分别导出）", separate=False)
     run_case("分别导出（每个动作一个文件夹）", separate=True)
     print()

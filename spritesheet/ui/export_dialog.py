@@ -307,18 +307,19 @@ class ExportDialog(QDialog):
         lbl_extra = QLabel("附加选项")
         lbl_extra.setStyleSheet("color: #F06292; font-weight: bold;")
         right_layout.addWidget(lbl_extra)
+        # 顺序即优先级：SSTOOL 工程排第一位（它是最完整的产物），JSON 紧随其后。
+        self.cb_project = QCheckBox("导出 SSTOOL 工程")
+        self.cb_project.setChecked(True)   # 默认导出：工程文件是最完整的交付物
+        self.cb_project.setToolTip("导出一个包含全部原图和编辑状态的单文件工程")
         self.cb_json = QCheckBox("导出 JSON")
         self.cb_json.setChecked(True)  # 默认打开导出 JSON
         self.cb_gif = QCheckBox("导出 GIF（预览）")
         self.cb_separate = QCheckBox("分别导出")
-        self.cb_project = QCheckBox("导出 SSTOOL 工程")
-        self.cb_project.setChecked(False)
-        self.cb_project.setToolTip("导出一个包含全部原图和编辑状态的单文件工程")
         self.cb_separate.toggled.connect(self._on_separate_toggled)
+        right_layout.addWidget(self.cb_project)
         right_layout.addWidget(self.cb_json)
         right_layout.addWidget(self.cb_gif)
         right_layout.addWidget(self.cb_separate)
-        right_layout.addWidget(self.cb_project)
 
         # JSON 格式：独立分组框 + 竖排（可多选，同时导出多种格式）
         json_fmt_group = QGroupBox("JSON 格式（可多选）")
