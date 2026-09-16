@@ -35,7 +35,7 @@ from .transform import (
 )
 from .widgets import (
     CompactComboBox, CompactSpinBox, EditableNumberLabel, _GROUP_QSS, _SLIDER_QSS,
-    make_tool_icon,
+    make_tool_icon, paint_checkerboard,
 )
 
 
@@ -767,13 +767,8 @@ class PreviewCanvas(QWidget):
         if self._action.action_type == "move":
             self._draw_moving_background(p, QRectF(background_rect), background_scale)
         elif self._action.bg_mode == "checker":
-            cell = max(4, int(12 * background_scale))
-            for y in range(0, background_rect.height(), cell):
-                for x in range(0, background_rect.width(), cell):
-                    if ((x // cell) + (y // cell)) % 2 == 0:
-                        p.fillRect(x, y, cell, cell, QColor("#2a2a2a"))
-                    else:
-                        p.fillRect(x, y, cell, cell, QColor("#1e1e1e"))
+            # 一次平铺：原来 cell 最小 4，1000x800 下每帧最多约 5 万次 fillRect
+            paint_checkerboard(p, background_rect, max(4, int(12 * background_scale)))
         elif self._action.bg_mode == "black":
             p.fillRect(background_rect, QColor("#000000"))
         else:

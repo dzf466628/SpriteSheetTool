@@ -37,7 +37,7 @@ from .transform import (
     DEFAULT_QUAD, DEFAULT_ROTATION_PIVOT, action_anchor_pixels, action_frame_pixmap,
     action_frame_size, compute_preview_layout, transform_frame_pixmap,
 )
-from .widgets import ActionThumbPlayer, SwitchWidget
+from .widgets import ActionThumbPlayer, SwitchWidget, paint_checkerboard
 
 
 class PreviewArea(QWidget):
@@ -131,12 +131,8 @@ class PreviewArea(QWidget):
             return
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        # 棋盘格背景
-        cell = 10
-        for y in range(0, self.height(), cell):
-            for x in range(0, self.width(), cell):
-                c = "#2a2a2a" if (x // cell + y // cell) % 2 == 0 else "#1e1e1e"
-                p.fillRect(x, y, cell, cell, QColor(c))
+        # 棋盘格背景（一次平铺，替代逐格 fillRect）
+        paint_checkerboard(p, self.rect(), 10)
         rect = self._fit_rect()
         if rect is not None:
             x, y, dw, dh = rect

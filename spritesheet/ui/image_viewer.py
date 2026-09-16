@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .models import Action
-from .widgets import RULER_SIZE, _Ruler, make_tool_icon
+from .widgets import RULER_SIZE, _Ruler, make_tool_icon, paint_checkerboard
 
 
 SUPPORTED_IMAGE_EXT = {".png", ".webp", ".jpeg", ".jpg", ".gif", ".bmp"}
@@ -50,20 +50,41 @@ def _detect_frames_image(img: QImage, alpha_threshold: int = 10) -> list[tuple[i
     """
     if img is None or img.isNull():
         return []
+    if alpha_threshold > 255:
+        return []  # alpha 上限 255，不可能有像素达标（与原实现等价）
     img = img.convertToFormat(QImage.Format.Format_ARGB32)
     w, h = img.width(), img.height()
+    if w <= 0 or h <= 0:
+        return []
     # 一次性复制连续像素，避免逐行创建 bytes 和重复 scanLine 调用。
     ptr = img.bits()
     ptr.setsize(w * h * 4)
     data = bytes(ptr)
+    stride = img.bytesPerLine()
+    if stride == w * 4:
+        alpha = data[3::4]           # 快路径：每像素 4 字节且行已 4 字节对齐
+    else:                            # 兜底：逐行取 alpha，丢掉行尾 padding
+        alpha = b"".join(
+            data[y * stride + 3:y * stride + w * 4:4] for y in range(h)
+        )
+    # 低于阈值的字节集合，供 lstrip 成段跳过透明像素
+    below = bytes(range(max(0, min(255, int(alpha_threshold)))))
     visited = bytearray(w * h)
     frames = []
     for sy in range(h):
         row_base = sy * w
-        for sx in range(w):
+        row = alpha[row_base:row_base + w]
+        if max(row) < alpha_threshold:
+            continue                 # 整行有效像素为 0：跳过
+        sx = 0
+        while sx < w:
+            if row[sx] < alpha_threshold:
+                rest = row[sx:]
+                sx += len(rest) - len(rest.lstrip(below))
+                continue
             start = row_base + sx
-            if visited[start] or data[start * 4 + 3] < alpha_threshold:
-                visited[start] = 1
+            if visited[start]:
+                sx += 1
                 continue
             stack = [start]
             visited[start] = 1
@@ -71,28 +92,29 @@ def _detect_frames_image(img: QImage, alpha_threshold: int = 10) -> list[tuple[i
             min_y = max_y = sy
             while stack:
                 pos = stack.pop()
-                cx, cy = pos % w, pos // w
+                cy, cx = divmod(pos, w)   # divmod 返回 (商, 余数) = (行, 列)
                 if cx < min_x: min_x = cx
                 if cx > max_x: max_x = cx
                 if cy < min_y: min_y = cy
                 if cy > max_y: max_y = cy
                 if cx > 0:
                     ni = pos - 1
-                    if not visited[ni] and data[ni * 4 + 3] >= alpha_threshold:
+                    if not visited[ni] and alpha[ni] >= alpha_threshold:
                         visited[ni] = 1; stack.append(ni)
                 if cx + 1 < w:
                     ni = pos + 1
-                    if not visited[ni] and data[ni * 4 + 3] >= alpha_threshold:
+                    if not visited[ni] and alpha[ni] >= alpha_threshold:
                         visited[ni] = 1; stack.append(ni)
                 if cy > 0:
                     ni = pos - w
-                    if not visited[ni] and data[ni * 4 + 3] >= alpha_threshold:
+                    if not visited[ni] and alpha[ni] >= alpha_threshold:
                         visited[ni] = 1; stack.append(ni)
                 if cy + 1 < h:
                     ni = pos + w
-                    if not visited[ni] and data[ni * 4 + 3] >= alpha_threshold:
+                    if not visited[ni] and alpha[ni] >= alpha_threshold:
                         visited[ni] = 1; stack.append(ni)
             frames.append((min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
+            sx += 1
     return frames
 
 
@@ -140,13 +162,8 @@ class _Canvas(QWidget):
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         # 背景
         if self._viewer._bg_mode == "checker":
-            cell = 12
-            for y in range(0, self.height(), cell):
-                for x in range(0, self.width(), cell):
-                    if (x // cell + y // cell) % 2 == 0:
-                        p.fillRect(x, y, cell, cell, QColor("#2a2a2a"))
-                    else:
-                        p.fillRect(x, y, cell, cell, QColor("#1e1e1e"))
+            # 一次平铺（原逐格 fillRect 在大画布上每次重绘要数千次调用）
+            paint_checkerboard(p, self.rect(), 12)
         elif self._viewer._bg_mode == "black":
             p.fillRect(self.rect(), QColor("#000000"))
         else:
