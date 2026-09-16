@@ -27,7 +27,9 @@ from spritesheet import __app_name__, __version__
 from spritesheet.project_file import (
     _pixmap_bytes, _pixmap_from_bytes, _rect_from_dict, read_project, write_project,
 )
-from spritesheet.settings import show_project_thumbnail
+from spritesheet.settings import (
+    last_directory, set_last_directory, show_project_thumbnail,
+)
 from spritesheet.updater import UPDATE_URL, UpdateCheckThread, UpdateDownloadThread
 
 from .image_viewer import SUPPORTED_IMAGE_EXT, ImageViewer
@@ -154,6 +156,69 @@ class _TransformHistoryCommand(QUndoCommand):
 
     def undo(self) -> None:
         self._owner._restore_transform_state(self.before)
+
+
+class AboutDialog(QDialog):
+    """关于对话框：GPL v3 声明 + 第三方组件清单。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("关于 SpriteSheetTool")
+        self.setModal(True)
+        self.setMinimumWidth(480)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
+
+        title = QLabel(f"SpriteSheetTool  v{__version__}")
+        title.setStyleSheet("color: #ffffff; font-size: 18px; font-weight: bold;")
+        layout.addWidget(title)
+
+        subtitle = QLabel("精灵图打包工具：自动检测元素、按动作编排动画、自由变换、一键导出图集/GIF/JSON")
+        subtitle.setStyleSheet("color: #9a9a9a; font-size: 11px;")
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+
+        layout.addSpacing(4)
+
+        gpl_label = QLabel(
+            "本软件以 <span style='color:#E91E63;'>GNU GPL v3</span> 开源，"
+            "你可以自由使用、修改和再分发。"
+            "程序按\"原样\"提供，不附带任何担保。"
+        )
+        gpl_label.setStyleSheet("color: #e8e8e8; font-size: 11px;")
+        gpl_label.setWordWrap(True)
+        layout.addWidget(gpl_label)
+
+        layout.addSpacing(4)
+
+        third_title = QLabel("使用的第三方开源组件：")
+        third_title.setStyleSheet("color: #e8e8e8; font-size: 12px; font-weight: bold;")
+        layout.addWidget(third_title)
+
+        components = [
+            ("PyQt6 6.11", "GPL v3 / Commercial — Riverbank Computing"),
+            ("Pillow 12.3", "HPND License — Python Imaging Library"),
+            ("PyInstaller 6.22", "GPL v2+ with Bootloader Exception"),
+            ("Inno Setup 6", "Inno Setup License — Jordan Russell"),
+            ("简体中文翻译", "Inno Setup 社区翻译 — kira-96"),
+        ]
+        for name, desc in components:
+            item = QLabel(f"  •  <span style='color:#E91E63;'>{name}</span>  —  {desc}")
+            item.setStyleSheet("color: #b0b0b0; font-size: 10px;")
+            item.setWordWrap(True)
+            layout.addWidget(item)
+
+        layout.addSpacing(8)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton("关闭")
+        close_btn.setFixedWidth(90)
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
 
 
 class MainWindow(QMainWindow):
@@ -732,15 +797,29 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText(f"工程已保存：{target.name}")
         return True
 
+    def _dialog_start(self, default_name: str = "") -> str:
+        """文件对话框的默认位置：优先当前工程所在目录，其次上次用过的目录（没记录过
+        或目录已不存在就回退到桌面），最后拼上默认文件名。"""
+        if self._project_path is not None:
+            folder = str(self._project_path.parent)
+        else:
+            folder = last_directory()
+        return str(Path(folder) / default_name) if default_name else folder
+
+    def _remember_dialog_path(self, path: str | Path | None) -> None:
+        set_last_directory(path)
+
     def _save_project_as(self) -> bool:
         path, _ = QFileDialog.getSaveFileName(
-            self, "保存 SSTOOL 工程", str(self._project_path or "工程.sstool"),
+            self, "保存 SSTOOL 工程",
+            self._dialog_start(f"{self._project_name or '工程'}.sstool"),
             "SSTOOL 工程 (*.sstool)"
         )
         if not path:
             return False
         if not path.lower().endswith(".sstool"):
             path += ".sstool"
+        self._remember_dialog_path(path)
         return self._save_project(path)
 
     def _new_project(self) -> None:
@@ -751,8 +830,10 @@ class MainWindow(QMainWindow):
         self._new_tab()
 
     def _open_project_dialog(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "打开 SSTOOL 工程", "", "SSTOOL 工程 (*.sstool)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "打开 SSTOOL 工程", self._dialog_start(), "SSTOOL 工程 (*.sstool)")
         if path:
+            self._remember_dialog_path(path)
             self._open_project(path)
 
     def _open_project(self, path: str) -> bool:
@@ -969,6 +1050,8 @@ class MainWindow(QMainWindow):
         self.preview.set_actions(self.actions)
         # 导出工程（.sstool）需要完整文档数据；provider 由主窗口注入
         self.preview._project_manifest = self._project_manifest
+        # 导出产物以当前标签页的工程名开头
+        self.preview._project_name_provider = lambda: self._project_name
         self.preview.adjust_panel.changed.connect(self._on_transform_history_changed)
         self.preview.adjust_panel.changed.connect(self._mark_project_dirty)
         self.preview.canvas.transform_edit_started.connect(self._begin_transform_history)
@@ -1048,6 +1131,11 @@ class MainWindow(QMainWindow):
         act_settings.triggered.connect(self._open_settings)
         edit_menu.addAction(act_settings)
 
+        # 帮助菜单：关于（GPL 声明 + 第三方组件）
+        help_menu = menubar.addMenu("帮助")
+        act_about = QAction("关于 SpriteSheetTool", self)
+        act_about.triggered.connect(self._open_about)
+        help_menu.addAction(act_about)
         # 启动后延迟自动检查一次更新（不阻塞界面；失败时静默）
         self._update_thread: UpdateCheckThread | None = None
         self._update_checked = False
@@ -1068,6 +1156,10 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self, check_update=self._check_update_manual)
         dialog.exec()
 
+    def _open_about(self) -> None:
+        """帮助 → 关于 SpriteSheetTool：GPL 声明 + 第三方组件清单。"""
+        dialog = AboutDialog(self)
+        dialog.exec()
     def _start_update_check(self, notify_no_update: bool):
         if getattr(self, "_update_thread", None) is not None and self._update_thread.isRunning():
             return  # 上一次检查还没结束
@@ -1250,10 +1342,11 @@ class MainWindow(QMainWindow):
 
     def _open_image(self):
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "添加图片", "",
+            self, "添加图片", self._dialog_start(),
             "图片文件 (*.png *.jpg *.jpeg *.bmp *.gif *.webp)"
         )
         for path in paths:
+            self._remember_dialog_path(path)
             pm = QPixmap(path)
             if not pm.isNull():
                 self._on_image_loaded(pm)
@@ -1262,9 +1355,10 @@ class MainWindow(QMainWindow):
 
     def _import_json_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "导入 JSON 工程", "", "精灵图 JSON (*.json)"
+            self, "导入 JSON 工程", self._dialog_start(), "精灵图 JSON (*.json)"
         )
         if path:
+            self._remember_dialog_path(path)
             self._import_project(path)
 
     def _import_project(self, path_str: str) -> None:

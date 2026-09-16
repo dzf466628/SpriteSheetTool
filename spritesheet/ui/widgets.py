@@ -227,10 +227,13 @@ class ProjectTabBar(QWidget):
     """
 
     HEIGHT = 26
-    PAD_X = 10            # 标签内左右留白
+    PAD_X = 14            # 标签内左右留白
+    NAME_GAP = 26         # 文件名与关闭叉号之间留出的空档（原来只有 14，太挤）
     CLOSE_W = 14          # 关闭按钮宽度
-    GAP = 2               # 标签间距
+    GAP = 4               # 标签间距
     PLUS_W = 26
+    TEXT_DROP = 2         # 文件名整体下移的像素数
+    MIN_W = 96            # 标签最小宽度（比原来宽，名字短的也不会挤成一小块）
     BG = "#1a1a1a"
     LINE = "#333333"
 
@@ -314,9 +317,11 @@ class ProjectTabBar(QWidget):
         rects = []
         x = 4.0
         for tab in self._tabs:
-            width = fm.horizontalAdvance(tab["name"]) + self.PAD_X * 2 + self.CLOSE_W
-            rects.append(QRect(int(x), 0, int(max(48.0, width)), self.height()))
-            x += max(48.0, width) + self.GAP
+            # 宽度 = 左右留白 + 名字 + 名字与叉号之间的空档 + 叉号
+            width = fm.horizontalAdvance(tab["name"]) + self.PAD_X * 2 + self.NAME_GAP + self.CLOSE_W
+            width = max(float(self.MIN_W), width)
+            rects.append(QRect(int(x), 0, int(width), self.height()))
+            x += width + self.GAP
         return rects
 
     def plus_rect(self) -> QRect:
@@ -374,7 +379,8 @@ class ProjectTabBar(QWidget):
             if self._tabs[index]["dirty"]:
                 text += " ●"
             painter.setPen(QPen(QColor("#e8e8e8" if active else "#9a9a9a")))
-            text_rect = rect.adjusted(self.PAD_X, 0, -self.CLOSE_W, 0)
+            # 文字整体下移一点（TEXT_DROP）：竖直居中时贴着上面那条玫红/分隔线太挤
+            text_rect = rect.adjusted(self.PAD_X, self.TEXT_DROP, -self.NAME_GAP, 0)
             painter.drawText(text_rect, int(Qt.AlignmentFlag.AlignVCenter |
                                             Qt.AlignmentFlag.AlignLeft), text)
 
@@ -403,10 +409,13 @@ class ProjectTabBar(QWidget):
                 if self._close_rect(index).contains(pos):
                     self.tab_close_requested.emit(index)
                     return
-                if index != self._current:
-                    self._current = index
-                    self.update()
-                    self.tab_selected.emit(index)
+                # ⚠️ 这里**不能**自己改 self._current 再发信号。
+                # 曾经这么写过：MainWindow._switch_tab 开头是
+                #   if index == self.tabs.current_index(): return
+                # 于是"当前标签"已经被本函数改掉了，判断必然成立、直接返回，
+                # 结果就是**点标签只换了高亮、工程根本没切**（用户实际踩到的 bug）。
+                # 现在谁负责切换谁才改 _current（主窗口切完调 set_current）。
+                self.tab_selected.emit(index)
             elif self.plus_rect().contains(pos):
                 self.new_tab_requested.emit()
         elif event.button() == Qt.MouseButton.MiddleButton and index >= 0:

@@ -42,6 +42,20 @@ def make_sheet(color: str, elements: int = 3, size: int = 40) -> QPixmap:
     return pm
 
 
+def click(widget, pos: QPoint) -> None:
+    """给控件发一次左键单击（走真实的 mousePressEvent 入口）。
+
+    ⚠️ 必须走真实入口：上一版回归直接调 `win._switch_tab(i)`，于是漏掉了
+    「标签栏自己先改了 current_index，主窗口再判断 index == current 直接 return」
+    这个 bug —— 用户点标签只换高亮、工程根本没切。测试绕开 UI 入口 = 没测到。
+    """
+    event = QMouseEvent(QMouseEvent.Type.MouseButtonPress, QPointF(pos),
+                        QPointF(widget.mapToGlobal(pos)),
+                        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                        Qt.KeyboardModifier.NoModifier)
+    widget.mousePressEvent(event)
+
+
 def double_click(widget, pos: QPoint) -> None:
     """给控件发一次双击（QMouseEvent 需要用 QPointF 构造）。"""
     event = QMouseEvent(QMouseEvent.Type.MouseButtonDblClick, QPointF(pos),
@@ -49,6 +63,12 @@ def double_click(widget, pos: QPoint) -> None:
                         Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
                         Qt.KeyboardModifier.NoModifier)
     widget.mouseDoubleClickEvent(event)
+
+
+def click_tab(tabs, index: int) -> None:
+    """点在某个标签的**文字区**（避开关闭叉号）上。"""
+    rect = tabs.tab_rects()[index]
+    click(tabs, QPoint(rect.left() + 8, rect.center().y()))
 
 
 def build_doc(win, action_name: str, color: str, filled: int) -> int:
@@ -122,8 +142,9 @@ def main() -> int:
     frames_b = build_doc(win, "B动作", "#1565C0", 2)
     print(f"  工程 B 帧数 {frames_b}")
 
-    win._switch_tab(index_a)
-    check("切回 A：动作是 A 的", [a.name for a in win.actions] == ["A动作"],
+    # 用**真实点击**切回 A（这是用户实际的操作路径）
+    click_tab(tabs, index_a)
+    check("点标签切回 A：动作是 A 的", [a.name for a in win.actions] == ["A动作"],
           f"实际 {[a.name for a in win.actions]}")
     check("切回 A：帧数保持", len(win.actions[0].frames) == frames_a,
           f"实际 {len(win.actions[0].frames)} vs {frames_a}")
@@ -144,8 +165,11 @@ def main() -> int:
           f"实际 {len(win.actions[0].frames)} vs {frames_b}")
     check("再切到 B：当前动作是 B", win.image_viewer.current_action is win.actions[0])
 
-    win._switch_tab(index_a)
-    check("来回切两次后 A 仍然正确", [a.name for a in win.actions] == ["A动作"])
+    # 往返再点一次，确认反复点击也稳定
+    click_tab(tabs, index_a)
+    check("点标签来回切后 A 仍然正确", [a.name for a in win.actions] == ["A动作"])
+    check("点标签后高亮也跟着走了", tabs.current_index() == index_a,
+          f"实际 {tabs.current_index()}")
     check("来回切后 A 的原图也回来了", win.image_viewer._pixmap is not None)
 
     print()

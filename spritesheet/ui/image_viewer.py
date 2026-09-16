@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QFileDialog, QGridLayout, QHBoxLayout, QPushButton, QWidget,
 )
 
+from spritesheet.settings import last_directory, set_last_directory
 from .models import Action
 from .widgets import RULER_SIZE, _Ruler, make_tool_icon, paint_checkerboard
 
@@ -523,10 +524,11 @@ class _Canvas(QWidget):
 
     def _open_file_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "添加图片", "",
+            self, "添加图片", last_directory(),
             "图片文件 (*.png *.jpg *.jpeg *.bmp *.gif *.webp)"
         )
         if path:
+            set_last_directory(path)
             pm = QPixmap(path)
             if not pm.isNull():
                 self.image_loaded.emit(pm)

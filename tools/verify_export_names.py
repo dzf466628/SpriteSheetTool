@@ -54,6 +54,9 @@ def make_sheet(elements=3, size=40):
     return pm, rects
 
 
+PROJECT_NAME = "主角工程"
+
+
 def build_dialog(separate: bool, apply_overrides: bool = True, with_provider: bool = True):
     from spritesheet.ui.main_window import MainWindow
     win = MainWindow()
@@ -73,7 +76,8 @@ def build_dialog(separate: bool, apply_overrides: bool = True, with_provider: bo
         act.selected_indices = [i]
         viewer.crop_frames_for_action(act)
     dlg = ExportDialog(win.actions, viewer._pixmap,
-                       project_provider=win._project_manifest if with_provider else None)
+                       project_provider=win._project_manifest if with_provider else None,
+                       project_name=PROJECT_NAME)
     if apply_overrides:
         dlg.cb_gif.setChecked(True)
         dlg.cb_project.setChecked(True)
@@ -89,13 +93,18 @@ def run_case(label: str, separate: bool) -> None:
     win, dlg = build_dialog(separate)
 
     # 第一次导出（目录为空，不应该有冲突）
-    planned0 = dlg._planned_names(tmp)
+    root = dlg.target_root(tmp)
+    planned0 = dlg._planned_names(root)
     check("空目录无冲突", dlg.resolve_name_conflicts(str(tmp)) == "")
     written0 = dlg._export_to_directory(str(tmp))
     made0 = set(written0) | {p for p in planned0 if p.is_dir()}
     missing = [p for p in planned0 if not p.exists()]
     check("预告路径与实际写入一致", not missing, f"缺失 {[p.name for p in missing]}")
     print(f"    首次产出 {len(written0)} 个文件：{[p.name for p in written0][:6]}")
+    if not separate:
+        check("产物都以工程名开头",
+              all(p.name.startswith(PROJECT_NAME) for p in written0),
+              f"实际 {[p.name for p in written0]}")
 
     # 记录已有内容的指纹，用于确认「加序号」不会覆盖
     before = {p: p.stat().st_mtime_ns for p in tmp.rglob("*") if p.is_file()}
@@ -104,7 +113,7 @@ def run_case(label: str, separate: bool) -> None:
     CHOICE["index"] = 1
     suffix = dlg.resolve_name_conflicts(str(tmp))
     check("有同名时返回序号", suffix == "_2", f"得到 {suffix!r}")
-    planned2 = dlg._planned_names(tmp, suffix)
+    planned2 = dlg._planned_names(dlg.target_root(tmp, suffix), suffix)
     written2 = dlg._export_to_directory(str(tmp), suffix=suffix)
     missing2 = [p for p in planned2 if not p.exists()]
     check("序号路径的预告与实际一致", not missing2, f"缺失 {[p.name for p in missing2]}")
@@ -120,6 +129,54 @@ def run_case(label: str, separate: bool) -> None:
     CHOICE["index"] = 2
     check("选择取消返回 None", dlg.resolve_name_conflicts(str(tmp)) is None)
 
+    win.close()
+
+
+def check_naming() -> None:
+    """命名规则：产物以工程名开头；**超过两个文件**就装进以工程名命名的文件夹。"""
+    print("\n=== 导出命名与落点规则 ===")
+    win, dlg = build_dialog(separate=False, apply_overrides=False)
+    tmp = Path(tempfile.mkdtemp(prefix="sstool_export_name_"))
+
+    # 默认：png + json + sstool = 3 个文件 -> 进文件夹
+    count = dlg._file_count()
+    root = dlg.target_root(tmp)
+    names = sorted(p.name for p in dlg._planned_names(root))
+    print(f"    默认 {count} 个文件，落点 {root.relative_to(tmp)}，名字 {names}")
+    check("默认是 3 个文件", count == 3, f"实际 {count}")
+    check("超过两个文件 -> 放进以工程名命名的文件夹",
+          root == tmp / PROJECT_NAME, f"实际 {root}")
+    check("文件名以工程名开头",
+          names == [f"{PROJECT_NAME}.json", f"{PROJECT_NAME}.png", f"{PROJECT_NAME}.sstool"],
+          f"实际 {names}")
+
+    # 关掉 JSON：png + sstool = 2 个 -> 仍然直接放在所选目录下（PNG 图集总是会导出）
+    dlg.cb_json.setChecked(False)
+    check("关掉 JSON 后是 2 个文件（图集 + 工程）", dlg._file_count() == 2,
+          f"实际 {dlg._file_count()}")
+    check("两个文件时不建文件夹", dlg.target_root(tmp) == tmp, f"实际 {dlg.target_root(tmp)}")
+
+    # 开 JSON、关工程：png + json = 2 个 -> 也不建文件夹
+    dlg.cb_json.setChecked(True)
+    dlg.cb_project.setChecked(False)
+    for fmt, box in dlg._json_fmt_checks.items():
+        box.setChecked(fmt == FMT_NATIVE)
+    check("png + json 两个文件", dlg._file_count() == 2, f"实际 {dlg._file_count()}")
+    check("两个文件时不建文件夹（png+json）", dlg.target_root(tmp) == tmp,
+          f"实际 {dlg.target_root(tmp)}")
+
+    # 再加回工程：3 个 -> 建文件夹
+    dlg.cb_project.setChecked(True)
+    check("三个文件时建文件夹", dlg.target_root(tmp) == tmp / PROJECT_NAME)
+
+    # 分别导出：每个动作一个文件夹，名字也以工程名开头
+    dlg.cb_separate.setChecked(True)
+    dlg.cb_gif.setChecked(True)
+    root2 = dlg.target_root(tmp)
+    folders = [p.name for p in dlg._planned_names(root2)]
+    print(f"    分别导出落点 {root2.relative_to(tmp)}，动作文件夹 {folders}")
+    check("分别导出时动作文件夹以工程名开头",
+          all(f.startswith(PROJECT_NAME) for f in folders), f"实际 {folders}")
     win.close()
 
 
@@ -144,10 +201,11 @@ def check_defaults() -> None:
           order.index(dlg.cb_project.text()) < order.index(dlg.cb_json.text()),
           f"实际 {order}")
 
-    # 默认导出就应该产出 project.sstool
+    # 默认导出就应该产出 <工程名>.sstool
     tmp = Path(tempfile.mkdtemp(prefix="sstool_export_default_"))
-    planned = [p.name for p in dlg._planned_names(tmp)]
-    check("默认就会写入 project.sstool", "project.sstool" in planned, f"实际 {planned}")
+    planned = [p.name for p in dlg._planned_names(dlg.target_root(tmp))]
+    check(f"默认就会写入 {PROJECT_NAME}.sstool", f"{PROJECT_NAME}.sstool" in planned,
+          f"实际 {planned}")
     win.close()
 
     # 没有注入工程数据提供者时不能默认勾选（否则点导出直接报「未提供工程数据」）
@@ -162,6 +220,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     patch_policy()
     check_defaults()
+    check_naming()
     run_case("整体导出（不分别导出）", separate=False)
     run_case("分别导出（每个动作一个文件夹）", separate=True)
     print()

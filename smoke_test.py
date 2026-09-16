@@ -112,7 +112,8 @@ def main() -> int:
     try:
         from spritesheet.ui.export_dialog import ExportDialog
         dlg = ExportDialog(win.actions, win.image_viewer._pixmap,
-                           project_provider=win._project_manifest)
+                           project_provider=win._project_manifest,
+                           project_name=win._project_name)
     except Exception as exc:  # noqa: BLE001
         check("ExportDialog constructs", False, f"{exc}")
         dlg = None
@@ -127,11 +128,17 @@ def main() -> int:
             generated = dlg._export_to_directory(str(out), progress=progress)
             names = sorted(p.name for p in generated)
             print(f"  generated: {names}")
-            check("export produced spritesheet.png", (out / "spritesheet.png").exists())
+            # 命名规则：产物以工程名开头；超过两个文件就装进以工程名命名的文件夹
+            base = dlg.base_name()
+            root = dlg.target_root(out)
+            check(f"export produced {base}.png", (root / f"{base}.png").exists())
             check("export produced JSON", any(p.suffix == ".json" for p in generated))
-            check("export produced tp_hash JSON", (out / "spritesheet.tp_hash.json").exists())
+            check(f"export produced {base}.tp_hash.json",
+                  (root / f"{base}.tp_hash.json").exists())
             check("export produced GIF", any(p.suffix == ".gif" for p in generated))
-            check("export produced .sstool", (out / "project.sstool").exists())
+            check(f"export produced {base}.sstool", (root / f"{base}.sstool").exists())
+            check("多文件时输出在工程名文件夹里", root != out and root.is_dir(),
+                  f"root={root}, out={out}")
         except Exception as exc:  # noqa: BLE001
             check("export runs", False, f"{type(exc).__name__}: {exc}")
 

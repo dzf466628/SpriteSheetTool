@@ -23,12 +23,13 @@ sys.path.insert(0, str(ROOT))
 
 from spritesheet.ui.main_window import MainWindow
 
-EXPECTED_MENUS = ["文件", "编辑"]
+EXPECTED_MENUS = ["文件", "编辑", "帮助"]
 EXPECTED_FILE_ITEMS = [
     "添加图片", "导入 JSON 工程…", "---", "新建工程", "打开工程…", "保存工程",
     "工程另存为…", "---", "退出",
 ]
 EXPECTED_EDIT_ITEMS = ["撤销", "---", "软件设置…"]
+EXPECTED_HELP_ITEMS = ["关于 SpriteSheetTool"]
 
 
 def main() -> int:
@@ -79,6 +80,18 @@ def main() -> int:
         print("  [FAIL] 文件菜单里仍有「检查更新」（应已移进软件设置）")
     else:
         print("  [OK]   检查更新已从文件菜单移走")
+
+    help_menu = menubar.actions()[2].menu() if len(menubar.actions()) > 2 else None
+    help_items = []
+    if help_menu is not None:
+        for act in help_menu.actions():
+            help_items.append("---" if act.isSeparator() else act.text())
+    print(f"  帮助菜单顺序: {help_items}")
+    if help_items != EXPECTED_HELP_ITEMS:
+        ok = False
+        print(f"  [FAIL] 期望 {EXPECTED_HELP_ITEMS}")
+    else:
+        print("  [OK]   帮助菜单含「关于」")
 
     # 必须关窗口：closeEvent 里才会走 ImageViewer.shutdown()。
     # 不关就走，元素检测线程会与窗口析构撞车（0xC0000005，实测连续跑套件时必现）。

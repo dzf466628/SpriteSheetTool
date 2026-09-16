@@ -1938,11 +1938,14 @@ class ActionPreviewWidget(QWidget):
                 self._refresh_thumbs()
 
     def _on_export_clicked(self) -> None:
+        # 导出产物以当前标签页的工程名开头（也用于"超过两个文件就装进同名文件夹"）
+        project_name = getattr(self, "_project_name_provider", None)
         dlg = ExportDialog(
             self._actions,
             self._source_pixmap,
             # 工程数据提供者由 MainWindow 注入（self._project_manifest 本类没有定义）
             project_provider=getattr(self, "_project_manifest", None),
+            project_name=project_name() if callable(project_name) else "",
             parent=self,
         )
         dlg.exec()

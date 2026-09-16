@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
 
 from spritesheet import __app_name__, __version__
 from spritesheet.project_file import write_project
+from spritesheet.settings import last_directory, set_last_directory
 from spritesheet.ui.exporters import (
     FMT_NATIVE, FORMAT_CHOICES, FORMAT_SUFFIX, build_payload, write_payload,
 )
@@ -173,7 +174,7 @@ class ExportDialog(QDialog):
     """导出弹窗：左侧动作选择（循环小预览+胶囊开关），中间预览，右侧导出选项。"""
 
     def __init__(self, actions: list, source_pixmap: QPixmap | None = None,
-                 project_provider=None, parent=None) -> None:
+                 project_provider=None, project_name: str = "", parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("导出")
         self.resize(900, 600)
@@ -190,6 +191,8 @@ class ExportDialog(QDialog):
         # The provider returns the complete document, so exporting a project
         # never depends on which actions are selected in this dialog.
         self._project_provider = project_provider
+        # 导出产物以工程名（当前标签页的名字）开头；没给就退回 spritesheet
+        self._project_name = (project_name or "spritesheet").strip() or "spritesheet"
         self._switches: dict = {}
         self._players: list[ActionThumbPlayer] = []
         self._players_by_action: dict = {}
@@ -988,31 +991,62 @@ class ExportDialog(QDialog):
             generated.append(path)
         return generated
 
+    # ---- 命名规则：**只有这一份**，_planned_names / 同名检测 / 真正导出都用它 ----
+
+    def base_name(self, suffix: str = "") -> str:
+        """导出产物的基名 = 工程名（当前标签页的名字）+ 可选序号后缀。"""
+        return _safe_export_name(self._project_name) + suffix
+
+    def _file_count(self) -> int:
+        """本次导出会写出多少个**文件**（不含文件夹）。"""
+        selected = self.selected_actions()
+        json_count = len(self._json_formats()) if self.cb_json.isChecked() else 0
+        gif_count = 1 if self.cb_gif.isChecked() else 0
+        project = 1 if self.cb_project.isChecked() else 0
+        if not selected:
+            return project
+        if self.cb_separate.isChecked():
+            return len(selected) * (1 + gif_count + json_count) + project
+        return 1 + len(selected) * gif_count + json_count + project
+
+    def target_root(self, directory: Path, suffix: str = "") -> Path:
+        """这一堆文件到底放在哪。
+
+        规则（用户要求）：**超过两个文件就放进一个以工程名命名的文件夹**，
+        免得多次导出的产物全摊在同一个目录里互相覆盖、混在一起。
+        单独导出一个工程文件、或者只导出一张图时，就直接放在所选目录下。
+        """
+        if self._file_count() > 2:
+            return directory / self.base_name(suffix)
+        return directory
+
     def _planned_names(self, root: Path, suffix: str = "") -> list[Path]:
         """列出本次导出会写入的目标路径（用于同名检测）。
 
-        必须与 `_export_to_directory` 里的命名保持一致 —— 两处挨着改，别只改一边。
-        分别导出时每个动作一个文件夹（序号加在文件夹名上），否则是根目录下一组同名文件。
+        root 是**已经解析过的落点目录**（见 ``target_root``）。
+        必须与 `_export_to_directory` 里的命名保持一致 —— 现在两边都走
+        ``base_name`` / ``target_root``，不要再各自拼字符串。
         """
         selected = self.selected_actions()
         json_formats = self._json_formats() if self.cb_json.isChecked() else []
+        base = self.base_name(suffix)
         out: list[Path] = []
         if self.cb_separate.isChecked():
             used: set[str] = set()
             for action in selected:
-                name = _safe_export_name(action.name, used) + suffix
-                out.append(root / name)
+                # 每个动作一个文件夹，名字也以工程名开头
+                out.append(root / f"{base}_{_safe_export_name(action.name, used)}")
         else:
             if selected:
-                out.append(root / f"spritesheet{suffix}.png")
+                out.append(root / f"{base}.png")
             if self.cb_gif.isChecked():
                 used_gif: set[str] = set()
                 for action in selected:
-                    out.append(root / f"{_safe_export_name(action.name, used_gif)}{suffix}.gif")
+                    out.append(root / f"{base}_{_safe_export_name(action.name, used_gif)}.gif")
             for fmt in json_formats:
-                out.append(root / f"spritesheet{suffix}{FORMAT_SUFFIX.get(fmt, '')}.json")
+                out.append(root / f"{base}{FORMAT_SUFFIX.get(fmt, '')}.json")
         if self.cb_project.isChecked():
-            out.append(root / f"project{suffix}.sstool")
+            out.append(root / f"{base}.sstool")
         return out
 
     def _ask_name_policy(self, existing: list[Path]) -> str:
@@ -1042,8 +1076,11 @@ class ExportDialog(QDialog):
         """同名文件处理：返回要使用的序号后缀（""=直接覆盖），None=用户取消。
 
         分别导出时判断的是「动作文件夹是否已存在」，其余情况判断具体文件。
+        落点用 ``target_root`` 解析（超过两个文件会先加一层以工程名命名的文件夹；
+        那一层文件夹里同名才会问）。
         """
-        root = Path(directory)
+        picked = Path(directory)
+        root = self.target_root(picked)
         existing = [p for p in self._planned_names(root) if p.exists()]
         if not existing:
             return ""
@@ -1054,7 +1091,7 @@ class ExportDialog(QDialog):
             return ""
         for n in range(2, 100):
             cand = f"_{n}"
-            if not any(p.exists() for p in self._planned_names(root, cand)):
+            if not any(p.exists() for p in self._planned_names(self.target_root(picked, cand), cand)):
                 return cand
         return f"_{len(existing) + 1}"
 
@@ -1065,8 +1102,11 @@ class ExportDialog(QDialog):
         selected = self.selected_actions()
         if not selected and not (self.cb_project.isChecked() and self._project_provider):
             raise ValueError("请至少选择一个导出动作")
-        root = Path(directory)
+        picked = Path(directory)
+        # 落点：超过两个文件就先建一层以工程名命名的文件夹（规则见 target_root）
+        root = self.target_root(picked, suffix)
         root.mkdir(parents=True, exist_ok=True)
+        base = self.base_name(suffix)
         generated: list[Path] = []
         used_names: set[str] = set()
         json_formats = self._json_formats() if self.cb_json.isChecked() else []
@@ -1082,7 +1122,7 @@ class ExportDialog(QDialog):
             if self._project_provider is None:
                 raise ValueError("无法导出 SSTOOL：当前窗口未提供工程数据")
             manifest, sections = self._project_provider()
-            project_path = root / f"project{suffix}.sstool"
+            project_path = root / f"{base}.sstool"
             write_project(project_path, manifest, sections)
             generated.append(project_path)
             done += 1
@@ -1095,21 +1135,23 @@ class ExportDialog(QDialog):
             done = 0
             for action in selected:
                 name = _safe_export_name(action.name, used_names)
-                folder = root / f"{name}{suffix}"
+                # 每个动作一个文件夹，名字以工程名开头（与 _planned_names 一致）
+                stem = f"{base}_{name}"
+                folder = root / stem
                 folder.mkdir(parents=True, exist_ok=True)
                 frames = self._final_frames(action)
                 # 图集按元素图块打包（普通帧去重复用；合成帧直接打包整块，不丢部件）
                 atlas, full_records = self._build_packed_atlas([action])
                 if atlas is None:
                     continue
-                atlas_name = f"{name}.png"
+                atlas_name = f"{stem}.png"
                 atlas_path = folder / atlas_name
                 if not atlas.save(str(atlas_path), "PNG"):
                     raise IOError(f"无法写入 {atlas_path}")
                 generated.append(atlas_path)
                 done += 1
                 report(done, total, f"[{done}/{total}] {name} · 图集 PNG")
-                gif_name = f"{name}.gif" if self.cb_gif.isChecked() else None
+                gif_name = f"{stem}.gif" if self.cb_gif.isChecked() else None
                 if gif_name:
                     gif_path = folder / gif_name
                     self._write_gif(gif_path, action, frames)
@@ -1117,7 +1159,7 @@ class ExportDialog(QDialog):
                     done += 1
                     report(done, total, f"[{done}/{total}] {name} · GIF")
                 if json_formats:
-                    for json_path in self._write_animation_jsons(folder / name, atlas_name, atlas, [action], full_records, {action: gif_name}):
+                    for json_path in self._write_animation_jsons(folder / stem, atlas_name, atlas, [action], full_records, {action: gif_name}):
                         generated.append(json_path)
                         done += 1
                         report(done, total, f"[{done}/{total}] {name} · {json_path.name}")
@@ -1144,7 +1186,7 @@ class ExportDialog(QDialog):
         total = 2 + gif_count + len(json_formats) + (1 if self.cb_project.isChecked() else 0)
         done = 0
         report(done, total, "正在打包图集 …")
-        atlas_name_out = f"spritesheet{suffix}.png"
+        atlas_name_out = f"{base}.png"
         atlas_path = root / atlas_name_out
         if not atlas.save(str(atlas_path), "PNG"):
             raise IOError(f"无法写入 {atlas_path}")
@@ -1154,7 +1196,8 @@ class ExportDialog(QDialog):
         if self.cb_gif.isChecked():
             gif_used: set[str] = set()
             for action in selected:
-                gif_name = f"{_safe_export_name(action.name, gif_used)}{suffix}.gif"
+                # GIF 文件名也以工程名开头，和其余产物保持一致
+                gif_name = f"{base}_{_safe_export_name(action.name, gif_used)}.gif"
                 gif_names[action] = gif_name
                 gif_path = root / gif_name
                 self._write_gif(gif_path, action, self._final_frames(action))
@@ -1162,7 +1205,7 @@ class ExportDialog(QDialog):
                 done += 1
                 report(done, total, f"[{done}/{total}] GIF · {gif_name}")
         if json_formats:
-            for json_path in self._write_animation_jsons(root / f"spritesheet{suffix}", atlas_name_out, atlas, selected, records, gif_names):
+            for json_path in self._write_animation_jsons(root / base, atlas_name_out, atlas, selected, records, gif_names):
                 generated.append(json_path)
                 done += 1
                 report(done, total, f"[{done}/{total}] JSON · {json_path.name}")
@@ -1176,9 +1219,10 @@ class ExportDialog(QDialog):
             except ImportError:
                 QMessageBox.critical(self, "无法导出", "GIF 导出需要 Pillow，请先安装 requirements.txt 中的依赖。")
                 return
-        directory = QFileDialog.getExistingDirectory(self, "选择导出文件夹")
+        directory = QFileDialog.getExistingDirectory(self, "选择导出文件夹", last_directory())
         if not directory:
             return
+        set_last_directory(directory)
         # 同名处理：先问覆盖还是加序号另存（取消则整体中止）
         suffix = self.resolve_name_conflicts(directory)
         if suffix is None:
