@@ -28,8 +28,32 @@ def wait(ms: int) -> None:
     loop.exec()
 
 
+def silence_dialogs() -> None:
+    """把模态弹窗换成"打印内容并返回默认值"。
+
+    不这么做的话，任何被 try/except 捕获的异常都会以 QMessageBox 的形式**永久阻塞**
+    （无头环境下没人点确定）—— 排查时会误以为是"卡死"，而实际是某个错误被弹窗吞掉了。
+    这里刻意把弹窗文字打印出来，让被吞掉的错误能现形。
+    """
+    from PyQt6.QtWidgets import QFileDialog, QMessageBox
+    std = QMessageBox.StandardButton
+
+    def _show(*args, **kwargs):
+        text = args[2] if len(args) > 2 else (args[-1] if args else "")
+        print(f"  [弹窗] {text}")
+        return std.Ok
+
+    QMessageBox.information = staticmethod(_show)
+    QMessageBox.warning = staticmethod(_show)
+    QMessageBox.critical = staticmethod(_show)
+    QMessageBox.question = staticmethod(lambda *a, **k: std.Yes)
+    QMessageBox.exec = lambda self, *a, **k: 0
+    QFileDialog.getExistingDirectory = staticmethod(lambda *a, **k: "")
+
+
 def main() -> int:
     app = QApplication(sys.argv)
+    silence_dialogs()
     win = MainWindow()
     win._on_image_loaded(QPixmap(str(ROOT / "mage_sprite_keyed.png")))
     wait(1200)                      # 等元素检测

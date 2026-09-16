@@ -14,9 +14,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PyQt6.QtCore import QPointF, QSize, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QPointF, QRectF, QSize, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import (
-    QAction, QIcon, QKeySequence, QPainter, QPixmap, QUndoCommand, QUndoStack,
+    QAction, QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QUndoCommand, QUndoStack,
 )
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
@@ -38,11 +38,15 @@ from .widgets import (
 )
 
 # 工程文件缩略图：**正方形** 256×256（资源管理器用方形槽位显示，按画面比例输出
-# 会让宽条素材显示成一条）。内容按比例装进 _THUMB_SIZE-2*_THUMB_PAD，
-# 余下部分用底色盖住（跟随动作的预览背景：棋盘格/黑/白）。
+# 会让宽条素材显示成一条）。
+#   底色  = 灰色棋盘格（与软件预览区同一套配色），内容装不满时由它兜底
+#   描边  = 黑 → 白 → 粉 三层（由外到内），把缩略图"罩"起来
+#   角标  = 工程图标.png，右下角，占短边 _THUMB_BADGE_DIV 分之一
 _THUMB_SIZE = 256
-_THUMB_PAD = 8
+_THUMB_PAD = 6                      # 内容相对描边内缘再留的空白
 _THUMB_CHECKER_CELL = 12
+_THUMB_BADGE_DIV = 3                # 角标 = 短边/3（此前是 1/4，用户要求再大些）
+_THUMB_STROKE = (("#000000", 2), ("#FFFFFF", 2), ("#E91E63", 3))  # 黑-白-粉（外→内）
 
 
 # 主窗口
@@ -329,24 +333,19 @@ class MainWindow(QMainWindow):
             thumb = add_pixmap("thumbnail.png", action_frame_pixmap(viewer.current_action, index))
         if thumb is None:
             thumb = add_pixmap("thumbnail.png", viewer._pixmap)
-        # 工程文件缩略图：**正方形**画布 + 底色铺底 + 内容等比居中 + 右下角角标。
+        # 工程文件缩略图：正方形画布 + 灰色棋盘格铺底 + 内容居中 + 黑白粉描边 + 右下角标。
         # .sstool 以这张 PNG 开头，资源管理器（配好图片缩略图处理器后）直接显示它。
-        # 为什么必须正方形：资源管理器用方形槽位显示缩略图，若按画面比例输出，
-        # 宽条素材（如 8:1 的横排精灵）会被显示成细细一条 —— 所以统一 256×256，
-        # 内容装不满的余下部分用底色盖住（跟随该动作的预览背景：棋盘格/黑/白）。
         if thumb and "thumbnail.png" in sections:
             preview_pm = _pixmap_from_bytes(sections["thumbnail.png"])
             badge = QPixmap(str(_APP_ROOT / "工程图标.png"))
             if not preview_pm.isNull():
                 canvas = QPixmap(_THUMB_SIZE, _THUMB_SIZE)
-                bg_mode = (viewer.current_action.bg_mode
-                           if viewer.current_action else "checker")
                 painter = QPainter(canvas)
-                if bg_mode == "checker":
-                    paint_checkerboard(painter, canvas.rect(), _THUMB_CHECKER_CELL)
-                else:
-                    canvas.fill(QColor("#000000" if bg_mode == "black" else "#FFFFFF"))
-                avail = _THUMB_SIZE - 2 * _THUMB_PAD
+                # ① 铺底：灰色棋盘格 —— 内容透明或装不满时由它兜底
+                paint_checkerboard(painter, canvas.rect(), _THUMB_CHECKER_CELL)
+                # ② 内容：等比装进「描边内缘再留白」的方框，居中
+                stroke_total = sum(width for _c, width in _THUMB_STROKE)
+                avail = max(1, _THUMB_SIZE - 2 * (stroke_total + _THUMB_PAD))
                 scaled = preview_pm.scaled(
                     avail, avail,
                     Qt.AspectRatioMode.KeepAspectRatio,
@@ -360,14 +359,26 @@ class MainWindow(QMainWindow):
                     (_THUMB_SIZE - scaled.height()) // 2,
                     scaled,
                 )
+                # ③ 描边：黑 → 白 → 粉 三层同心，由外到内
+                offset = 0.0
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                for color, width in _THUMB_STROKE:
+                    pen = QPen(QColor(color))
+                    pen.setWidthF(float(width))
+                    painter.setPen(pen)
+                    half = width / 2.0
+                    side_f = _THUMB_SIZE - 2 * (offset + half)
+                    painter.drawRect(QRectF(offset + half, offset + half, side_f, side_f))
+                    offset += width
+                # ④ 角标：右下角，压在描边内缘里
                 if not badge.isNull():
-                    side = max(16, _THUMB_SIZE // 4)
-                    margin = max(2, side // 8)
+                    side = max(16, _THUMB_SIZE // _THUMB_BADGE_DIV)
                     badge = badge.scaled(
                         side, side,
                         Qt.AspectRatioMode.KeepAspectRatio,
                         Qt.TransformationMode.SmoothTransformation,
                     )
+                    margin = int(stroke_total) + max(2, side // 10)
                     painter.drawPixmap(
                         _THUMB_SIZE - badge.width() - margin,
                         _THUMB_SIZE - badge.height() - margin,
@@ -698,9 +709,11 @@ class MainWindow(QMainWindow):
         self.preview.toolbar.bg_changed.connect(lambda _mode: self._mark_project_dirty())
         self.image_viewer._toolbar.bg_changed.connect(lambda _mode: self._mark_project_dirty())
         self.image_viewer._toolbar.compose_toggled.connect(lambda _checked: self._mark_project_dirty())
-        # 程序退出（含未走 close 的路径）也要收尾原图区，否则线程/过滤器会悬空
+        # 程序退出（含未走 close 的路径）也要收尾原图区与更新检查线程，
+        # 否则线程/过滤器会悬空
         app = QApplication.instance()
         if app is not None:
+            app.aboutToQuit.connect(self._stop_update_thread)
             app.aboutToQuit.connect(self.image_viewer.shutdown)
         self.splitter.addWidget(self.preview)
         self.splitter.setStretchFactor(0, 1)
@@ -807,8 +820,7 @@ class MainWindow(QMainWindow):
                     self, "检查更新",
                     "服务器目录里没有找到安装包。\n\n"
                     "请先把 SpriteSheetTool_v.X.Y.Z.exe 上传到：\n"
-                    f"{info.get('url', '')}\n\n"
-                    "（服务器需开启目录索引）",
+                    f"{info.get('url', '')}",
                 )
             elif status == "error":
                 QMessageBox.warning(
@@ -859,12 +871,36 @@ class MainWindow(QMainWindow):
         # 稍等片刻让安装器进程真正起来（它会自动关闭并重启本程序）
         QTimer.singleShot(800, self.close)
 
+    def _stop_update_thread(self) -> None:
+        """关闭时收尾「检查更新」线程。
+
+        它与元素检测线程是同一类隐患：线程还在跑而宿主先被析构，退出时会挂住或崩溃。
+        更新检查是网络请求、可能阻塞到超时，所以这里先断开信号，等一小会儿，
+        仍未结束就强制终止（此时它只等在网络上，没有需要保护的共享状态）。
+        """
+        thread = getattr(self, "_update_thread", None)
+        if thread is None:
+            return
+        self._update_thread = None
+        try:
+            if thread.isRunning():
+                thread.result_ready.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            if thread.isRunning() and not thread.wait(1500):
+                thread.terminate()
+                thread.wait(500)
+        except RuntimeError:
+            pass
+
     def closeEvent(self, event) -> None:
         """关闭窗口前先收尾原图区（停检测线程 + 卸下全局事件过滤器）。
 
         不做这两件事会导致随机闪退（原生 access violation）：检测线程在跑时宿主被
         析构、或 app 级事件过滤器指向已释放对象。参见 ``ImageViewer.shutdown``。
         """
+        self._stop_update_thread()
         self.image_viewer.shutdown()
         super().closeEvent(event)
 
