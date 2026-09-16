@@ -12,6 +12,7 @@
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -69,6 +70,12 @@ def click_tab(tabs, index: int) -> None:
     """点在某个标签的**文字区**（避开关闭叉号）上。"""
     rect = tabs.tab_rects()[index]
     click(tabs, QPoint(rect.left() + 8, rect.center().y()))
+
+
+def is_brand_red(color) -> bool:
+    """是不是品牌玫红 #E91E63（关闭按钮悬停的红色圆底）。"""
+    return (abs(color.red() - 0xE9) < 40 and abs(color.green() - 0x1E) < 55
+            and abs(color.blue() - 0x63) < 55)
 
 
 def build_doc(win, action_name: str, color: str, filled: int) -> int:
@@ -276,6 +283,70 @@ def main() -> int:
     clean_ink = ink_count(clean_img, rects[1])
     check("脏标签比干净标签多画了标记", dirty_ink > clean_ink,
           f"脏 {dirty_ink} vs 干净 {clean_ink}")
+
+    print()
+    print("=== 9. 标签是直角（两边不加圆角）===")
+    active_rect = rects[0]           # 活动标签填充 #2b2b2b，和栏底色 #1a1a1a 能区分
+    corners = {
+        "左上": (active_rect.left(), active_rect.top() + 1),
+        "右上": (active_rect.right(), active_rect.top() + 1),
+        "左下": (active_rect.left(), active_rect.bottom() - 1),
+        "右下": (active_rect.right(), active_rect.bottom() - 1),
+    }
+    for name, (x, y) in corners.items():
+        color = img.pixelColor(x, y)
+        rgb = (color.red(), color.green(), color.blue())
+        check(f"{name}角是标签填充色（直角，无圆角）", rgb == (0x2B, 0x2B, 0x2B),
+              f"实际 #{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}（圆角的话这里会是栏底色 #1a1a1a）")
+
+    print()
+    print("=== 10. 关闭叉号：字形 + 悬停红色动画 ===")
+    bar2, before_img = rendered(["甲工程"], current=0)
+    rect0 = bar2.tab_rects()[0]
+    close_rect = bar2._close_rect(0)
+    # 未悬停：叉号是灰的，没有红色
+    idle_ink = sum(1 for y in range(close_rect.top(), close_rect.bottom())
+                   for x in range(close_rect.left(), close_rect.right())
+                   if before_img.pixelColor(x, y).lightness() > 90)
+    red_before = sum(1 for y in range(close_rect.top(), close_rect.bottom())
+                     for x in range(close_rect.left(), close_rect.right())
+                     if is_brand_red(before_img.pixelColor(x, y)))
+    check("未悬停时画出了叉号字形", idle_ink >= 8, f"墨迹 {idle_ink}")
+    check("未悬停时没有红色圆底", red_before == 0, f"红色像素 {red_before}")
+
+    # 悬停：把鼠标移到叉号上，等动画跑完
+    pos = QPoint(close_rect.center().x(), close_rect.center().y())
+    move = QMouseEvent(QMouseEvent.Type.MouseMove, QPointF(pos),
+                       QPointF(bar2.mapToGlobal(pos)), Qt.MouseButton.NoButton,
+                       Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+    bar2.mouseMoveEvent(move)
+    deadline = time.time() + 2.0
+    while time.time() < deadline and bar2._close_anim.state() == bar2._close_anim.State.Running:
+        app.processEvents()
+        time.sleep(0.01)
+    app.processEvents()
+    after_img = bar2.grab().toImage()
+    red_after = sum(1 for y in range(close_rect.top(), close_rect.bottom())
+                    for x in range(close_rect.left(), close_rect.right())
+                    if is_brand_red(after_img.pixelColor(x, y)))
+    white_after = sum(1 for y in range(close_rect.top(), close_rect.bottom())
+                      for x in range(close_rect.left(), close_rect.right())
+                      if after_img.pixelColor(x, y).lightness() > 200)
+    print(f"    悬停动画进度 {bar2._close_progress:.2f}，红色像素 {red_after}，白色墨迹 {white_after}")
+    check("悬停后出现红色圆底", red_after > 20, f"红色像素 {red_after}")
+    check("悬停后叉号变成白色", white_after >= 8, f"白色墨迹 {white_after}")
+    check("悬停动画确实走完了", bar2._close_progress > 0.95, f"进度 {bar2._close_progress:.2f}")
+
+    # 鼠标移开后红色要淡回去
+    bar2.leaveEvent(QMouseEvent(
+        QMouseEvent.Type.Leave, QPointF(0, 0), QPointF(0, 0), Qt.MouseButton.NoButton,
+        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+    deadline = time.time() + 2.0
+    while time.time() < deadline and bar2._close_anim.state() == bar2._close_anim.State.Running:
+        app.processEvents()
+        time.sleep(0.01)
+    check("移开后动画回到 0（红色淡出）", bar2._close_progress < 0.05,
+          f"进度 {bar2._close_progress:.2f}")
 
     print()
     print(f"TABS FAILED {len(FAILURES)}" if FAILURES else "TABS OK")

@@ -20,7 +20,10 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QPointF, QRect, QRectF, QSize, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import (
+    QEasingCurve, QEvent, QPointF, QRect, QRectF, QSize, QTimer, Qt, QVariantAnimation,
+    pyqtSignal,
+)
 from PyQt6.QtGui import (
     QBrush, QColor, QFont, QFontMetricsF, QIcon, QPainter, QPen, QPixmap, QPolygonF,
 )
@@ -229,13 +232,18 @@ class ProjectTabBar(QWidget):
     HEIGHT = 26
     PAD_X = 14            # 标签内左右留白
     NAME_GAP = 26         # 文件名与关闭叉号之间留出的空档（原来只有 14，太挤）
-    CLOSE_W = 14          # 关闭按钮宽度
+    CLOSE_W = 16          # 关闭按钮宽度
+    CLOSE_R = 7           # 关闭按钮悬停时红色圆形的半径
     GAP = 4               # 标签间距
     PLUS_W = 26
     TEXT_DROP = 2         # 文件名整体下移的像素数
     MIN_W = 96            # 标签最小宽度（比原来宽，名字短的也不会挤成一小块）
     BG = "#1a1a1a"
     LINE = "#333333"
+    CLOSE_RED = "#E91E63"        # 关闭按钮悬停时的红色（软件强调色）
+    CLOSE_IDLE = "#6a6a6a"       # 未悬停时的叉号颜色
+    CLOSE_HOVER_MS = 130         # 悬停动画时长
+    CLOSE_GLYPH = "×"            # 叉号字符（U+00D7；想用 ✕ 就改这里）
 
     tab_selected = pyqtSignal(int)
     tab_close_requested = pyqtSignal(int)
@@ -254,6 +262,31 @@ class ProjectTabBar(QWidget):
         self._hover_close = -1
         self._editor: QLineEdit | None = None
         self._editing_index = -1
+        # 关闭按钮的悬停动画进度（0=没悬停，1=完全悬停）。同一时刻只会有一个叉号被悬停，
+        # 所以一个值够用；从叉号 A 移到叉号 B 时起点就是 1，不会闪一下。
+        self._close_progress = 0.0
+        self._close_anim = QVariantAnimation(self)
+        self._close_anim.setDuration(self.CLOSE_HOVER_MS)
+        self._close_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._close_anim.valueChanged.connect(self._on_close_anim)
+        self._close_font = QFont("Microsoft YaHei UI")
+        self._close_font.setPixelSize(13)
+        self._close_font.setBold(True)
+        # 叉号用真正的符号字形画（原来是用两条斜线拼的，看着不像正常叉号）。
+        # 用 ×(U+00D7)：Windows 字体里必有这个字形。
+        # 想换成更好看的 ✕(U+2715) 就改这一处 —— 但**别用 QFontMetricsF.inFont 判断**
+        # 字形是否存在：实测（offscreen 下）它对 ASCII 'x' 也返回 False，判断不可靠。
+        self._close_glyph = self.CLOSE_GLYPH
+
+    def _on_close_anim(self, value) -> None:
+        self._close_progress = float(value)
+        self.update()
+
+    def _animate_close(self, target: float) -> None:
+        self._close_anim.stop()
+        self._close_anim.setStartValue(self._close_progress)
+        self._close_anim.setEndValue(target)
+        self._close_anim.start()
 
     # ---- 数据接口 ----
     def count(self) -> int:
@@ -369,7 +402,8 @@ class ProjectTabBar(QWidget):
                 fill = QColor("#1a1a1a")
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(fill)
-            painter.drawRoundedRect(rect.adjusted(0, 1, 0, -1), 4, 4)
+            # 直角矩形（用户要求：两边不要圆角），上边留 1px 给分隔线
+            painter.drawRect(rect.adjusted(0, 1, 0, -1))
             if active:
                 # 活动标签：顶部一条品牌玫红，压在内容区那条线上
                 painter.setBrush(QColor("#E91E63"))
@@ -385,13 +419,21 @@ class ProjectTabBar(QWidget):
             painter.drawText(text_rect, int(Qt.AlignmentFlag.AlignVCenter |
                                             Qt.AlignmentFlag.AlignLeft), text)
 
-            # 关闭按钮：悬停才点亮，避免整条太花
+            # 关闭按钮：正常的叉号字形 + 悬停时红色圆底渐显（带动画）
             close = self._close_rect(index)
-            painter.setPen(QPen(QColor("#e8e8e8" if self._hover_close == index else "#6a6a6a")))
-            painter.drawLine(close.left() + 3, close.center().y() - 3,
-                             close.right() - 3, close.center().y() + 3)
-            painter.drawLine(close.right() - 3, close.center().y() - 3,
-                             close.left() + 3, close.center().y() + 3)
+            hovered = index == self._hover_close
+            progress = self._close_progress if hovered else 0.0
+            cx, cy = close.center().x(), close.center().y()
+            if progress > 0.01:
+                radius = self.CLOSE_R * (0.55 + 0.45 * progress)
+                circle = QColor(self.CLOSE_RED)
+                circle.setAlphaF(progress)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(circle)
+                painter.drawEllipse(QPointF(cx, cy), radius, radius)
+            painter.setFont(self._close_font)
+            painter.setPen(QPen(QColor("#ffffff" if progress > 0.5 else self.CLOSE_IDLE)))
+            painter.drawText(close, int(Qt.AlignmentFlag.AlignCenter), self._close_glyph)
 
         plus = self.plus_rect()
         painter.setPen(QPen(QColor("#9a9a9a")))
@@ -436,13 +478,22 @@ class ProjectTabBar(QWidget):
         index = self._index_at(pos)
         close = index if (index >= 0 and self._close_rect(index).contains(pos)) else -1
         if (index, close) != (self._hover, self._hover_close):
+            if close != self._hover_close:
+                # 悬停动画：进叉号 -> 渐显到 1；离开 -> 渐隐到 0
+                self._animate_close(1.0 if close >= 0 else 0.0)
             self._hover, self._hover_close = index, close
+            self.setCursor(Qt.CursorShape.PointingHandCursor if (index >= 0 or self.plus_rect().contains(pos))
+                           else Qt.CursorShape.ArrowCursor)
             self.update()
         tip = self._tabs[index]["tooltip"] if index >= 0 else ""
         self.setToolTip(tip or "单击切换工程 · 双击标签重命名 · 双击空白处新建工程")
 
     def leaveEvent(self, event) -> None:  # noqa: ARG002
-        self._hover = self._hover_close = -1
+        self._hover = -1
+        if self._hover_close >= 0:
+            self._hover_close = -1
+            self._animate_close(0.0)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
         self.update()
 
     # ---- 就地重命名 ----
@@ -687,6 +738,66 @@ class ActionItemDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         return QSize(0, 34)
+
+
+class ResponsiveButtonGrid(QWidget):
+    """按钮网格：**优先每行 2 个**，宽度不够就自动变成每行 1 个（换行）。
+
+    为什么不用 QGridLayout 固定两列：面板宽度是可拖动的，固定两列在窄面板里会把按钮压扁
+    （用户反馈"不要挤压侧边栏"）。Qt 没有内置的自动换行布局，所以这里在 resizeEvent 里
+    按可用宽度算列数再重排。
+
+    用法：``ResponsiveButtonGrid([btn1, btn2, ...], min_button=92)``
+    """
+
+    def __init__(self, buttons: list[QWidget], max_columns: int = 2,
+                 min_button: int = 92, spacing: int = 5, parent=None) -> None:
+        super().__init__(parent)
+        self._buttons = list(buttons)
+        self._max_columns = max(1, max_columns)
+        self._min_button = min_button
+        self._columns = 0
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setHorizontalSpacing(spacing)
+        self._grid.setVerticalSpacing(spacing)
+        self.setStyleSheet("background: transparent;")
+        self._relayout()
+
+    def columns(self) -> int:
+        """当前实际的列数（回归用）。"""
+        return self._columns
+
+    def _wanted_columns(self) -> int:
+        margins = self._grid.contentsMargins()
+        available = max(0, self.width() - margins.left() - margins.right())
+        spacing = self._grid.horizontalSpacing()
+        for columns in range(self._max_columns, 0, -1):
+            needed = columns * self._min_button + (columns - 1) * spacing
+            if available >= needed:
+                return columns
+        return 1
+
+    def _relayout(self) -> None:
+        columns = self._wanted_columns()
+        if columns == self._columns:
+            return
+        self._columns = columns
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+        for index, button in enumerate(self._buttons):
+            row, col = divmod(index, columns)
+            button.setParent(self)
+            self._grid.addWidget(button, row, col)
+        for col in range(self._max_columns):
+            self._grid.setColumnStretch(col, 1 if col < columns else 0)
+        self.updateGeometry()
+
+    def resizeEvent(self, event) -> None:  # noqa: ARG002
+        self._relayout()
 
 
 class _Ruler(QWidget):

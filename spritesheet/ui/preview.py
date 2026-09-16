@@ -34,8 +34,8 @@ from .transform import (
     compute_preview_layout, frame_base_size,
 )
 from .widgets import (
-    CompactComboBox, CompactSpinBox, EditableNumberLabel, _GROUP_QSS, _SLIDER_QSS,
-    make_tool_icon, paint_checkerboard,
+    CompactComboBox, CompactSpinBox, EditableNumberLabel, ResponsiveButtonGrid,
+    _GROUP_QSS, _SLIDER_QSS, make_tool_icon, paint_checkerboard,
 )
 
 
@@ -1045,41 +1045,39 @@ class AnimAdjustPanel(QWidget):
         trans_v = QVBoxLayout(trans_wrap)
         trans_v.setContentsMargins(0, 0, 0, 0)
         trans_v.setSpacing(5)
-        transform_grid = QGridLayout()
-        transform_grid.setContentsMargins(0, 0, 0, 0)
-        transform_grid.setHorizontalSpacing(5)
-        transform_grid.setVerticalSpacing(5)
         self.btn_mode_rotate = self._small_btn("旋转", "旋转：点击后在预览上拖圆形旋转手柄或旋转中心", "rotate")
         self.btn_mode_scale = self._small_btn("缩放", "缩放：点击后在预览上拖角点（对角固定）", "scale")
         self.btn_mode_skew = self._small_btn("斜切", "斜切：点击后在预览上拖边点", "skew")
         self.btn_mode_perspective = self._small_btn("透视", "透视：点击后在预览上拖角点（对边联动）", "perspective")
         self.btn_mode_distort = self._small_btn("扭曲", "扭曲：点击后在预览上拖角点（单角自由）", "distort")
+        self.btn_mirror_h = self._small_btn("水平镜像", "水平镜像（左右翻转）", "mirror_h")
+        self.btn_mirror_v = self._small_btn("垂直镜像", "垂直镜像（上下翻转）", "mirror_v")
         self._mode_group = QButtonGroup(self)
         self._mode_group.setExclusive(True)
         mode_buttons = (self.btn_mode_rotate, self.btn_mode_scale, self.btn_mode_skew,
                         self.btn_mode_perspective, self.btn_mode_distort)
-        for row, b in enumerate(mode_buttons):
-            b.setCheckable(True)
-            b.setFixedHeight(30)
-            b.setMinimumWidth(112)
+        for b in mode_buttons + (self.btn_mirror_h, self.btn_mirror_v):
+            b.setCheckable(not b in (self.btn_mirror_h, self.btn_mirror_v) or True)
+            b.setFixedHeight(28)
+            # 最小宽度放小：两个一行时够用；真正的"排几个"交给 ResponsiveButtonGrid 按宽度算
+            b.setMinimumWidth(80)
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for b in mode_buttons:
             self._mode_group.addButton(b)
-            transform_grid.addWidget(b, row, 0)
         self.btn_mode_rotate.toggled.connect(lambda on: self._on_mode_button("rotate", on))
         self.btn_mode_scale.toggled.connect(lambda on: self._on_mode_button("scale", on))
         self.btn_mode_skew.toggled.connect(lambda on: self._on_mode_button("skew", on))
         self.btn_mode_perspective.toggled.connect(lambda on: self._on_mode_button("perspective", on))
         self.btn_mode_distort.toggled.connect(lambda on: self._on_mode_button("distort", on))
-        trans_v.addLayout(transform_grid)
-        # 镜像按钮 + 只读变换摘要（旋转角度只能由预览圆形手柄修改）
-        self.btn_mirror_h = self._small_btn("水平镜像", "水平镜像（左右翻转）", "mirror_h")
-        self.btn_mirror_v = self._small_btn("垂直镜像", "垂直镜像（上下翻转）", "mirror_v")
-        self.btn_mirror_h.setFixedHeight(30)
-        self.btn_mirror_v.setFixedHeight(30)
-        self.btn_mirror_h.setCheckable(True)
-        self.btn_mirror_v.setCheckable(True)
+        # 五个变换模式 + 两个镜像，优先每行两个；面板窄了自动变一行一个（换行而不是压扁）。
+        # min_button 要和按钮的 setMinimumWidth 对齐（留一点余量），否则明明放得下也算成放不下。
+        self._transform_grid = ResponsiveButtonGrid(
+            list(mode_buttons) + [self.btn_mirror_h, self.btn_mirror_v],
+            max_columns=2, min_button=84)
         self.btn_mirror_h.clicked.connect(lambda: self._toggle_mirror("h"))
         self.btn_mirror_v.clicked.connect(lambda: self._toggle_mirror("v"))
+        trans_v.addWidget(self._transform_grid)
+        # 当前变换摘要：**单独一行**（原来和两个镜像按钮挤在同一行，被压得看不清）
         self.lbl_transform_summary = QLabel("当前变换：无变换")
         self.lbl_transform_summary.setMinimumHeight(28)
         self.lbl_transform_summary.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -1089,14 +1087,7 @@ class AnimAdjustPanel(QWidget):
             "border-radius: 3px; padding: 0 7px; }"
         )
         self.lbl_transform_summary.setToolTip("当前帧的全部变换状态；旋转角度只读")
-        mirror_row = QHBoxLayout()
-        mirror_row.setContentsMargins(0, 0, 0, 0)
-        mirror_row.setSpacing(5)
-        mirror_row.addWidget(self.btn_mirror_h, 1)
-        mirror_row.addWidget(self.btn_mirror_v, 1)
-        mirror_row.addWidget(self.lbl_transform_summary, 2)
-        transform_grid.addLayout(mirror_row, len(mode_buttons), 0)
-        transform_grid.setColumnStretch(0, 1)
+        trans_v.addWidget(self.lbl_transform_summary)
         f1.addRow("变换", trans_wrap)
 
         layout.addWidget(g1)
