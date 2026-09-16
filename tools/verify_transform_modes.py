@@ -168,7 +168,7 @@ def main() -> int:
               f"上{top} 下{bottom} 左{left} 右{right}")
 
     print()
-    print("=== 3. 斜切已移除（按钮 / 边手柄 / 联动代码都不该再存在）===")
+    print("=== 3. 变换按钮排布：8 个 = 4 行 × 2（含斜切与清空变换）===")
     from spritesheet.ui.preview import ActionPreviewWidget, PreviewCanvas
 
     widget = ActionPreviewWidget()
@@ -178,37 +178,80 @@ def main() -> int:
     widget.resize(420, 800)
     app.processEvents()
     panel = widget.adjust_panel
-    check("  面板上已经没有「斜切」按钮", not hasattr(panel, "btn_mode_skew"))
     grid = panel._transform_grid
     labels = [b.text() for b in grid._buttons]
     print(f"  变换按钮 {len(labels)} 个：{labels}")
-    check("  变换按钮正好 6 个（4 模式 + 2 镜像）", len(labels) == 6, f"实际 {len(labels)}")
-    check("  6 个按钮排成 3 行（每行 2 个，末行不空）",
-          grid.columns() == 2 and len(labels) == 6, f"列数 {grid.columns()}")
+    check("  正好 8 个（5 模式 + 清空变换 + 2 镜像）", len(labels) == 8, f"实际 {len(labels)}")
+    check("  排成 4 行 × 2（末行不空）",
+          grid.columns() == 2 and len(labels) == 8, f"列数 {grid.columns()}")
+    check("  斜切在（用户要求保留）", "斜切" in labels, f"实际 {labels}")
+    check("  清空变换在网格里且不可勾选",
+          "清空变换" in labels and not panel.btn_clear_transform.isCheckable())
+    check("  两个镜像在最后一行", labels[-2:] == ["水平镜像", "垂直镜像"],
+          f"实际 {labels[-2:]}")
+    check("  摘要单独一行、占满网格宽度",
+          abs(panel.lbl_transform_summary.width() - grid.width()) <= 2,
+          f"{panel.lbl_transform_summary.width()} vs {grid.width()}")
 
     canvas = PreviewCanvas()
     canvas.set_action(make_action())
     canvas.resize(800, 600)
     app.processEvents()
-    edge_hits = []
-    for mode in (None, "rotate", "scale", "perspective", "distort"):
-        canvas.set_transform_mode(mode)
-        app.processEvents()
-        pts = canvas._handles_canvas(canvas._current_mo())
-        for i in range(4):
-            mid = (pts[i] + pts[(i + 1) % 4]) / 2.0
-            kind, _idx = canvas._hit_test(canvas._logical_to_screen(mid))
-            if kind == "edge":
-                edge_hits.append((mode, i))
-    check("  任何模式下边中点都不再是可拖手柄", not edge_hits, f"命中 {edge_hits}")
+    canvas.set_transform_mode("skew")
+    app.processEvents()
+    pts = canvas._handles_canvas(canvas._current_mo())
+    edge_hits = [canvas._hit_test(canvas._logical_to_screen(
+        (pts[i] + pts[(i + 1) % 4]) / 2.0))[0] for i in range(4)]
+    check("  斜切下四条边的中点都可拖", edge_hits == ["edge"] * 4, f"实际 {edge_hits}")
     canvas.set_transform_mode("perspective")
     app.processEvents()
     pts = canvas._handles_canvas(canvas._current_mo())
     corner_hits = [canvas._hit_test(canvas._logical_to_screen(p))[0] for p in pts]
-    check("  透视下四个角仍然可拖", corner_hits == ["corner"] * 4, f"实际 {corner_hits}")
+    check("  透视下四个角可拖", corner_hits == ["corner"] * 4, f"实际 {corner_hits}")
 
     print()
-    print("=== 4. 扭曲：只有被拖的角动 ===")
+    print("=== 4. 斜切：拖边 = 两端一起平移（平行四边形），另外两角不动 ===")
+    for edge in range(4):
+        horizontal = (min(edge, (edge + 1) % 4), max(edge, (edge + 1) % 4)) in HORIZONTAL_EDGES
+        d = 20.0
+        quad = drag_quad(app, "skew", "edge", edge, d if horizontal else 0.0,
+                         0.0 if horizontal else d)
+        got = corners_of(quad)
+        base = [QPointF(0, 0), QPointF(1, 0), QPointF(1, 1), QPointF(0, 1)]
+        a, b = edge, (edge + 1) % 4
+        moved_a = got[a] - base[a]
+        moved_b = got[b] - base[b]
+        others_ok = all(
+            near(got[i].x(), base[i].x(), 1e-5) and near(got[i].y(), base[i].y(), 1e-5)
+            for i in (set(range(4)) - {a, b}))
+        print(f"  拖边 {a}-{b}（{'水平' if horizontal else '垂直'}）："
+              f"两端位移 {moved_a.x():.4f},{moved_a.y():.4f} / {moved_b.x():.4f},{moved_b.y():.4f}")
+        check(f"  边 {a}-{b} 两端位移相同（平行四边形）",
+              near(moved_a.x(), moved_b.x(), 1e-4) and near(moved_a.y(), moved_b.y(), 1e-4))
+        check(f"  边 {a}-{b} 另外两角不动", others_ok)
+
+    print()
+    print("=== 5. 斜切 + Shift = 居中剪切（对边反向等量，中心不动）===")
+    for edge in (0, 1):
+        horizontal = edge == 0
+        quad = drag_quad(app, "skew", "edge", edge, 20.0 if horizontal else 0.0,
+                         0.0 if horizontal else 20.0, shift=True)
+        got = corners_of(quad)
+        base = [QPointF(0, 0), QPointF(1, 0), QPointF(1, 1), QPointF(0, 1)]
+        a, b = edge, (edge + 1) % 4
+        other_a = (edge + 2) % 4
+        moved = (got[a] - base[a]).x() if horizontal else (got[a] - base[a]).y()
+        opposite = ((got[other_a] - base[other_a]).x() if horizontal
+                    else (got[other_a] - base[other_a]).y())
+        same_edge_b = ((got[b] - base[b]).x() if horizontal else (got[b] - base[b]).y())
+        print(f"  拖边 {a}-{b} + Shift：本边 {moved:+.4f}（另一端 {same_edge_b:+.4f}），"
+              f"对边 {opposite:+.4f}")
+        check(f"  边 {a}-{b} + Shift：对边朝相反方向等量移动（居中，图形不整体跑）",
+              near(moved, -opposite, 1e-4) and abs(moved) > 1e-4,
+              f"{moved:.4f} vs {-opposite:.4f}")
+
+    print()
+    print("=== 6. 扭曲：只有被拖的角动 ===")
     for k in range(4):
         quad = drag_quad(app, "distort", "corner", k, 20.0, 6.0)
         got = corners_of(quad)
@@ -220,7 +263,7 @@ def main() -> int:
         check(f"  拖 {CORNER_NAMES[k]}：只有它动", moved and others_ok)
 
     print()
-    print("=== 5. Shift 锁轴（透视 / 扭曲）===")
+    print("=== 7. Shift 锁轴（透视 / 扭曲）===")
     for mode in ("perspective", "distort"):
         # 偏水平的拖动 -> 只保留 X
         quad = drag_quad(app, mode, "corner", 0, 30.0, 6.0, shift=True)
@@ -239,7 +282,7 @@ def main() -> int:
               abs(got[0].x() - base[0].x()) < 1e-6 and abs(got[0].y() - base[0].y()) > 1e-4)
 
     print()
-    print("=== 6. Shift 锁轴的滞回（连续判断，换轴要超出 4px）===")
+    print("=== 8. Shift 锁轴的滞回（连续判断，换轴要超出 4px）===")
     holder: list = []
     quad = drag_quad(app, "distort", "corner", 0, 30.0, 6.0, shift=True, canvas_out=holder)
     ctx = holder[0]
@@ -269,7 +312,7 @@ def main() -> int:
           f"轴={canvas._axis_lock} dx={got[0].x() - base[0].x():.4f}")
 
     print()
-    print("=== 7. Shift 等比（缩放）===")
+    print("=== 9. Shift 等比（缩放）===")
     base = [QPointF(0, 0), QPointF(1, 0), QPointF(1, 1), QPointF(0, 1)]
 
     def size_of(quad):
@@ -290,7 +333,7 @@ def main() -> int:
           f"比例 {shift_ratio[0] / shift_ratio[1]:.4f}")
 
     print()
-    print("=== 8. Shift 旋转 15° 吸附 ===")
+    print("=== 10. Shift 旋转 15° 吸附 ===")
     from spritesheet.ui.preview import PreviewCanvas
 
     for shift in (False, True):
@@ -324,7 +367,7 @@ def main() -> int:
                   angle is not None and angle % 15 != 0, f"实际 {angle}")
 
     print()
-    print("=== 9. 清空变换按钮 ===")
+    print("=== 11. 清空变换按钮 ===")
     from spritesheet.ui.preview import ActionPreviewWidget
 
     widget = ActionPreviewWidget()

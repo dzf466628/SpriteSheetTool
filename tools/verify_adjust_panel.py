@@ -63,16 +63,17 @@ def main() -> int:
     for index, names in enumerate(rows):
         print(f"    第 {index + 1} 行: {names}")
     check("默认是每行 2 个", grid.columns() == 2, f"实际 {grid.columns()}")
-    check("按钮总数是 6（4 个变换模式 + 2 个镜像；斜切已去掉）",
-          len(grid._buttons) == 6, f"实际 {len(grid._buttons)}")
-    check("行数 = 6 / 2 = 3（末行不空）", len(rows) == 3, f"实际 {len(rows)}")
+    check("按钮总数是 8（5 模式 + 清空变换 + 2 镜像）",
+          len(grid._buttons) == 8, f"实际 {len(grid._buttons)}")
+    check("行数 = 8 / 2 = 4（末行不空）", len(rows) == 4, f"实际 {len(rows)}")
     check("每行都是 2 个", all(len(names) == 2 for names in rows), f"实际 {[len(r) for r in rows]}")
-    check("前两行是 旋转/缩放 与 透视/扭曲",
-          rows[0] == ["旋转", "缩放"] and rows[1] == ["透视", "扭曲"], f"实际 {rows[:2]}")
-    check("第三行是两个镜像", rows[2] == ["水平镜像", "垂直镜像"], f"实际 {rows[2]}")
+    check("前两行是 旋转/缩放 与 斜切/透视",
+          rows[0] == ["旋转", "缩放"] and rows[1] == ["斜切", "透视"], f"实际 {rows[:2]}")
+    check("第三行是 扭曲/清空变换", rows[2] == ["扭曲", "清空变换"], f"实际 {rows[2]}")
+    check("第四行是两个镜像", rows[3] == ["水平镜像", "垂直镜像"], f"实际 {rows[3]}")
 
     print()
-    print("=== 2. 「当前变换」摘要 + 「清空变换」同占一行 ===")
+    print("=== 2. 「当前变换」摘要单独一行、占满宽度 ===")
     summary = panel.lbl_transform_summary
     clear_btn = panel.btn_clear_transform
     grid_bottom = grid.y() + grid.height()
@@ -80,13 +81,11 @@ def main() -> int:
           f"摘要 y={summary.y()} 宽 {summary.width()}；清空按钮 y={clear_btn.y()} 宽 {clear_btn.width()}")
     check("摘要在网格下方（不与按钮同行）", summary.y() >= grid_bottom - 2,
           f"摘要 y={summary.y()}，网格底部 {grid_bottom}")
-    check("清空按钮与摘要同一行",
-          abs(clear_btn.y() - summary.y()) <= 4, f"{clear_btn.y()} vs {summary.y()}")
-    check("摘要 + 清空按钮正好占满网格宽度",
-          abs((summary.width() + clear_btn.width() + 5) - grid.width()) <= 3,
-          f"{summary.width()} + {clear_btn.width()} + 5 vs {grid.width()}")
-    check("清空按钮在摘要右边", clear_btn.x() > summary.x() + summary.width() - 2,
-          f"{clear_btn.x()} vs {summary.x() + summary.width()}")
+    check("摘要宽度与网格一致（独占一行）",
+          abs(summary.width() - grid.width()) <= 2,
+          f"摘要 {summary.width()} vs 网格 {grid.width()}")
+    check("清空变换在网格里（不再和摘要挤同一行）",
+          clear_btn in grid._buttons, f"网格按钮 {[b.text() for b in grid._buttons]}")
 
     print()
     print("=== 3. 窄了要换行而不是压扁 ===")
