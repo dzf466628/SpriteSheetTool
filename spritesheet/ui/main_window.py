@@ -35,9 +35,9 @@ from .preview import ActionPreviewWidget
 from .transform import action_frame_pixmap
 from .widgets import ActionCardWidget, ActionItemDelegate, _APP_ROOT, make_logo_pixmap
 
-# 工程文件缩略图的长边尺寸：资源管理器按 96/256 显示，192 在"看得清"和
-# "文件不变胖"之间比较平衡（.sstool 以这张 PNG 开头）。
-_THUMB_LONG_SIDE = 192
+# 工程文件缩略图的长边尺寸：资源管理器按 96/256 显示，取 256 保证"超大图标"
+# 视图下也清晰（.sstool 以这张 PNG 开头，是它的"脸"）。
+_THUMB_LONG_SIDE = 256
 
 
 # 主窗口

@@ -91,6 +91,14 @@ python -m venv .venv
 - 若旧文件仍显示旧图标，是资源管理器的缩略图缓存在起作用：**重装后新存的工程**会立即
   有缩略图；老文件可改个名或清理缩略图缓存（`ie4uinit.exe -show`）后刷新。
 - 内容损坏/不是 PNG 的 `.sstool` 会**优雅回退**到 `SSTool.ico`，不会出现破图。
+- `SSTool.ico` 必须是**标准方形多尺寸**（16/24/32/48/64/128/256）。Windows 选图标按
+  标准方形尺寸匹配，非方形（如 `23x32`）会让图标被画得比同槽位小一圈。要重做图标：
+  ```powershell
+  .venv\Scripts\python.exe tools\make_icons.py 工程图标.png SSTool.ico
+  .venv\Scripts\python.exe tools\inspect_icon.py SSTool.ico   # 校验尺寸表
+  ```
+  源图长宽比不是 1:1 时，方形两侧会透明（不拉伸、不裁切）；若想让图标铺满槽位，
+  加 `--tile "#FB5582"` 铺一层品牌色圆角底。
 
 
 ### 导入 / 往返保真度
@@ -239,6 +247,8 @@ models ← transform ← widgets ← image_viewer / export_dialog ← preview �
 | `profile_hotpaths.py` | 热路径采样（先测再改：重绘 / 打包 / 导出 / 检测） |
 | `verify_project_format.py` | 工程文件格式回归（新布局 / 旧布局兼容 / 缩略图退回 / 损坏文件） |
 | `inspect_project_file.py` | 实存一个工程并检查其文件布局与缩略图 |
+| `make_icons.py` | 从源 PNG 生成标准方形多尺寸 `.ico`（含可选品牌色圆角底） |
+| `inspect_icon.py` | 打印 `.ico` 内嵌尺寸表并校验是否全是标准方形尺寸 |
 
 
 ## 换电脑 / 迁移清单
