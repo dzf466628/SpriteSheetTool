@@ -159,6 +159,83 @@ def main() -> int:
           f"{first} / {second}")
 
     print()
+    print("=== 5. 关闭叉号悬停：变红 + 旋转 30°（形状只能在真实字体下量）===")
+    import time as _time
+
+    from PyQt6.QtCore import QPointF as _QPointF, QRectF as _QRectF
+    from PyQt6.QtGui import QMouseEvent as _QMouseEvent
+
+    close_bar = ProjectTabBar()
+    close_bar.resize(400, close_bar.HEIGHT)
+    close_bar.add_tab("甲工程", select=False)
+    close_bar.set_current(0)
+    app.processEvents()
+    close_rect = close_bar._close_rect(0)
+    idle_image = close_bar.grab().toImage()
+
+    def mask_of(image):
+        return [[image.pixelColor(x, y).lightness() > 90
+                 for x in range(close_rect.left(), close_rect.right())]
+                for y in range(close_rect.top(), close_rect.bottom())]
+
+    def mask_diff(a, b) -> int:
+        return sum(1 for ra, rb in zip(a, b) for x, y in zip(ra, rb) if x != y)
+
+    def reddish(color) -> bool:
+        r, g, b = color.red(), color.green(), color.blue()
+        return r - g > 40 and r - b > 20 and r > 120
+
+    def red_count(image) -> int:
+        return sum(1 for y in range(close_rect.top(), close_rect.bottom())
+                   for x in range(close_rect.left(), close_rect.right())
+                   if reddish(image.pixelColor(x, y)))
+
+    idle_red = red_count(idle_image)
+    idle_mask = mask_of(idle_image)
+    check("未悬停时没有红色", idle_red == 0, f"红色像素 {idle_red}")
+
+    pos = _QPointF(close_rect.center())
+    close_bar.mouseMoveEvent(_QMouseEvent(
+        _QMouseEvent.Type.MouseMove, pos, pos, Qt.MouseButton.NoButton,
+        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+    while close_bar._close_anim.state() == close_bar._close_anim.State.Running:
+        app.processEvents()
+        _time.sleep(0.005)
+    app.processEvents()
+    hover_image = close_bar.grab().toImage()
+    hover_red = red_count(hover_image)
+    hover_mask = mask_of(hover_image)
+    print(f"  悬停：红色像素 {hover_red}")
+    check("悬停后叉号变红", hover_red >= 8, f"红色像素 {hover_red}")
+    check("红色只在笔画上（不是红底圆点）", hover_red < 90,
+          f"红色像素 {hover_red}（红底圆会到 150+）")
+
+    def reference(angle: float):
+        pm = QPixmap(close_rect.width(), close_rect.height())
+        pm.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pm)
+        painter.setFont(close_bar._close_font)
+        painter.setPen(QColor("#ffffff"))
+        painter.translate(pm.width() / 2.0, pm.height() / 2.0)
+        painter.rotate(angle)
+        painter.drawText(_QRectF(-pm.width(), -pm.height(), pm.width() * 2, pm.height() * 2),
+                         int(Qt.AlignmentFlag.AlignCenter), close_bar._close_glyph)
+        painter.end()
+        image = pm.toImage()
+        return [[image.pixelColor(x, y).lightness() > 90 for x in range(image.width())]
+                for y in range(image.height())]
+
+    zero = reference(0.0)
+    thirty = reference(ProjectTabBar.CLOSE_ROTATE)
+    d_zero, d_thirty = mask_diff(hover_mask, zero), mask_diff(hover_mask, thirty)
+    print(f"  悬停墨迹 vs 0° 差 {d_zero}，vs 30° 差 {d_thirty}")
+    check("悬停时叉号转到了 30°（更像 30° 参考图）", d_thirty < d_zero,
+          f"0° 差 {d_zero} vs 30° 差 {d_thirty}")
+    check("未悬停时是 0°（没被转）",
+          mask_diff(idle_mask, zero) < mask_diff(idle_mask, thirty),
+          f"0° 差 {mask_diff(idle_mask, zero)} vs 30° 差 {mask_diff(idle_mask, thirty)}")
+
+    print()
     if FAILURES:
         print("GLYPHS FAILED：", *FAILURES, sep="\n  - ")
         return 1

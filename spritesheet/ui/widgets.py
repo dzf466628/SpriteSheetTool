@@ -73,6 +73,16 @@ def make_tool_icon(kind: str, size: int = 18) -> QIcon:
     return QIcon(pm)
 
 
+def _blend(start: QColor, end: QColor, t: float) -> QColor:
+    """按 t（0~1）在两色之间插值（用于悬停时灰→红的过渡）。"""
+    t = max(0.0, min(1.0, float(t)))
+    return QColor(
+        round(start.red() + (end.red() - start.red()) * t),
+        round(start.green() + (end.green() - start.green()) * t),
+        round(start.blue() + (end.blue() - start.blue()) * t),
+    )
+
+
 class AppNameLabel(QWidget):
     """软件名标签：首字母放大，并与其余文字**垂直居中**；版本号跟在名字后面，
     与名字**底对齐**（共用同一条基线）。
@@ -252,6 +262,7 @@ class ProjectTabBar(QWidget):
     CLOSE_RED = "#E91E63"        # 关闭按钮悬停时的红色（软件强调色）
     CLOSE_IDLE = "#6a6a6a"       # 未悬停时的叉号颜色
     CLOSE_HOVER_MS = 130         # 悬停动画时长
+    CLOSE_ROTATE = 30.0          # 悬停时叉号旋转的角度（用户要求：转 30° 变红，不要红底）
     CLOSE_GLYPH = "✕"            # 叉号字符（U+2715；想用更细的 × 改成 "×"）
 
     tab_selected = pyqtSignal(int)
@@ -432,21 +443,23 @@ class ProjectTabBar(QWidget):
             painter.drawText(text_rect, int(Qt.AlignmentFlag.AlignVCenter |
                                             Qt.AlignmentFlag.AlignLeft), text)
 
-            # 关闭按钮：正常的叉号字形 + 悬停时红色圆底渐显（带动画）
+            # 关闭按钮：正常的叉号字形；悬停时**转 30° 并变红**（不带红底）
             close = self._close_rect(index)
             hovered = index == self._hover_close
             progress = self._close_progress if hovered else 0.0
             cx, cy = close.center().x(), close.center().y()
-            if progress > 0.01:
-                radius = self.CLOSE_R * (0.55 + 0.45 * progress)
-                circle = QColor(self.CLOSE_RED)
-                circle.setAlphaF(progress)
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(circle)
-                painter.drawEllipse(QPointF(cx, cy), radius, radius)
+            angle = self.CLOSE_ROTATE * progress
             painter.setFont(self._close_font)
-            painter.setPen(QPen(QColor("#ffffff" if progress > 0.5 else self.CLOSE_IDLE)))
-            painter.drawText(close, int(Qt.AlignmentFlag.AlignCenter), self._close_glyph)
+            painter.setPen(QPen(_blend(QColor(self.CLOSE_IDLE), QColor(self.CLOSE_RED), progress)))
+            painter.save()
+            painter.translate(cx, cy)
+            if angle:
+                painter.rotate(angle)
+            # 以中心为原点画字形，这样旋转是绕叉号自己转
+            painter.drawText(QRectF(-close.width(), -close.height(),
+                                    close.width() * 2, close.height() * 2),
+                             int(Qt.AlignmentFlag.AlignCenter), self._close_glyph)
+            painter.restore()
 
         plus = self.plus_rect()
         painter.setPen(QPen(QColor("#9a9a9a")))

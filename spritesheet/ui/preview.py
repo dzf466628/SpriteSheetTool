@@ -38,6 +38,11 @@ from .widgets import (
     _GROUP_QSS, _SLIDER_QSS, make_tool_icon, paint_checkerboard,
 )
 
+# 四角顺序（与 DEFAULT_QUAD 一致）：0=左上 1=右上 2=右下 3=左下。
+# 源矩形里 (0,1) 与 (2,3) 是**水平**边，(1,2) 与 (3,0) 是垂直边 ——
+# 自由变换的联动判定按这个来（透视模式要用，见 _update_drag）。
+_HORIZONTAL_EDGES = frozenset({(0, 1), (2, 3)})
+
 
 class PreviewFloatingBar(QWidget):
     """播放器右上角浮动工具条：循环模式 / 锚点准星 / 背景切换（仿原图工具条）。"""
@@ -654,11 +659,26 @@ class PreviewCanvas(QWidget):
                 new = [QPointF(p.x(), p.y()) for p in orig_c]
                 dx = cur.x() - orig_c[k].x()
                 dy = cur.y() - orig_c[k].y()
-                # 相邻两角联动：边 (k,k+1) 水平、边 (k-1,k) 垂直（对边保持不动 → 透视感）
+                # 透视：本角跟鼠标走，**两条相邻边的另一端朝相反方向动**（对称收放），
+                # 对角不动 —— 这样两条邻边一起收/放，形状才会汇聚成梯形。
+                #
+                # 两处都踩过坑，别看错：
+                # ① 邻角要按**边的方向**挑，不能写死 (k+1)→X、(k-1)→Y。源矩形里
+                #    (0,1)(2,3) 是水平边、(1,2)(3,0) 是垂直边，所以 k=1/3 时两个邻角
+                #    是反过来的；写死会让右上/左下沿错轴移动。
+                # ② 邻角的位移必须是 **-d**（相反方向）。同向位移在几何上恒等于
+                #    "两对对边都保持平行" = 平行四边形 = 仿射变换，看着就是斜切/平移，
+                #    完全不是透视（用户报的正是"斜切和透视差不多、透视不对"）。
+                #    相反方向才会让对边不再平行 —— 这就是梯形（透视）的判据。
+                nxt, prv = (k + 1) % 4, (k - 1) % 4
+                if (min(k, nxt), max(k, nxt)) in _HORIZONTAL_EDGES:
+                    horizontal_neighbor, vertical_neighbor = nxt, prv
+                else:
+                    horizontal_neighbor, vertical_neighbor = prv, nxt
                 new[k].setX(orig_c[k].x() + dx)
-                new[(k + 1) % 4].setX(orig_c[(k + 1) % 4].x() + dx)
                 new[k].setY(orig_c[k].y() + dy)
-                new[(k - 1) % 4].setY(orig_c[(k - 1) % 4].y() + dy)
+                new[horizontal_neighbor].setX(orig_c[horizontal_neighbor].x() - dx)
+                new[vertical_neighbor].setY(orig_c[vertical_neighbor].y() - dy)
             elif mode == "scale":
                 anchor = orig_c[(k + 2) % 4]
                 den_x = orig_c[k].x() - anchor.x()

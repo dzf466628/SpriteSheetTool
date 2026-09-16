@@ -17,7 +17,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QPoint, QPointF, QRect, Qt
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt
 from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPixmap
 from PyQt6.QtWidgets import QApplication
 
@@ -73,9 +73,13 @@ def click_tab(tabs, index: int) -> None:
 
 
 def is_brand_red(color) -> bool:
-    """是不是品牌玫红 #E91E63（关闭按钮悬停的红色圆底）。"""
-    return (abs(color.red() - 0xE9) < 40 and abs(color.green() - 0x1E) < 55
-            and abs(color.blue() - 0x63) < 55)
+    """是不是偏品牌玫红 #E91E63。
+
+    判据要放宽一点：字形是抗锯齿画出来的，边缘像素是灰红混合色，
+    严格匹配 #E91E63 只剩几个像素（实测 4 个），会把变红了误判成没变红。
+    """
+    r, g, b = color.red(), color.green(), color.blue()
+    return r - g > 40 and r - b > 20 and r > 120
 
 
 def build_doc(win, action_name: str, color: str, filled: int) -> int:
@@ -300,11 +304,21 @@ def main() -> int:
               f"实际 #{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}（圆角的话这里会是栏底色 #1a1a1a）")
 
     print()
-    print("=== 10. 关闭叉号：字形 + 悬停红色动画 ===")
+    print("=== 10. 关闭叉号：字形 + 悬停转 30° 变红（不是大红点）===")
     bar2, before_img = rendered(["甲工程"], current=0)
     rect0 = bar2.tab_rects()[0]
     close_rect = bar2._close_rect(0)
-    # 未悬停：叉号是灰的，没有红色
+
+    def mask_of(image, rect):
+        return [[image.pixelColor(x, y).lightness() > 90
+                 for x in range(rect.left(), rect.right())]
+                for y in range(rect.top(), rect.bottom())]
+
+    def mask_diff(mask_a, mask_b) -> int:
+        return sum(1 for row_a, row_b in zip(mask_a, mask_b)
+                   for a, b in zip(row_a, row_b) if a != b)
+
+    # 未悬停：有字形、没有红色
     idle_ink = sum(1 for y in range(close_rect.top(), close_rect.bottom())
                    for x in range(close_rect.left(), close_rect.right())
                    if before_img.pixelColor(x, y).lightness() > 90)
@@ -312,7 +326,8 @@ def main() -> int:
                      for x in range(close_rect.left(), close_rect.right())
                      if is_brand_red(before_img.pixelColor(x, y)))
     check("未悬停时画出了叉号字形", idle_ink >= 8, f"墨迹 {idle_ink}")
-    check("未悬停时没有红色圆底", red_before == 0, f"红色像素 {red_before}")
+    check("未悬停时没有红色", red_before == 0, f"红色像素 {red_before}")
+    idle_mask = mask_of(before_img, close_rect)
 
     # 悬停：把鼠标移到叉号上，等动画跑完
     pos = QPoint(close_rect.center().x(), close_rect.center().y())
@@ -329,15 +344,25 @@ def main() -> int:
     red_after = sum(1 for y in range(close_rect.top(), close_rect.bottom())
                     for x in range(close_rect.left(), close_rect.right())
                     if is_brand_red(after_img.pixelColor(x, y)))
-    white_after = sum(1 for y in range(close_rect.top(), close_rect.bottom())
-                      for x in range(close_rect.left(), close_rect.right())
-                      if after_img.pixelColor(x, y).lightness() > 200)
-    print(f"    悬停动画进度 {bar2._close_progress:.2f}，红色像素 {red_after}，白色墨迹 {white_after}")
-    check("悬停后出现红色圆底", red_after > 20, f"红色像素 {red_after}")
-    check("悬停后叉号变成白色", white_after >= 8, f"白色墨迹 {white_after}")
-    check("悬停动画确实走完了", bar2._close_progress > 0.95, f"进度 {bar2._close_progress:.2f}")
+    hover_mask = mask_of(after_img, close_rect)
+    print(f"    悬停动画进度 {bar2._close_progress:.2f}，红色像素 {red_after}")
+    check("悬停后出现了红色（数值级检查，形状见 verify_glyphs）", red_after >= 1,
+          f"红色像素 {red_after}——offscreen 的方框字形被 close 矩形裁掉大半，"
+          f"只剩几个像素；真实平台上这里是 30+")
+    check("红色只在笔画上，不是一个大红点（红色像素 < 80）", red_after < 80,
+          f"红色像素 {red_after}（画红底圆的话会是 150+）")
+    check("悬停动画确实走完了", bar2._close_progress > 0.95,
+          f"进度 {bar2._close_progress:.2f}")
 
-    # 鼠标移开后红色要淡回去
+    # 悬停前后的墨迹必须不一样（说明叉号确实换了样子）。
+    # 「转了多少度、红得对不对」这里量不了：offscreen 没有真实字体，方框字形比真实
+    # ✕ 大得多、会被 close 矩形裁掉，量出来只是残片（曾据此得出"未悬停更像 30°"的
+    # 荒谬结论）。形状类断言都在 tools/verify_glyphs.py（真实 windows 平台）里。
+    check("悬停后叉号墨迹与未悬停不同（确实换了样子）",
+          mask_diff(hover_mask, idle_mask) > 0,
+          f"差异 {mask_diff(hover_mask, idle_mask)} 像素")
+
+    # 鼠标移开后要转回去
     bar2.leaveEvent(QMouseEvent(
         QMouseEvent.Type.Leave, QPointF(0, 0), QPointF(0, 0), Qt.MouseButton.NoButton,
         Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
@@ -345,7 +370,7 @@ def main() -> int:
     while time.time() < deadline and bar2._close_anim.state() == bar2._close_anim.State.Running:
         app.processEvents()
         time.sleep(0.01)
-    check("移开后动画回到 0（红色淡出）", bar2._close_progress < 0.05,
+    check("移开后动画回到 0（转回原角度、红色褪掉）", bar2._close_progress < 0.05,
           f"进度 {bar2._close_progress:.2f}")
 
     print()
