@@ -154,6 +154,10 @@ class PreviewCanvas(QWidget):
 
     MIN_ZOOM = 0.1
     MAX_ZOOM = 8.0
+    # 按住 Shift 时：锁轴换方向所需的额外位移（滞回，避免 45° 附近来回抖）
+    AXIS_LOCK_HYSTERESIS = 4.0
+    # 按住 Shift 旋转时的角度吸附档位（PS 是 15°）
+    ROTATE_SNAP_DEGREES = 15
 
     # ---- 自由变换交互信号 ----
     # 进入/退出变换模式（'' 表示退出）；由帧设置按钮联动
@@ -176,6 +180,9 @@ class PreviewCanvas(QWidget):
         self.setMouseTracking(True)
         self._action: Action | None = None
         self._frame_index: int = 0
+        # Shift 锁轴：本次拖拽锁定在哪个轴（None = 未锁）
+        self._axis_lock: str | None = None
+        self._last_drag_screen: QPointF | None = None
         # 缩放与拖动
         self._zoom = 1.0
         self._offset = QPointF(0, 0)
@@ -193,7 +200,7 @@ class PreviewCanvas(QWidget):
         self._scroll_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._scroll_timer.timeout.connect(self._scroll_background)
         # ---- 自由变换交互状态 ----
-        self._transform_mode: str | None = None  # None/rotate/scale/skew/perspective/distort
+        self._transform_mode: str | None = None  # None/rotate/scale/perspective/distort
         self._drag_kind: str | None = None       # None/corner/edge/rotate/pivot
         self._drag_index: int = -1
         self._drag_layout: tuple | None = None   # 拖动期间锁定的布局（避免帧跳动）
@@ -391,7 +398,7 @@ class PreviewCanvas(QWidget):
     # ==================== 自由变换交互 ====================
 
     def set_transform_mode(self, mode: str | None) -> None:
-        """进入/退出变换模式（'rotate'/'scale'/'skew'/'perspective'/'distort'/''/None）。"""
+        """进入/退出变换模式（'rotate'/'scale'/'perspective'/'distort'/''/None）。"""
         mode = mode or None
         if mode is not None and mode == self._transform_mode:
             mode = None  # 再点同按钮 = 退出
@@ -546,11 +553,6 @@ class PreviewCanvas(QWidget):
             for i, s in enumerate(screens):
                 if (s - screen_pos).manhattanLength() < 15:
                     return "corner", i
-        elif mode == "skew":
-            for i in range(4):
-                mid = (screens[i] + screens[(i + 1) % 4]) / 2.0
-                if (mid - screen_pos).manhattanLength() < 15:
-                    return "edge", i
         return None, -1
 
     def _begin_drag(self, kind: str, index: int, screen_pos: QPointF) -> None:
@@ -558,6 +560,7 @@ class PreviewCanvas(QWidget):
         self._drag_kind = kind
         self._drag_index = index
         self._drag_layout = self._current_layout()
+        self._axis_lock = None          # Shift 锁轴的状态，每次拖拽重新判定
         quad = self._action.frame_quads.get(self._frame_index, DEFAULT_QUAD)
         self._drag_orig = tuple(quad)
         dst, w, h = self._quad_dst(quad)
@@ -632,7 +635,27 @@ class PreviewCanvas(QWidget):
             quad.append(dsty / h if h else 0.0)
         self.transform_quadded.emit(tuple(round(v, 6) for v in quad))
 
-    def _update_drag(self, screen_pos: QPointF) -> None:
+    def _locked_delta(self, dx: float, dy: float) -> tuple[float, float]:
+        """Shift 锁轴：只保留一个方向的分量（PS 那个手感）。
+
+        连续判断 + 滞回：
+          · 一开始按位移大的轴锁定；
+          · 之后要换轴，另一轴必须**超出 4px** 才切 —— 否则鼠标在 45° 附近来回时
+            会一会儿锁横一会儿锁竖，看起来像卡顿。
+        """
+        if self._axis_lock is None:
+            self._axis_lock = "x" if abs(dx) >= abs(dy) else "y"
+        elif self._axis_lock == "x":
+            if abs(dy) > abs(dx) + self.AXIS_LOCK_HYSTERESIS:
+                self._axis_lock = "y"
+        else:
+            if abs(dx) > abs(dy) + self.AXIS_LOCK_HYSTERESIS:
+                self._axis_lock = "x"
+        return (dx, 0.0) if self._axis_lock == "x" else (0.0, dy)
+
+    def _update_drag(self, screen_pos: QPointF, modifiers=None) -> None:
+        shift = bool((modifiers or Qt.KeyboardModifier.NoModifier)
+                     & Qt.KeyboardModifier.ShiftModifier)
         mode = self._transform_mode
         if mode == "rotate":
             cur = self._screen_to_logical(screen_pos)
@@ -645,7 +668,11 @@ class PreviewCanvas(QWidget):
             if dx or dy:
                 current_mouse_angle = math.degrees(math.atan2(dy, dx))
                 delta = (current_mouse_angle - self._drag_rot_mouse_start + 180.0) % 360.0 - 180.0
-                self.transform_rotated.emit((self._drag_rot_start + int(round(delta))) % 360)
+                angle = (self._drag_rot_start + int(round(delta))) % 360
+                if shift:
+                    # Shift = 吸附到 15° 的整数倍（PS 一样）
+                    angle = int(round(angle / self.ROTATE_SNAP_DEGREES)) * self.ROTATE_SNAP_DEGREES % 360
+                self.transform_rotated.emit(angle)
             return
         cur = self._screen_to_logical(screen_pos)
         kind = self._drag_kind
@@ -653,12 +680,18 @@ class PreviewCanvas(QWidget):
         if kind == "corner":
             k = self._drag_index
             if mode == "distort":
-                new = [QPointF(p.x(), p.y()) for p in orig_c]
-                new[k] = cur
-            elif mode == "perspective":
-                new = [QPointF(p.x(), p.y()) for p in orig_c]
                 dx = cur.x() - orig_c[k].x()
                 dy = cur.y() - orig_c[k].y()
+                if shift:
+                    dx, dy = self._locked_delta(dx, dy)
+                new = [QPointF(p.x(), p.y()) for p in orig_c]
+                new[k] = QPointF(orig_c[k].x() + dx, orig_c[k].y() + dy)
+            elif mode == "perspective":
+                dx = cur.x() - orig_c[k].x()
+                dy = cur.y() - orig_c[k].y()
+                if shift:
+                    dx, dy = self._locked_delta(dx, dy)
+                new = [QPointF(p.x(), p.y()) for p in orig_c]
                 # 透视：本角跟鼠标走，**两条相邻边的另一端朝相反方向动**（对称收放），
                 # 对角不动 —— 这样两条邻边一起收/放，形状才会汇聚成梯形。
                 #
@@ -687,22 +720,15 @@ class PreviewCanvas(QWidget):
                     return
                 rx = (cur.x() - anchor.x()) / den_x
                 ry = (cur.y() - anchor.y()) / den_y
+                if shift:
+                    # Shift = 等比缩放（保持宽高比）：取变化更大的那个轴的比例，
+                    # 两个轴都用它 —— 这样形状不会被拉扁。
+                    r = rx if abs(rx - 1.0) >= abs(ry - 1.0) else ry
+                    rx = ry = r
                 new = [QPointF(anchor.x() + (p.x() - anchor.x()) * rx,
                                anchor.y() + (p.y() - anchor.y()) * ry) for p in orig_c]
             else:
                 return
-            self._emit_quad_from_canvas(new)
-        elif kind == "edge" and mode == "skew":
-            k = self._drag_index
-            new = [QPointF(p.x(), p.y()) for p in orig_c]
-            if k in (0, 2):  # 顶/底边：水平斜切
-                dx = cur.x() - (orig_c[k].x() + orig_c[(k + 1) % 4].x()) / 2.0
-                new[k].setX(orig_c[k].x() + dx)
-                new[(k + 1) % 4].setX(orig_c[(k + 1) % 4].x() + dx)
-            else:            # 左/右边：垂直斜切
-                dy = cur.y() - (orig_c[k].y() + orig_c[(k + 1) % 4].y()) / 2.0
-                new[k].setY(orig_c[k].y() + dy)
-                new[(k + 1) % 4].setY(orig_c[(k + 1) % 4].y() + dy)
             self._emit_quad_from_canvas(new)
 
     def _end_drag(self) -> None:
@@ -748,7 +774,10 @@ class PreviewCanvas(QWidget):
             self.update()
             return
         if self._drag_kind and self._transform_mode:
-            self._update_drag(event.position())
+            # 修饰键（Shift 锁轴 / 等比 / 15° 吸附）从每个移动事件里读，
+            # 松手前按住或松开 Shift 会在下一次移动时生效（PS 也是这样）。
+            self._last_drag_screen = event.position()
+            self._update_drag(event.position(), event.modifiers())
         elif self._transform_mode:
             self._update_hover(event.position())
 
@@ -886,13 +915,11 @@ class PreviewCanvas(QWidget):
                 p.setPen(QPen(QColor(255, 128, 171, 170), 1.0))
                 p.drawEllipse(center, half + 4.0, half + 4.0)
 
+        # 只画四角手柄：斜切去掉后，边中点再也没有任何模式能拖动，
+        # 继续画那几个空心方块只会让人以为可以拖。
         corner_control = mode in ("scale", "perspective", "distort")
-        edge_control = mode == "skew"
         for i, s in enumerate(screens):
             draw_square(s, corner_control, "corner", i, 9.0)
-        for i in range(4):
-            mid = (screens[i] + screens[(i + 1) % 4]) / 2.0
-            draw_square(mid, edge_control, "edge", i, 8.0)
 
         if mode == "rotate":
             pivot_canvas = self._rotation_pivot_canvas(
@@ -1065,19 +1092,18 @@ class AnimAdjustPanel(QWidget):
         trans_v = QVBoxLayout(trans_wrap)
         trans_v.setContentsMargins(0, 0, 0, 0)
         trans_v.setSpacing(5)
-        self.btn_mode_rotate = self._small_btn("旋转", "旋转：点击后在预览上拖圆形旋转手柄或旋转中心", "rotate")
-        self.btn_mode_scale = self._small_btn("缩放", "缩放：点击后在预览上拖角点（对角固定）", "scale")
-        self.btn_mode_skew = self._small_btn("斜切", "斜切：点击后在预览上拖边点", "skew")
-        self.btn_mode_perspective = self._small_btn("透视", "透视：点击后在预览上拖角点（对边联动）", "perspective")
-        self.btn_mode_distort = self._small_btn("扭曲", "扭曲：点击后在预览上拖角点（单角自由）", "distort")
+        self.btn_mode_rotate = self._small_btn("旋转", "旋转：点击后在预览上拖圆形旋转手柄或旋转中心；按住 Shift 吸附 15°", "rotate")
+        self.btn_mode_scale = self._small_btn("缩放", "缩放：点击后在预览上拖角点（对角固定）；按住 Shift 等比缩放", "scale")
+        self.btn_mode_perspective = self._small_btn("透视", "透视：点击后在预览上拖角点（对边反向收放 → 梯形）；按住 Shift 锁横/竖", "perspective")
+        self.btn_mode_distort = self._small_btn("扭曲", "扭曲：点击后在预览上拖角点（单角自由）；按住 Shift 锁横/竖", "distort")
         self.btn_mirror_h = self._small_btn("水平镜像", "水平镜像（左右翻转）", "mirror_h")
         self.btn_mirror_v = self._small_btn("垂直镜像", "垂直镜像（上下翻转）", "mirror_v")
         self._mode_group = QButtonGroup(self)
         self._mode_group.setExclusive(True)
-        mode_buttons = (self.btn_mode_rotate, self.btn_mode_scale, self.btn_mode_skew,
+        mode_buttons = (self.btn_mode_rotate, self.btn_mode_scale,
                         self.btn_mode_perspective, self.btn_mode_distort)
         for b in mode_buttons + (self.btn_mirror_h, self.btn_mirror_v):
-            b.setCheckable(not b in (self.btn_mirror_h, self.btn_mirror_v) or True)
+            b.setCheckable(True)
             b.setFixedHeight(28)
             # 最小宽度放小：两个一行时够用；真正的"排几个"交给 ResponsiveButtonGrid 按宽度算
             b.setMinimumWidth(80)
@@ -1086,18 +1112,18 @@ class AnimAdjustPanel(QWidget):
             self._mode_group.addButton(b)
         self.btn_mode_rotate.toggled.connect(lambda on: self._on_mode_button("rotate", on))
         self.btn_mode_scale.toggled.connect(lambda on: self._on_mode_button("scale", on))
-        self.btn_mode_skew.toggled.connect(lambda on: self._on_mode_button("skew", on))
         self.btn_mode_perspective.toggled.connect(lambda on: self._on_mode_button("perspective", on))
         self.btn_mode_distort.toggled.connect(lambda on: self._on_mode_button("distort", on))
-        # 五个变换模式 + 两个镜像，优先每行两个；面板窄了自动变一行一个（换行而不是压扁）。
-        # min_button 要和按钮的 setMinimumWidth 对齐（留一点余量），否则明明放得下也算成放不下。
+        # 4 个变换模式 + 2 个镜像 = 6 个，正好每行 2 个排 3 行（原来 5+2=7 个，末行空一半）。
+        # 「斜切」已去掉：它要拖**边中点**，而其余模式都拖角点，去掉后边手柄没有任何模式会用，
+        # 那段命中/联动代码一并删了；要剪切仍可用「扭曲」拖两个角做到。
         self._transform_grid = ResponsiveButtonGrid(
             list(mode_buttons) + [self.btn_mirror_h, self.btn_mirror_v],
             max_columns=2, min_button=84)
         self.btn_mirror_h.clicked.connect(lambda: self._toggle_mirror("h"))
         self.btn_mirror_v.clicked.connect(lambda: self._toggle_mirror("v"))
         trans_v.addWidget(self._transform_grid)
-        # 当前变换摘要：**单独一行**（原来和两个镜像按钮挤在同一行，被压得看不清）
+        # 当前变换摘要 + 「清空变换」：摘要独占一行，清空按钮挂在行尾（与它描述的内容挨着）
         self.lbl_transform_summary = QLabel("当前变换：无变换")
         self.lbl_transform_summary.setMinimumHeight(28)
         self.lbl_transform_summary.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -1107,7 +1133,18 @@ class AnimAdjustPanel(QWidget):
             "border-radius: 3px; padding: 0 7px; }"
         )
         self.lbl_transform_summary.setToolTip("当前帧的全部变换状态；旋转角度只读")
-        trans_v.addWidget(self.lbl_transform_summary)
+        self.btn_clear_transform = QPushButton("清空变换")
+        self.btn_clear_transform.setFixedHeight(28)
+        self.btn_clear_transform.setMinimumWidth(80)
+        self.btn_clear_transform.setToolTip(
+            "清空当前帧的 旋转 / 镜像 / 透视 / 旋转中心（帧偏移不动，用下面那栏的重置）")
+        self.btn_clear_transform.clicked.connect(self._clear_frame_transform)
+        summary_row = QHBoxLayout()
+        summary_row.setContentsMargins(0, 0, 0, 0)
+        summary_row.setSpacing(5)
+        summary_row.addWidget(self.lbl_transform_summary, 1)
+        summary_row.addWidget(self.btn_clear_transform, 0)
+        trans_v.addLayout(summary_row)
         f1.addRow("变换", trans_wrap)
 
         layout.addWidget(g1)
@@ -1443,8 +1480,13 @@ class AnimAdjustPanel(QWidget):
         self.btn_mirror_v.blockSignals(True)
         self.btn_mirror_v.setChecked(idx in self._action.frame_mirror_v)
         self.btn_mirror_v.blockSignals(False)
-        items = [f"旋转 {self._action.frame_rotations.get(idx, 0)}°"]
+        items = []
+        angle = self._action.frame_rotations.get(idx, 0)
+        if angle:
+            items.append(f"旋转 {angle}°")
         modes = self._action.frame_transform_modes.get(idx, set())
+        # "skew" 保留在映射里：老工程里可能记录了这次变换用过斜切，摘要要能照实显示
+        # （按钮已经去掉了，只是不再能施加新的斜切）。
         labels = {"scale": "缩放", "skew": "斜切", "perspective": "透视", "distort": "扭曲"}
         for key in ("scale", "skew", "perspective", "distort"):
             if key in modes:
@@ -1455,7 +1497,9 @@ class AnimAdjustPanel(QWidget):
             items.append("水平镜像")
         if idx in self._action.frame_mirror_v:
             items.append("垂直镜像")
-        self.lbl_transform_summary.setText("当前变换：" + " · ".join(items))
+        # 什么都没有时明确写"无变换"，不要显示成"旋转 0°"——那看着像有变换，
+        # 而且「清空变换」按钮点完就该看到它变成"无变换"（否则不知道清没清掉）。
+        self.lbl_transform_summary.setText("当前变换：" + (" · ".join(items) if items else "无变换"))
 
     def _transform_targets(self) -> list:
         """返回 [(action, 帧索引迭代器)]。
@@ -1493,9 +1537,9 @@ class AnimAdjustPanel(QWidget):
     def _on_canvas_mode_changed(self, mode: str) -> None:
         """预览画布侧的退出（点空白/Esc/再点同按钮）→ 同步按钮选中态。"""
         btn = {"rotate": self.btn_mode_rotate, "scale": self.btn_mode_scale,
-               "skew": self.btn_mode_skew, "perspective": self.btn_mode_perspective,
+               "perspective": self.btn_mode_perspective,
                "distort": self.btn_mode_distort}.get(mode)
-        buttons = (self.btn_mode_rotate, self.btn_mode_scale, self.btn_mode_skew,
+        buttons = (self.btn_mode_rotate, self.btn_mode_scale,
                    self.btn_mode_perspective, self.btn_mode_distort)
         # QButtonGroup 的 exclusive 模式下，显式暂时关闭互斥才能可靠地
         # 清除最后一个 checked 按钮（尤其是点击画布空白处退出时）。
@@ -1557,6 +1601,33 @@ class AnimAdjustPanel(QWidget):
         self._transform_changed = True
         self.changed.emit()
         self._sync_transform_widgets()
+
+    def _clear_frame_transform(self) -> None:
+        """清空当前帧的变换：旋转 / 两种镜像 / 透视四边形 / 旋转中心（回调记录的模式也清）。
+
+        为什么需要它：整份界面里原来只有"重置当前帧偏移"，**没有任何地方能一键清掉
+        旋转/镜像/透视** —— 试完透视想还原只能一个个角拖回去或按撤销。
+        尊重"数据复用"：勾选时清的是整组帧，和旋转/镜像/quad 的处理保持一致。
+        帧偏移不在这里清（它属于下面"当前帧微调"那一栏，有自己的重置按钮）。
+        """
+        if not self._action or not self._action.frames:
+            return
+        for act, indices in self._transform_targets():
+            for i in indices:
+                act.frame_rotations.pop(i, None)
+                act.frame_rotation_pivots.pop(i, None)
+                act.frame_quads.pop(i, None)
+                act.frame_transform_modes.pop(i, None)
+                act.frame_mirror_h.discard(i)
+                act.frame_mirror_v.discard(i)
+            act.invalidate_transforms()
+        self._transform_changed = True
+        self.changed.emit()
+        self._sync_transform_widgets()
+        canvas = getattr(self, "canvas", None)
+        if canvas is not None:
+            canvas.update()
+        self._refresh_canvas_label()
 
     def _toggle_mirror(self, axis: str) -> None:
         if not self._action or not self._action.frames:

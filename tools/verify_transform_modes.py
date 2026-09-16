@@ -24,7 +24,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QPointF
+from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtGui import QColor, QPainter, QPixmap
 from PyQt6.QtWidgets import QApplication
 
@@ -55,8 +55,13 @@ def make_action():
     return action
 
 
-def drag_quad(app, mode: str, kind: str, index: int, dx: float, dy: float):
-    """进入 mode，从手柄 index 拖 (dx,dy) 像素，返回结果归一化 quad。"""
+def drag_quad(app, mode: str, kind: str, index: int, dx: float, dy: float,
+              shift: bool = False, canvas_out: list | None = None):
+    """进入 mode，从手柄 index 拖 (dx,dy) 像素，返回结果归一化 quad。
+
+    shift=True 时带上 ShiftModifier（模拟按住 Shift 拖动）。
+    canvas_out 非空时把画布对象塞进去，便于继续拖（测滞回）。
+    """
     from spritesheet.ui.preview import PreviewCanvas
 
     canvas = PreviewCanvas()
@@ -70,11 +75,30 @@ def drag_quad(app, mode: str, kind: str, index: int, dx: float, dy: float):
     start = pts[index] if kind == "corner" else (pts[index] + pts[(index + 1) % 4]) / 2.0
     screen = canvas._logical_to_screen(start)
     canvas._begin_drag(kind, index, screen)
+    if canvas_out is not None:
+        canvas_out.append((canvas, screen))
 
     captured: list = []
     canvas.transform_quadded.connect(captured.append)
-    canvas._update_drag(screen + QPointF(dx, dy))
-    canvas._end_drag()
+    mods = Qt.KeyboardModifier.ShiftModifier if shift else Qt.KeyboardModifier.NoModifier
+    canvas._update_drag(screen + QPointF(dx, dy), mods)
+    if canvas_out is None:
+        canvas._end_drag()      # 要接着拖的场景（canvas_out）不能结束拖拽
+    return captured[-1] if captured else None
+
+
+def continue_drag(ctx, dx: float, dy: float, shift: bool = True):
+    """在同一次拖拽里继续移动（测锁轴滞回）。
+
+    ctx = (canvas, 拖拽起点屏幕坐标)，dx/dy 是**累计**位移（不是增量）。
+    注意不能依赖 canvas._last_drag_screen —— 那个只在真实 mouseMoveEvent 里赋值，
+    测试直接调 _update_drag 时它是 None。
+    """
+    canvas, screen = ctx
+    captured: list = []
+    canvas.transform_quadded.connect(captured.append)
+    mods = Qt.KeyboardModifier.ShiftModifier if shift else Qt.KeyboardModifier.NoModifier
+    canvas._update_drag(screen + QPointF(dx, dy), mods)
     return captured[-1] if captured else None
 
 
@@ -144,25 +168,44 @@ def main() -> int:
               f"上{top} 下{bottom} 左{left} 右{right}")
 
     print()
-    print("=== 3. 斜切：拖边 = 两端一起平移（平行四边形），另外两角不动 ===")
-    for edge in range(4):
-        horizontal = (min(edge, (edge + 1) % 4), max(edge, (edge + 1) % 4)) in HORIZONTAL_EDGES
-        d = 20.0 if horizontal else 20.0
-        quad = drag_quad(app, "skew", "edge", edge, d if horizontal else 0.0,
-                         0.0 if horizontal else d)
-        got = corners_of(quad)
-        base = [QPointF(0, 0), QPointF(1, 0), QPointF(1, 1), QPointF(0, 1)]
-        a, b = edge, (edge + 1) % 4
-        moved_a = got[a] - base[a]
-        moved_b = got[b] - base[b]
-        others_ok = all(
-            near(got[i].x(), base[i].x(), 1e-5) and near(got[i].y(), base[i].y(), 1e-5)
-            for i in (set(range(4)) - {a, b}))
-        print(f"  拖边 {a}-{b}（{'水平' if horizontal else '垂直'}）："
-              f"两端位移 {moved_a.x():.4f},{moved_a.y():.4f} / {moved_b.x():.4f},{moved_b.y():.4f}")
-        check(f"  边 {a}-{b} 两端位移相同（平行四边形）",
-              near(moved_a.x(), moved_b.x(), 1e-4) and near(moved_a.y(), moved_b.y(), 1e-4))
-        check(f"  边 {a}-{b} 另外两角不动", others_ok)
+    print("=== 3. 斜切已移除（按钮 / 边手柄 / 联动代码都不该再存在）===")
+    from spritesheet.ui.preview import ActionPreviewWidget, PreviewCanvas
+
+    widget = ActionPreviewWidget()
+    action = make_action()
+    widget.set_actions([action])
+    widget.set_action(action)
+    widget.resize(420, 800)
+    app.processEvents()
+    panel = widget.adjust_panel
+    check("  面板上已经没有「斜切」按钮", not hasattr(panel, "btn_mode_skew"))
+    grid = panel._transform_grid
+    labels = [b.text() for b in grid._buttons]
+    print(f"  变换按钮 {len(labels)} 个：{labels}")
+    check("  变换按钮正好 6 个（4 模式 + 2 镜像）", len(labels) == 6, f"实际 {len(labels)}")
+    check("  6 个按钮排成 3 行（每行 2 个，末行不空）",
+          grid.columns() == 2 and len(labels) == 6, f"列数 {grid.columns()}")
+
+    canvas = PreviewCanvas()
+    canvas.set_action(make_action())
+    canvas.resize(800, 600)
+    app.processEvents()
+    edge_hits = []
+    for mode in (None, "rotate", "scale", "perspective", "distort"):
+        canvas.set_transform_mode(mode)
+        app.processEvents()
+        pts = canvas._handles_canvas(canvas._current_mo())
+        for i in range(4):
+            mid = (pts[i] + pts[(i + 1) % 4]) / 2.0
+            kind, _idx = canvas._hit_test(canvas._logical_to_screen(mid))
+            if kind == "edge":
+                edge_hits.append((mode, i))
+    check("  任何模式下边中点都不再是可拖手柄", not edge_hits, f"命中 {edge_hits}")
+    canvas.set_transform_mode("perspective")
+    app.processEvents()
+    pts = canvas._handles_canvas(canvas._current_mo())
+    corner_hits = [canvas._hit_test(canvas._logical_to_screen(p))[0] for p in pts]
+    check("  透视下四个角仍然可拖", corner_hits == ["corner"] * 4, f"实际 {corner_hits}")
 
     print()
     print("=== 4. 扭曲：只有被拖的角动 ===")
@@ -175,6 +218,151 @@ def main() -> int:
             for i in range(4) if i != k)
         moved = abs(got[k].x() - base[k].x()) > 1e-4 and abs(got[k].y() - base[k].y()) > 1e-4
         check(f"  拖 {CORNER_NAMES[k]}：只有它动", moved and others_ok)
+
+    print()
+    print("=== 5. Shift 锁轴（透视 / 扭曲）===")
+    for mode in ("perspective", "distort"):
+        # 偏水平的拖动 -> 只保留 X
+        quad = drag_quad(app, mode, "corner", 0, 30.0, 6.0, shift=True)
+        got = corners_of(quad)
+        base = [QPointF(0, 0), QPointF(1, 0), QPointF(1, 1), QPointF(0, 1)]
+        print(f"  {mode} 偏水平拖(30,6)+Shift：角位移 "
+              f"dx={got[0].x() - base[0].x():.4f} dy={got[0].y() - base[0].y():.4f}")
+        check(f"  {mode}：偏水平时只横向动（dy = 0）",
+              abs(got[0].y() - base[0].y()) < 1e-6 and abs(got[0].x() - base[0].x()) > 1e-4)
+        # 偏竖直的拖动 -> 只保留 Y
+        quad = drag_quad(app, mode, "corner", 0, 6.0, 30.0, shift=True)
+        got = corners_of(quad)
+        print(f"  {mode} 偏竖直拖(6,30)+Shift：角位移 "
+              f"dx={got[0].x() - base[0].x():.4f} dy={got[0].y() - base[0].y():.4f}")
+        check(f"  {mode}：偏竖直时只纵向动（dx = 0）",
+              abs(got[0].x() - base[0].x()) < 1e-6 and abs(got[0].y() - base[0].y()) > 1e-4)
+
+    print()
+    print("=== 6. Shift 锁轴的滞回（连续判断，换轴要超出 4px）===")
+    holder: list = []
+    quad = drag_quad(app, "distort", "corner", 0, 30.0, 6.0, shift=True, canvas_out=holder)
+    ctx = holder[0]
+    canvas = ctx[0]
+    # 画布有缩放，屏幕位移和逻辑位移不是 1:1 —— 先量出比例，再按**逻辑像素**造位移，
+    # 否则滞回的 4px 阈值会被缩放悄悄放大/缩小（第一版就是这么算错的）。
+    probe_a = canvas._screen_to_logical(QPointF(0.0, 0.0))
+    probe_b = canvas._screen_to_logical(QPointF(100.0, 100.0))
+    per_screen = abs((probe_b.x() - probe_a.x()) / 100.0)
+
+    def screen_for(logical: float) -> float:
+        return logical / per_screen
+
+    check("  一开始锁在 X", canvas._axis_lock == "x", f"实际 {canvas._axis_lock}")
+    base = [QPointF(0, 0), QPointF(1, 0), QPointF(1, 1), QPointF(0, 1)]
+    # 逻辑累计位移 (10, 13)：13 > 10 但没超出 10+4 -> 仍锁 X
+    quad = continue_drag(ctx, screen_for(10.0), screen_for(13.0))
+    got = corners_of(quad)
+    check("  另一轴超出但没到 4px 滞回量时仍锁 X（不抖）",
+          canvas._axis_lock == "x" and abs(got[0].y() - base[0].y()) < 1e-6,
+          f"轴={canvas._axis_lock} dy={got[0].y() - base[0].y():.4f}")
+    # 逻辑累计位移 (10, 20)：20 > 10+4 -> 换到 Y
+    quad = continue_drag(ctx, screen_for(10.0), screen_for(20.0))
+    got = corners_of(quad)
+    check("  另一轴超出滞回量后换到 Y",
+          canvas._axis_lock == "y" and abs(got[0].x() - base[0].x()) < 1e-6,
+          f"轴={canvas._axis_lock} dx={got[0].x() - base[0].x():.4f}")
+
+    print()
+    print("=== 7. Shift 等比（缩放）===")
+    base = [QPointF(0, 0), QPointF(1, 0), QPointF(1, 1), QPointF(0, 1)]
+
+    def size_of(quad):
+        got = corners_of(quad)
+        return (got[1] - got[0]).manhattanLength(), (got[3] - got[0]).manhattanLength()
+
+    quad_free = drag_quad(app, "scale", "corner", 0, 60.0, 0.0, shift=False)
+    quad_shift = drag_quad(app, "scale", "corner", 0, 60.0, 0.0, shift=True)
+    free_ratio = size_of(quad_free)
+    shift_ratio = size_of(quad_shift)
+    print(f"  不按 Shift：{free_ratio[0]:.4f} x {free_ratio[1]:.4f}（比例 {free_ratio[0] / free_ratio[1]:.4f}）")
+    print(f"  按住 Shift：{shift_ratio[0]:.4f} x {shift_ratio[1]:.4f}（比例 {shift_ratio[0] / shift_ratio[1]:.4f}）")
+    check("  不按 Shift 是自由缩放（宽高比变了）",
+          abs(free_ratio[0] / free_ratio[1] - 1.0) > 0.10,
+          f"比例 {free_ratio[0] / free_ratio[1]:.4f}")
+    check("  按住 Shift 是等比（宽高比保持 1:1）",
+          abs(shift_ratio[0] / shift_ratio[1] - 1.0) < 0.01,
+          f"比例 {shift_ratio[0] / shift_ratio[1]:.4f}")
+
+    print()
+    print("=== 8. Shift 旋转 15° 吸附 ===")
+    from spritesheet.ui.preview import PreviewCanvas
+
+    for shift in (False, True):
+        canvas = PreviewCanvas()
+        action = make_action()
+        canvas.set_action(action)
+        canvas.resize(800, 600)
+        canvas.set_transform_mode("rotate")
+        app.processEvents()
+        pivot = canvas._rotation_pivot_canvas()
+        pivot_screen = canvas._logical_to_screen(pivot)
+        start = QPointF(pivot_screen.x() + 90.0, pivot_screen.y())
+        canvas._begin_drag("rotate", -1, start)
+        angles: list = []
+        canvas.transform_rotated.connect(angles.append)
+        mods = Qt.KeyboardModifier.ShiftModifier if shift else Qt.KeyboardModifier.NoModifier
+        # 绕中心转到约 38°（终点算出来给它），看吸附前后
+        import math as _math
+        rad = _math.radians(38.0)
+        end = QPointF(pivot_screen.x() + 90.0 * _math.cos(rad),
+                      pivot_screen.y() + 90.0 * _math.sin(rad))
+        canvas._update_drag(end, mods)
+        angle = angles[-1] if angles else None
+        print(f"  {'按 Shift' if shift else '不按 Shift'}：得到 {angle}°")
+        if shift:
+            check("  按 Shift 时角度是 15 的整数倍", angle is not None and angle % 15 == 0,
+                  f"实际 {angle}")
+            check("  吸附到 45°（38° 最近的 15 档是 45）", angle == 45, f"实际 {angle}")
+        else:
+            check("  不按 Shift 时不吸附（不是 15 的整数倍）",
+                  angle is not None and angle % 15 != 0, f"实际 {angle}")
+
+    print()
+    print("=== 9. 清空变换按钮 ===")
+    from spritesheet.ui.preview import ActionPreviewWidget
+
+    widget = ActionPreviewWidget()
+    action = make_action()
+    widget.set_actions([action])
+    widget.set_action(action)
+    widget.resize(420, 800)
+    app.processEvents()
+    panel = widget.adjust_panel
+    # 先造一堆变换
+    action.frame_rotations[0] = 30
+    action.frame_mirror_h.add(0)
+    action.frame_mirror_v.add(0)
+    action.frame_quads[0] = (0.05, 0.05, 0.95, 0.02, 0.98, 0.95, 0.02, 0.98)
+    action.frame_rotation_pivots[0] = (0.25, 0.75)
+    action.frame_transform_modes[0] = {"perspective"}
+    action.frame_offsets[0] = (7, -3)
+    action.invalidate_transforms()
+    panel._sync_transform_widgets()
+    print(f"  清空前：{panel.lbl_transform_summary.text()}")
+    check("  清空前摘要里有内容", "无变换" not in panel.lbl_transform_summary.text())
+    panel.btn_clear_transform.click()
+    app.processEvents()
+    summary = panel.lbl_transform_summary.text()
+    print(f"  清空后：{summary}")
+    check("  旋转被清掉", 0 not in action.frame_rotations, f"{action.frame_rotations}")
+    check("  水平镜像被清掉", 0 not in action.frame_mirror_h)
+    check("  垂直镜像被清掉", 0 not in action.frame_mirror_v)
+    check("  透视四边形被清掉", 0 not in action.frame_quads)
+    check("  旋转中心被清掉", 0 not in action.frame_rotation_pivots)
+    check("  回调记录的模式被清掉", 0 not in action.frame_transform_modes)
+    check("  摘要回到「无变换」", "无变换" in summary, summary)
+    check("  帧偏移**不动**（它有自己的重置）", action.frame_offsets.get(0) == (7, -3),
+          f"{action.frame_offsets}")
+    check("  模式按钮都回到未选中",
+          not any(b.isChecked() for b in (panel.btn_mode_rotate, panel.btn_mode_scale,
+                                          panel.btn_mode_perspective, panel.btn_mode_distort,
+                                          panel.btn_mirror_h, panel.btn_mirror_v)))
 
     print()
     if FAILURES:
