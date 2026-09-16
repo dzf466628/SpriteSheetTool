@@ -400,7 +400,12 @@ class MainWindow(QMainWindow):
         return self._save_project(path)
 
     def _new_project(self) -> None:
-        """清空为空白工程。"""
+        """清空为空白工程。
+
+        注意：按需求已从「文件」菜单移除（界面不再暴露入口），实现保留以便随时恢复
+        （本机没有 git，删掉就找不回来了）。需要重新挂到菜单时，加一个
+        ``QAction("新建工程")`` 连接到本方法即可。
+        """
         self._end_all_renames()
         self.actions.clear()
         self.action_list.clear()
@@ -676,16 +681,19 @@ class MainWindow(QMainWindow):
         menubar = self.menuBar()
         menubar.setStyleSheet("QMenuBar { background: #1a1a1a; color: #ddd; font-size: 12px; } QMenuBar::item:selected { background: #E91E63; }")
 
-        edit_menu = menubar.addMenu("编辑")
-        act_undo = QAction("撤销", self)
-        act_undo.setShortcut(QKeySequence.StandardKey.Undo)
-        act_undo.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
-        act_undo.triggered.connect(self._undo_stack.undo)
-        edit_menu.addAction(act_undo)
+        # 布局：文件在左、编辑在右。
+        # 文件菜单分组：① 导入素材（添加图片 / 导入 JSON 工程）
+        #              ② 工程读写（打开 / 保存 / 另存为）
+        #              ③ 杂项（检查更新 / 退出）
         file_menu = menubar.addMenu("文件")
-        act_new = QAction("新建工程", self)
-        act_new.triggered.connect(self._new_project)
-        file_menu.addAction(act_new)
+        act_open = QAction("添加图片", self)
+        act_open.triggered.connect(self._open_image)
+        file_menu.addAction(act_open)
+        act_import = QAction("导入 JSON 工程…", self)
+        act_import.setShortcut("Ctrl+I")
+        act_import.triggered.connect(self._import_json_dialog)
+        file_menu.addAction(act_import)
+        file_menu.addSeparator()
         act_open_project = QAction("打开工程…", self)
         act_open_project.setShortcut(QKeySequence.StandardKey.Open)
         act_open_project.triggered.connect(self._open_project_dialog)
@@ -698,14 +706,6 @@ class MainWindow(QMainWindow):
         act_save_as.triggered.connect(self._save_project_as)
         file_menu.addAction(act_save_as)
         file_menu.addSeparator()
-        act_open = QAction("添加图片", self)
-        act_open.triggered.connect(self._open_image)
-        file_menu.addAction(act_open)
-        act_import = QAction("导入 JSON 工程…", self)
-        act_import.setShortcut("Ctrl+I")
-        act_import.triggered.connect(self._import_json_dialog)
-        file_menu.addAction(act_import)
-        file_menu.addSeparator()
         act_check_update = QAction("检查更新", self)
         act_check_update.triggered.connect(self._check_update_manual)
         file_menu.addAction(act_check_update)
@@ -713,6 +713,13 @@ class MainWindow(QMainWindow):
         act_quit = QAction("退出", self)
         act_quit.triggered.connect(self.close)
         file_menu.addAction(act_quit)
+
+        edit_menu = menubar.addMenu("编辑")
+        act_undo = QAction("撤销", self)
+        act_undo.setShortcut(QKeySequence.StandardKey.Undo)
+        act_undo.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        act_undo.triggered.connect(self._undo_stack.undo)
+        edit_menu.addAction(act_undo)
 
         # 启动后延迟自动检查一次更新（不阻塞界面；失败时静默）
         self._update_thread: UpdateCheckThread | None = None
