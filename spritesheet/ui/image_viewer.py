@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import struct
+import threading
 from pathlib import Path
 
 from PyQt6.QtCore import (
@@ -35,7 +36,8 @@ MIN_ZOOM = 0.05
 MAX_ZOOM = 20
 
 
-def _detect_frames_image(img: QImage, alpha_threshold: int = 10) -> list[tuple[int, int, int, int]]:
+def _detect_frames_image(img: QImage, alpha_threshold: int = 10,
+                         cancel=None) -> list[tuple[int, int, int, int]]:
     """在工作线程中检测 QImage 的连通区域（行程 + 并查集）。
 
     结果与最初的逐像素 4 连通 flood fill **完全等价**：同一批连通域、同样的包围盒、
@@ -78,6 +80,8 @@ def _detect_frames_image(img: QImage, alpha_threshold: int = 10) -> list[tuple[i
     # ---- 1) 逐行切出行程 (y, x0, x1)，均为闭区间 ----
     runs: list[tuple[int, int, int]] = []
     for y in range(h):
+        if cancel is not None and cancel():
+            return []                    # 所属窗口已关闭：尽快退出，避免继续访问
         row = mask[y * w:(y + 1) * w]
         if b"\x01" not in row:           # 整行无有效像素（C 层一次判定）
             continue
@@ -142,16 +146,27 @@ def _detect_frames_image(img: QImage, alpha_threshold: int = 10) -> list[tuple[i
 
 
 class _FrameDetectThread(QThread):
-    """后台检测线程；只传递 QImage，避免在线程间操作 QPixmap。"""
+    """后台检测线程；只传递 QImage，避免在线程间操作 QPixmap。
+
+    支持协作式取消：窗口关闭时调用 ``cancel()``，线程会在下一行边界退出，
+    调用方 ``wait()`` 等它结束后再销毁窗口，避免「线程还在跑、宿主已析构」的原生崩溃。
+    """
 
     detected = pyqtSignal(list)
 
     def __init__(self, image: QImage, parent=None) -> None:
         super().__init__(parent)
         self._image = image
+        self._cancelled = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
 
     def run(self) -> None:
-        self.detected.emit(_detect_frames_image(self._image))
+        frames = _detect_frames_image(self._image, cancel=self._cancelled.is_set)
+        if self._cancelled.is_set():
+            return                       # 已取消：不再向可能正在析构的对象发信号
+        self.detected.emit(frames)
 
 
 # 画布区（绘制图片 + 鼠标交互）
@@ -1376,3 +1391,45 @@ class ImageViewer(QWidget):
         """刷新画布和标尺。"""
         self.canvas.update()
         self._update_rulers()
+
+    def shutdown(self) -> None:
+        """窗口关闭/程序退出前收尾：停检测线程 + 卸下全局事件过滤器。
+
+        这两件事不做会触发**原生崩溃**（access violation），且表现为随机闪退：
+
+        1. 元素检测在线程里跑，线程的 parent 是本控件；若宿主先被析构，线程还在
+           访问 ``self._image`` 并 emit 信号给已释放对象。这里先置取消标志（线程会在
+           下一行边界退出），再 ``wait()`` 等它结束。
+        2. ``_build_ui`` 里把自身装成了 app 级事件过滤器（还有原生 Alt 过滤器）；
+           控件析构后过滤器没卸，下个事件投递就会访问已释放内存。
+
+        幂等：重复调用无副作用。
+        """
+        self._detect_generation += 1            # 已有结果一律作废
+        threads = list(self._detect_threads)
+        for thread in threads:
+            try:
+                thread.cancel()
+            except (RuntimeError, AttributeError):   # 已被销毁
+                pass
+        for thread in threads:
+            try:
+                thread.wait(5000)               # 检测已支持逐行取消，正常很快返回
+            except RuntimeError:
+                pass
+        self._detect_threads.clear()
+        self._detect_thread = None
+
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.removeEventFilter(self)
+            except Exception:  # noqa: BLE001
+                pass
+            native = getattr(self, "_alt_native_filter", None)
+            if native is not None:
+                try:
+                    app.removeNativeEventFilter(native)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._alt_native_filter = None

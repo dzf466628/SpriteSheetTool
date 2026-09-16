@@ -19,8 +19,8 @@ from PyQt6.QtGui import (
     QAction, QIcon, QKeySequence, QPainter, QPixmap, QUndoCommand, QUndoStack,
 )
 from PyQt6.QtWidgets import (
-    QDialog, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
-    QMessageBox, QProgressBar, QPushButton, QSplitter, QVBoxLayout, QWidget,
+    QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QMainWindow, QMessageBox, QProgressBar, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
 from spritesheet import __app_name__, __version__
@@ -664,6 +664,10 @@ class MainWindow(QMainWindow):
         self.preview.toolbar.bg_changed.connect(lambda _mode: self._mark_project_dirty())
         self.image_viewer._toolbar.bg_changed.connect(lambda _mode: self._mark_project_dirty())
         self.image_viewer._toolbar.compose_toggled.connect(lambda _checked: self._mark_project_dirty())
+        # 程序退出（含未走 close 的路径）也要收尾原图区，否则线程/过滤器会悬空
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self.image_viewer.shutdown)
         self.splitter.addWidget(self.preview)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 1)
@@ -820,6 +824,15 @@ class MainWindow(QMainWindow):
             return
         # 稍等片刻让安装器进程真正起来（它会自动关闭并重启本程序）
         QTimer.singleShot(800, self.close)
+
+    def closeEvent(self, event) -> None:
+        """关闭窗口前先收尾原图区（停检测线程 + 卸下全局事件过滤器）。
+
+        不做这两件事会导致随机闪退（原生 access violation）：检测线程在跑时宿主被
+        析构、或 app 级事件过滤器指向已释放对象。参见 ``ImageViewer.shutdown``。
+        """
+        self.image_viewer.shutdown()
+        super().closeEvent(event)
 
     def _open_image(self):
         paths, _ = QFileDialog.getOpenFileNames(
