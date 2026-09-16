@@ -980,9 +980,80 @@ class ExportDialog(QDialog):
             generated.append(path)
         return generated
 
-    def _export_to_directory(self, directory: str, progress=None) -> list[Path]:
+    def _planned_names(self, root: Path, suffix: str = "") -> list[Path]:
+        """列出本次导出会写入的目标路径（用于同名检测）。
+
+        必须与 `_export_to_directory` 里的命名保持一致 —— 两处挨着改，别只改一边。
+        分别导出时每个动作一个文件夹（序号加在文件夹名上），否则是根目录下一组同名文件。
+        """
+        selected = self.selected_actions()
+        json_formats = self._json_formats() if self.cb_json.isChecked() else []
+        out: list[Path] = []
+        if self.cb_separate.isChecked():
+            used: set[str] = set()
+            for action in selected:
+                name = _safe_export_name(action.name, used) + suffix
+                out.append(root / name)
+        else:
+            if selected:
+                out.append(root / f"spritesheet{suffix}.png")
+            if self.cb_gif.isChecked():
+                used_gif: set[str] = set()
+                for action in selected:
+                    out.append(root / f"{_safe_export_name(action.name, used_gif)}{suffix}.gif")
+            for fmt in json_formats:
+                out.append(root / f"spritesheet{suffix}{FORMAT_SUFFIX.get(fmt, '')}.json")
+        if self.cb_project.isChecked():
+            out.append(root / f"project{suffix}.sstool")
+        return out
+
+    def _ask_name_policy(self, existing: list[Path]) -> str:
+        """弹窗询问同名处理，返回 "overwrite" / "rename" / "cancel"。
+
+        单独抽成一个方法是为了可测：测试里替换它（或替换 resolve_name_conflicts 的
+        判断）就不必去 mock Qt 的模态对话框。
+        """
+        shown = "\n".join(f"· {p.name}" for p in existing[:8])
+        more = f"\n… 以及另外 {len(existing) - 8} 项" if len(existing) > 8 else ""
+        box = QMessageBox(self)
+        box.setWindowTitle("目标已存在")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(f"导出目录里已有 {len(existing)} 个同名目标：\n\n{shown}{more}")
+        box.setInformativeText("要覆盖它们，还是自动加序号（如 _2）另存？")
+        btn_over = box.addButton("覆盖", QMessageBox.ButtonRole.DestructiveRole)
+        btn_ren = box.addButton("加序号另存", QMessageBox.ButtonRole.AcceptRole)
+        btn_cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(btn_ren)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_cancel or clicked is None:
+            return "cancel"
+        return "overwrite" if clicked is btn_over else "rename"
+
+    def resolve_name_conflicts(self, directory: str) -> str | None:
+        """同名文件处理：返回要使用的序号后缀（""=直接覆盖），None=用户取消。
+
+        分别导出时判断的是「动作文件夹是否已存在」，其余情况判断具体文件。
+        """
+        root = Path(directory)
+        existing = [p for p in self._planned_names(root) if p.exists()]
+        if not existing:
+            return ""
+        policy = self._ask_name_policy(existing)
+        if policy == "cancel":
+            return None
+        if policy == "overwrite":
+            return ""
+        for n in range(2, 100):
+            cand = f"_{n}"
+            if not any(p.exists() for p in self._planned_names(root, cand)):
+                return cand
+        return f"_{len(existing) + 1}"
+
+    def _export_to_directory(self, directory: str, progress=None,
+                             suffix: str = "") -> list[Path]:
         """执行导出；progress 为可选回调 progress(value:int, total:int, label:str) -> bool，
-        返回 False 表示用户取消。"""
+        返回 False 表示用户取消。suffix 为同名处理选定的序号后缀（""=直接覆盖）。"""
         selected = self.selected_actions()
         if not selected and not (self.cb_project.isChecked() and self._project_provider):
             raise ValueError("请至少选择一个导出动作")
@@ -1003,7 +1074,7 @@ class ExportDialog(QDialog):
             if self._project_provider is None:
                 raise ValueError("无法导出 SSTOOL：当前窗口未提供工程数据")
             manifest, sections = self._project_provider()
-            project_path = root / "project.sstool"
+            project_path = root / f"project{suffix}.sstool"
             write_project(project_path, manifest, sections)
             generated.append(project_path)
             done += 1
@@ -1016,7 +1087,7 @@ class ExportDialog(QDialog):
             done = 0
             for action in selected:
                 name = _safe_export_name(action.name, used_names)
-                folder = root / name
+                folder = root / f"{name}{suffix}"
                 folder.mkdir(parents=True, exist_ok=True)
                 frames = self._final_frames(action)
                 # 图集按元素图块打包（普通帧去重复用；合成帧直接打包整块，不丢部件）
@@ -1065,16 +1136,17 @@ class ExportDialog(QDialog):
         total = 2 + gif_count + len(json_formats) + (1 if self.cb_project.isChecked() else 0)
         done = 0
         report(done, total, "正在打包图集 …")
-        atlas_path = root / "spritesheet.png"
+        atlas_name_out = f"spritesheet{suffix}.png"
+        atlas_path = root / atlas_name_out
         if not atlas.save(str(atlas_path), "PNG"):
             raise IOError(f"无法写入 {atlas_path}")
         generated.append(atlas_path)
         done += 1
-        report(done, total, "已写入 spritesheet.png")
+        report(done, total, f"已写入 {atlas_name_out}")
         if self.cb_gif.isChecked():
             gif_used: set[str] = set()
             for action in selected:
-                gif_name = f"{_safe_export_name(action.name, gif_used)}.gif"
+                gif_name = f"{_safe_export_name(action.name, gif_used)}{suffix}.gif"
                 gif_names[action] = gif_name
                 gif_path = root / gif_name
                 self._write_gif(gif_path, action, self._final_frames(action))
@@ -1082,7 +1154,7 @@ class ExportDialog(QDialog):
                 done += 1
                 report(done, total, f"[{done}/{total}] GIF · {gif_name}")
         if json_formats:
-            for json_path in self._write_animation_jsons(root / "spritesheet", "spritesheet.png", atlas, selected, records, gif_names):
+            for json_path in self._write_animation_jsons(root / f"spritesheet{suffix}", atlas_name_out, atlas, selected, records, gif_names):
                 generated.append(json_path)
                 done += 1
                 report(done, total, f"[{done}/{total}] JSON · {json_path.name}")
@@ -1098,6 +1170,10 @@ class ExportDialog(QDialog):
                 return
         directory = QFileDialog.getExistingDirectory(self, "选择导出文件夹")
         if not directory:
+            return
+        # 同名处理：先问覆盖还是加序号另存（取消则整体中止）
+        suffix = self.resolve_name_conflicts(directory)
+        if suffix is None:
             return
         dlg = QProgressDialog("正在导出 …", "取消", 0, 100, self)
         dlg.setWindowTitle("导出进度")
@@ -1115,7 +1191,8 @@ class ExportDialog(QDialog):
             return not dlg.wasCanceled()
 
         try:
-            generated = self._export_to_directory(directory, progress=on_progress)
+            generated = self._export_to_directory(directory, progress=on_progress,
+                                                  suffix=suffix)
         except (ValueError, IOError, OSError) as exc:
             dlg.close()
             if str(exc) != "导出已取消":
