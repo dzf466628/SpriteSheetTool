@@ -3,7 +3,9 @@
 """通用小部件与图标/像素工具（从 main_window.py 拆出，纯搬移，逻辑未改动）。
 
 包含：
-- ``make_tool_icon`` / ``make_logo_pixmap``：SVG 图标渲染与软件 Logo；
+- ``make_tool_icon``：SVG 图标渲染；
+- ``AppNameLabel``：软件名标签（首字母放大 + 与其余文字垂直居中）；
+- ``ProjectTabBar``：窗口底部的工程标签栏（切换 / 重命名 / 新建 / 关闭）；
 - ``_Ruler`` / ``RULER_SIZE``：PS 风格标尺；
 - ``ColorPickerDialog`` / ``ActionCardWidget`` / ``ActionItemDelegate``：动作卡牌一族；
 - ``CompactComboBox`` / ``CompactSpinBox`` / ``EditableNumberLabel`` / ``SwitchWidget``：
@@ -18,8 +20,10 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from PyQt6.QtCore import QPointF, QRect, QSize, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF
+from PyQt6.QtCore import QEvent, QPointF, QRect, QRectF, QSize, QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import (
+    QBrush, QColor, QFont, QFontMetricsF, QIcon, QPainter, QPen, QPixmap, QPolygonF,
+)
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -39,28 +43,7 @@ _APP_ROOT = Path(__file__).resolve().parent.parent.parent
 _ICONS_DIR = _APP_ROOT / "icons"
 
 
-def make_logo_pixmap(size: int) -> QPixmap:
-    """生成软件 Logo 图标（玫红圆角方块 + 白色胶片齿孔）。"""
-    pm = QPixmap(size, size)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setBrush(QColor("#E91E63"))
-    p.setPen(Qt.PenStyle.NoPen)
-    p.drawRoundedRect(0, 0, size, size, 5, 5)
-    p.setBrush(QColor(255, 255, 255, 235))
-    s = size // 5
-    gap = s // 2 + 1
-    p.drawRect(gap, gap, s, s)
-    p.drawRect(gap * 2 + s, gap, s, s)
-    p.drawRect(gap, gap * 2 + s, s, s)
-    p.drawRect(gap * 2 + s, gap * 2 + s, s, s)
-    p.end()
-    return pm
-
-
 def make_tool_icon(kind: str, size: int = 18) -> QIcon:
-    """从 icons/ 目录加载 SVG 图标，支持 bg_black/bg_white 染色。"""
     path = _ICONS_DIR / f"{kind}.svg"
     if not path.exists():
         # fallback: 简单绘制
@@ -85,6 +68,379 @@ def make_tool_icon(kind: str, size: int = 18) -> QIcon:
         p3.fillRect(pm.rect(), color)
         p3.end()
     return QIcon(pm)
+
+
+class AppNameLabel(QWidget):
+    """软件名标签：首字母放大，并与其余文字**垂直居中**。
+
+    为什么不用 QLabel 富文本（`<span style="font-size:30px">S</span>`）：
+    Qt 的富文本按**基线**对齐，放大首字母后它会整块往上冒 —— 上缘高出很多、
+    下缘却和普通文字齐平，看起来是"吊在上面"而不是"上下居中"。
+    这里按墨迹盒（capHeight）自己算基线，像素级可控，也便于回归断言。
+
+    单词拆成三段着色：首字母 + 剩余部分 + 尾段（尾段用品牌玫红）。
+    """
+
+    BASE_PX = 22          # 其余文字字号
+    HEAD_PX = 30          # 首字母字号（更大）
+    COLOR_BODY = "#ffffff"
+    COLOR_TAIL = "#E91E63"
+
+    def __init__(self, head: str = "S", rest: str = "priteSheet", tail: str = "Tool",
+                 parent=None) -> None:
+        super().__init__(parent)
+        self._head, self._rest, self._tail = head, rest, tail
+        family = "Microsoft YaHei UI"
+        self._f_base = QFont(family)
+        self._f_base.setPixelSize(self.BASE_PX)
+        self._f_base.setBold(True)
+        self._f_head = QFont(family)
+        self._f_head.setPixelSize(self.HEAD_PX)
+        self._f_head.setBold(True)
+        self._fm_base = QFontMetricsF(self._f_base)
+        self._fm_head = QFontMetricsF(self._f_head)
+        self._width = (self._fm_head.horizontalAdvance(head)
+                       + self._fm_base.horizontalAdvance(rest)
+                       + self._fm_base.horizontalAdvance(tail))
+        self.setFixedSize(int(math.ceil(self._width)) + 2, 54)
+        self.setStyleSheet("background: transparent;")
+
+    def sizeHint(self) -> QSize:
+        return QSize(int(math.ceil(self._width)) + 2, 54)
+
+    def head_rect(self) -> QRect:
+        """首字母的墨迹矩形（回归用：断言它与其余文字上下居中）。"""
+        return self._head_ink_rect().toAlignedRect()
+
+    def body_rect(self) -> QRect:
+        """其余文字的墨迹矩形（回归用）。"""
+        return self._body_ink_rect().toAlignedRect()
+
+    # ---- 内部几何：全部按**墨迹盒**（tightBoundingRect）算，不用 ascent/descent ----
+    def _ink_rel(self, fm: QFontMetricsF, text: str) -> tuple[float, float]:
+        """相对基线的墨迹上下边界（相对基线，向上为负）。"""
+        rect = fm.tightBoundingRect(text)
+        return rect.top(), rect.bottom()
+
+    def _baselines(self) -> tuple[float, float]:
+        """返回 (正文基线 y, 首字母基线 y)。
+
+        两步：
+          ① 先让**两块墨迹的垂直中心对齐**（这样首字母是"上下居中"而不是被基线吊上去）；
+          ② 再把合并后的整块墨迹放到控件竖直中线上。
+        用墨迹盒而不是 capHeight：渲染出来的实际墨迹比 capHeight 高一点点
+        （抗锯齿外扩），只用 capHeight 算会整体偏高几个像素。
+        """
+        body_top, body_bot = self._ink_rel(self._fm_base, self._rest + self._tail)
+        head_top, head_bot = self._ink_rel(self._fm_head, self._head)
+        # 首字母基线相对正文基线的偏移：让两块墨迹中心重合
+        delta = ((body_top + body_bot) / 2.0) - ((head_top + head_bot) / 2.0)
+        top = min(body_top, delta + head_top)
+        bottom = max(body_bot, delta + head_bot)
+        base_y = self.height() / 2.0 - (top + bottom) / 2.0
+        return base_y, base_y + delta
+
+    def head_rect(self) -> QRect:
+        """首字母的墨迹矩形（回归用：断言它与其余文字上下居中）。"""
+        return self._head_ink_rect().toAlignedRect()
+
+    def body_rect(self) -> QRect:
+        """其余文字的墨迹矩形（回归用）。"""
+        return self._body_ink_rect().toAlignedRect()
+
+    def _head_ink_rect(self) -> QRectF:
+        _base_y, head_y = self._baselines()
+        top, bottom = self._ink_rel(self._fm_head, self._head)
+        return QRectF(0.0, head_y + top,
+                      self._fm_head.horizontalAdvance(self._head), bottom - top)
+
+    def _body_ink_rect(self) -> QRectF:
+        base_y, _head_y = self._baselines()
+        top, bottom = self._ink_rel(self._fm_base, self._rest + self._tail)
+        return QRectF(self._fm_head.horizontalAdvance(self._head), base_y + top,
+                      self._fm_base.horizontalAdvance(self._rest + self._tail), bottom - top)
+
+    def paintEvent(self, event) -> None:  # noqa: ARG002 - Qt 接口
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        base_y, head_y = self._baselines()
+        x = 0.0
+
+        painter.setFont(self._f_head)
+        painter.setPen(QPen(QColor(self.COLOR_BODY)))
+        painter.drawText(QPointF(x, head_y), self._head)
+        x += self._fm_head.horizontalAdvance(self._head)
+
+        painter.setFont(self._f_base)
+        painter.drawText(QPointF(x, base_y), self._rest)
+        x += self._fm_base.horizontalAdvance(self._rest)
+
+        painter.setPen(QPen(QColor(self.COLOR_TAIL)))
+        painter.drawText(QPointF(x, base_y), self._tail)
+        painter.end()
+
+
+class ProjectTabBar(QWidget):
+    """窗口底部的工程标签栏（矮条，类似 PS 的文档标签）。
+
+    交互：
+      * 单击标签      -> ``tab_selected``
+      * 双击标签      -> 就地重命名（内嵌 QLineEdit，回车提交 / Esc 取消）
+      * 双击空白处    -> ``new_tab_requested``（新建标签页）
+      * 点标签上的 ×  -> ``tab_close_requested``
+      * 点末尾的 +    -> ``new_tab_requested``
+
+    自己画而不是用 QTabBar：QTabBar 的最小高度跟着样式走（系统样式下三十多像素），
+    这里要的是"矮"一条；而且需要标签上的脏标记与就地改名。
+    """
+
+    HEIGHT = 26
+    PAD_X = 10            # 标签内左右留白
+    CLOSE_W = 14          # 关闭按钮宽度
+    GAP = 2               # 标签间距
+    PLUS_W = 26
+
+    tab_selected = pyqtSignal(int)
+    tab_close_requested = pyqtSignal(int)
+    tab_renamed = pyqtSignal(int, str)
+    new_tab_requested = pyqtSignal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(self.HEIGHT)
+        self.setMouseTracking(True)
+        self.setStyleSheet("background: #1a1a1a; border-top: 1px solid #333;")
+        self.setToolTip("单击切换工程 · 双击标签重命名 · 双击空白处新建工程")
+        self._tabs: list[dict] = []       # {name, dirty, tooltip}
+        self._current = -1
+        self._hover = -1
+        self._hover_close = -1
+        self._editor: QLineEdit | None = None
+        self._editing_index = -1
+
+    # ---- 数据接口 ----
+    def count(self) -> int:
+        return len(self._tabs)
+
+    def current_index(self) -> int:
+        return self._current
+
+    def name_at(self, index: int) -> str:
+        return self._tabs[index]["name"]
+
+    def is_dirty(self, index: int) -> bool:
+        return bool(self._tabs[index]["dirty"])
+
+    def add_tab(self, name: str, dirty: bool = False, tooltip: str = "",
+                select: bool = True) -> int:
+        self._tabs.append({"name": name or "未命名工程", "dirty": dirty, "tooltip": tooltip})
+        index = len(self._tabs) - 1
+        if select or self._current < 0:
+            self._current = index
+        self.update()
+        return index
+
+    def remove_tab(self, index: int) -> None:
+        if not (0 <= index < len(self._tabs)):
+            return
+        self._tabs.pop(index)
+        if self._current >= len(self._tabs):
+            self._current = len(self._tabs) - 1
+        elif index < self._current:
+            self._current -= 1
+        self.update()
+
+    def set_current(self, index: int) -> None:
+        if 0 <= index < len(self._tabs) and index != self._current:
+            self._current = index
+            self.update()
+
+    def set_name(self, index: int, name: str) -> None:
+        if 0 <= index < len(self._tabs):
+            self._tabs[index]["name"] = name or "未命名工程"
+            self.update()
+
+    def set_dirty(self, index: int, dirty: bool) -> None:
+        if 0 <= index < len(self._tabs):
+            self._tabs[index]["dirty"] = bool(dirty)
+            self.update()
+
+    def set_tooltip(self, index: int, tooltip: str) -> None:
+        if 0 <= index < len(self._tabs):
+            self._tabs[index]["tooltip"] = tooltip
+
+    # ---- 几何 ----
+    def _fm(self):
+        font = QFont("Microsoft YaHei UI")
+        font.setPixelSize(12)
+        return QFontMetricsF(font)
+
+    def tab_rects(self) -> list[QRect]:
+        fm = self._fm()
+        rects = []
+        x = 4.0
+        for tab in self._tabs:
+            width = fm.horizontalAdvance(tab["name"]) + self.PAD_X * 2 + self.CLOSE_W
+            rects.append(QRect(int(x), 0, int(max(48.0, width)), self.height()))
+            x += max(48.0, width) + self.GAP
+        return rects
+
+    def plus_rect(self) -> QRect:
+        rects = self.tab_rects()
+        x = (rects[-1].right() + self.GAP + 2) if rects else 4
+        return QRect(int(x), 0, self.PLUS_W, self.height())
+
+    def _close_rect(self, index: int) -> QRect:
+        rect = self.tab_rects()[index]
+        return QRect(rect.right() - self.CLOSE_W - 2, rect.top() + 5,
+                     self.CLOSE_W - 2, rect.height() - 10)
+
+    def _index_at(self, pos) -> int:
+        for index, rect in enumerate(self.tab_rects()):
+            if rect.contains(pos):
+                return index
+        return -1
+
+    # ---- 绘制 ----
+    def paintEvent(self, event) -> None:  # noqa: ARG002
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        fm = self._fm()
+        painter.setFont(QFont("Microsoft YaHei UI", -1, QFont.Weight.Normal, False))
+        font = QFont("Microsoft YaHei UI")
+        font.setPixelSize(12)
+        painter.setFont(font)
+
+        for index, rect in enumerate(self.tab_rects()):
+            active = index == self._current
+            if active:
+                fill = QColor("#2b2b2b")
+            elif index == self._hover:
+                fill = QColor("#232323")
+            else:
+                fill = QColor("#1a1a1a")
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fill)
+            painter.drawRoundedRect(rect.adjusted(0, 1, 0, -1), 4, 4)
+            if active:
+                # 活动标签：顶部一条品牌玫红，压在内容区那条线上
+                painter.setBrush(QColor("#E91E63"))
+                painter.drawRect(rect.left() + 4, rect.top(), rect.width() - 8, 2)
+
+            text = self._tabs[index]["name"]
+            if self._tabs[index]["dirty"]:
+                text += " ●"
+            painter.setPen(QPen(QColor("#e8e8e8" if active else "#9a9a9a")))
+            text_rect = rect.adjusted(self.PAD_X, 0, -self.CLOSE_W, 0)
+            painter.drawText(text_rect, int(Qt.AlignmentFlag.AlignVCenter |
+                                            Qt.AlignmentFlag.AlignLeft), text)
+
+            # 关闭按钮：悬停才点亮，避免整条太花
+            close = self._close_rect(index)
+            painter.setPen(QPen(QColor("#e8e8e8" if self._hover_close == index else "#6a6a6a")))
+            painter.drawLine(close.left() + 3, close.center().y() - 3,
+                             close.right() - 3, close.center().y() + 3)
+            painter.drawLine(close.right() - 3, close.center().y() - 3,
+                             close.left() + 3, close.center().y() + 3)
+
+        plus = self.plus_rect()
+        painter.setPen(QPen(QColor("#9a9a9a")))
+        cx, cy = plus.center().x(), plus.center().y()
+        painter.drawLine(cx - 5, cy, cx + 5, cy)
+        painter.drawLine(cx, cy - 5, cx, cy + 5)
+
+        painter.end()
+
+    # ---- 鼠标 ----
+    def mousePressEvent(self, event) -> None:
+        pos = event.position().toPoint()
+        index = self._index_at(pos)
+        if event.button() == Qt.MouseButton.LeftButton:
+            if index >= 0:
+                if self._close_rect(index).contains(pos):
+                    self.tab_close_requested.emit(index)
+                    return
+                if index != self._current:
+                    self._current = index
+                    self.update()
+                    self.tab_selected.emit(index)
+            elif self.plus_rect().contains(pos):
+                self.new_tab_requested.emit()
+        elif event.button() == Qt.MouseButton.MiddleButton and index >= 0:
+            self.tab_close_requested.emit(index)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        pos = event.position().toPoint()
+        index = self._index_at(pos)
+        if index >= 0:
+            self.start_rename(index)
+        else:
+            # 双击空白处 = 新建工程（PS 里双击标签栏空白也一样）
+            self.new_tab_requested.emit()
+
+    def mouseMoveEvent(self, event) -> None:
+        pos = event.position().toPoint()
+        index = self._index_at(pos)
+        close = index if (index >= 0 and self._close_rect(index).contains(pos)) else -1
+        if (index, close) != (self._hover, self._hover_close):
+            self._hover, self._hover_close = index, close
+            self.update()
+        tip = self._tabs[index]["tooltip"] if index >= 0 else ""
+        self.setToolTip(tip or "单击切换工程 · 双击标签重命名 · 双击空白处新建工程")
+
+    def leaveEvent(self, event) -> None:  # noqa: ARG002
+        self._hover = self._hover_close = -1
+        self.update()
+
+    # ---- 就地重命名 ----
+    def start_rename(self, index: int) -> None:
+        if not (0 <= index < len(self._tabs)):
+            return
+        if self._editor is None:
+            self._editor = QLineEdit(self)
+            self._editor.setStyleSheet(
+                "QLineEdit { background: #141414; color: #ffffff; border: 1px solid #E91E63;"
+                " border-radius: 3px; padding: 0 4px; font-size: 12px; }"
+            )
+            self._editor.returnPressed.connect(self._commit_rename)
+            self._editor.editingFinished.connect(self._commit_rename)
+            self._editor.installEventFilter(self)
+        rect = self.tab_rects()[index]
+        self._editing_index = index
+        self._editor.setText(self._tabs[index]["name"])
+        self._editor.setGeometry(rect.left() + 2, rect.top() + 3,
+                                 max(60, rect.width() - 6), rect.height() - 6)
+        self._editor.show()
+        self._editor.setFocus()
+        self._editor.selectAll()
+
+    def _commit_rename(self) -> None:
+        if self._editor is None or self._editing_index < 0:
+            return
+        index = self._editing_index
+        text = self._editor.text().strip()
+        self._editor.hide()
+        self._editing_index = -1
+        if text and 0 <= index < len(self._tabs) and text != self._tabs[index]["name"]:
+            self._tabs[index]["name"] = text
+            self.update()
+            self.tab_renamed.emit(index, text)
+
+    def cancel_rename(self) -> None:
+        if self._editor is not None:
+            self._editor.hide()
+        self._editing_index = -1
+
+    def is_renaming(self) -> bool:
+        return self._editing_index >= 0
+
+    def eventFilter(self, obj, event):
+        # Esc 取消改名（QLineEdit 自己不吃 Esc）
+        if (obj is self._editor and event.type() == QEvent.Type.KeyPress
+                and event.key() == Qt.Key.Key_Escape):
+            self.cancel_rename()
+            return True
+        return super().eventFilter(obj, event)
 
 
 def _tick_interval(zoom: float) -> int:

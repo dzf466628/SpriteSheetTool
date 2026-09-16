@@ -16,7 +16,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QPointF, QRectF, QSize, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import (
-    QAction, QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QUndoCommand, QUndoStack,
+    QAction, QColor, QKeySequence, QPainter, QPen, QPixmap, QUndoCommand, QUndoStack,
 )
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
@@ -36,7 +36,7 @@ from .preview import ActionPreviewWidget
 from .settings_dialog import SettingsDialog
 from .transform import action_frame_pixmap
 from .widgets import (
-    ActionCardWidget, ActionItemDelegate, _APP_ROOT, make_logo_pixmap, paint_checkerboard,
+    ActionCardWidget, ActionItemDelegate, AppNameLabel, _APP_ROOT, paint_checkerboard,
 )
 
 # 工程文件缩略图：**正方形** 256×256（资源管理器用方形槽位显示，按画面比例输出
@@ -608,51 +608,19 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # Logo 名称栏
+        # 名称栏（已去掉左侧软件图标，只留软件名）
         logo_bar = QWidget()
         logo_bar.setFixedHeight(64)
         logo_bar.setStyleSheet("background-color: #1a1a1a; border-bottom: 1px solid #333;")
         logo_layout = QHBoxLayout(logo_bar)
-        logo_layout.setContentsMargins(8, 5, 8, 5)
+        logo_layout.setContentsMargins(12, 5, 8, 5)
         logo_layout.setSpacing(8)
-        logo_label = QLabel()
-        logo_label.setFixedSize(54, 54)
-        software_icon = QIcon(str(_APP_ROOT / "SpriteSheetTool.ico"))
-        real_logo = software_icon.pixmap(50, 50)
-        if not real_logo.isNull():
-            logo_label.setPixmap(real_logo)
-        else:
-            real_logo = QPixmap(str(_APP_ROOT / "SpriteSheetTool.png"))
-            if not real_logo.isNull():
-                logo_label.setPixmap(real_logo.scaled(
-                    50,
-                    50,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                ))
-            else:
-                logo_label.setPixmap(make_logo_pixmap(50))
-        # logo 白色描边（加粗）
-        logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo_label.setStyleSheet("border: 2px solid #ffffff; border-radius: 10px;")
-        logo_layout.addWidget(logo_label)
-        # 软件名 + 版本号：同一行，版本号在名字右边；整行底部与 logo 下边缘齐平
-        name_row = QWidget()
-        name_row.setFixedHeight(54)
-        row = QHBoxLayout(name_row)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
-        name_label = QLabel(
-            "<span style='color:#ffffff;'>SpriteSheet</span>"
-            "<span style='color:#E91E63;'>Tool</span>"
-        )
-        name_label.setStyleSheet("background: transparent; border: none; font-size: 22px; font-weight: bold;")
+        # 软件名：首字母 S 放大并与其余文字垂直居中（见 AppNameLabel）
+        name_label = AppNameLabel()
         version_label = QLabel(f"v{__version__}")
         version_label.setStyleSheet("background: transparent; border: none; color: #9a9a9a; font-size: 11px;")
-        row.addWidget(name_label, 0, Qt.AlignmentFlag.AlignBottom)
-        row.addWidget(version_label, 0, Qt.AlignmentFlag.AlignBottom)
-        row.addStretch()
-        logo_layout.addWidget(name_row)
+        logo_layout.addWidget(name_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        logo_layout.addWidget(version_label, 0, Qt.AlignmentFlag.AlignBottom)
         logo_layout.addStretch()
         main_layout.addWidget(logo_bar)
 
