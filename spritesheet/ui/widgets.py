@@ -272,6 +272,9 @@ class ProjectTabBar(QWidget):
     CLOSE_HOVER_MS = 130         # 悬停动画时长
     CLOSE_ROTATE = 30.0          # 悬停时叉号旋转的角度（用户要求：转 30° 变红，不要红底）
     CLOSE_GLYPH = "✕"            # 叉号字符（U+2715；想用更细的 × 改成 "×"）
+    DIRTY_R = 2.5                # 未保存小圆点的半径
+    DIRTY_GAP = 4                # 名字与圆点之间的间距
+    DIRTY_IDLE = "#9a9a9a"       # 未选中标签的圆点颜色（跟着名字的灰）
 
     tab_selected = pyqtSignal(int)
     tab_close_requested = pyqtSignal(int)
@@ -442,14 +445,23 @@ class ProjectTabBar(QWidget):
                 painter.drawRect(rect.left() + 4, rect.top(), rect.width() - 8, 2)
 
             text = self._tabs[index]["name"]
-            if self._tabs[index]["dirty"]:
-                text += " ●"
+            dirty = bool(self._tabs[index]["dirty"])
             painter.setPen(QPen(QColor("#e8e8e8" if active else "#9a9a9a")))
             # 文字整体下移 TEXT_DROP：竖直居中时贴着上面那条玫红/分隔线太挤。
             # 上下边都要 +TEXT_DROP（只加 top 的话是把矩形压扁、文字只挪半格）。
             text_rect = rect.adjusted(self.PAD_X, self.TEXT_DROP, -self.NAME_GAP, self.TEXT_DROP)
             painter.drawText(text_rect, int(Qt.AlignmentFlag.AlignVCenter |
                                             Qt.AlignmentFlag.AlignLeft), text)
+
+            # 未保存标记：单独画一个小圆点（以前是名字后面拼 " ●" 当文字画，
+            # 于是它跟着文字色 —— 活动标签上是白的）。用户要求：**选中的标签**用软件
+            # 强调色玫红，没选中的保持原样（灰点）。所以这里必须脱离文字色单独绘制。
+            if dirty:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(self.CLOSE_RED if active else self.DIRTY_IDLE))
+                dot_x = rect.left() + self.PAD_X + fm.horizontalAdvance(text) + self.DIRTY_GAP + self.DIRTY_R
+                dot_y = text_rect.center().y() + 1
+                painter.drawEllipse(QPointF(dot_x, dot_y), self.DIRTY_R, self.DIRTY_R)
 
             # 关闭按钮：正常的叉号字形；悬停时**转 30° 并变红**（不带红底）
             close = self._close_rect(index)
@@ -814,6 +826,7 @@ class ResponsiveButtonGrid(QWidget):
 
     def _relayout(self) -> None:
         columns = self._wanted_columns()
+        self._apply_cell_width(columns)
         if columns == self._columns:
             return
         self._columns = columns
@@ -830,8 +843,156 @@ class ResponsiveButtonGrid(QWidget):
             self._grid.setColumnStretch(col, 1 if col < columns else 0)
         self.updateGeometry()
 
+    def _cell_width(self, columns: int) -> int:
+        margins = self._grid.contentsMargins()
+        available = max(0, self.width() - margins.left() - margins.right())
+        spacing = self._grid.horizontalSpacing()
+        return max(self._min_button, (available - (columns - 1) * spacing) // columns)
+
+    def _apply_cell_width(self, columns: int) -> None:
+        """把所有按钮钉成**同一个宽度**（= 单元格宽度）。
+
+        为什么必须显式钉死：QGridLayout 在"最小宽度都一样、列拉伸也一样"时并不会
+        均分多余空间。实测（面板 338px、8 个按钮、2 列，所有按钮 min=80/hint=80/
+        Expanding）：第 0 列 80px、第 1 列直接把剩下的 253px 全吃掉了 —— 于是
+        "清空变换"（恰好在第 1 列）看起来比邻居长一倍多，用户报的就是这个。
+        只压 ``maximumWidth``：按钮必然等宽（布局有多余空间就把它们撑到上限）。
+
+        这里**不能**顺手把 minimumWidth 也设成 cell：那样网格的最小尺寸会随面板
+        变宽而变大（Qt 的最小尺寸棘轮），splitter 就再也拖不窄了。
+        """
+        cell = self._cell_width(columns)
+        for button in self._buttons:
+            if button.minimumWidth() > cell:
+                button.setMinimumWidth(self._min_button)
+            button.setMaximumWidth(cell)
+
     def resizeEvent(self, event) -> None:  # noqa: ARG002
         self._relayout()
+
+
+class HoverIconButton(QPushButton):
+    """悬停（或选中）时切换图标的按钮。
+
+    为什么需要它：QSS 能改文字色和背景，但**改不了 pixmap 图标的颜色**。
+    "清空变换"平时是红图标红字，悬停时底色变玫红、文字转白 —— 红图标压在玫红底上
+    几乎看不见，用户要求悬停图标也变白，只能自己换 QIcon。
+
+    ``set_state_icons(普通, 悬停, 选中)``：选中态不给就用悬停那张（两者底色都是玫红）。
+    """
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self._icon_normal = None
+        self._icon_hover = None
+        self._icon_checked = None
+        self._hovered = False
+        self.toggled.connect(lambda _checked: self._sync_icon())
+
+    def set_state_icons(self, normal, hover, checked=None) -> None:
+        self._icon_normal = normal
+        self._icon_hover = hover
+        self._icon_checked = hover if checked is None else checked
+        self._sync_icon()
+
+    def icon_state(self) -> str:
+        """当前生效的是哪张图标（回归用）：normal / hover / checked。"""
+        if self._hovered:
+            return "hover"
+        if self.isChecked():
+            return "checked"
+        return "normal"
+
+    def _sync_icon(self) -> None:
+        if self._icon_normal is None:
+            return
+        icon = {"normal": self._icon_normal,
+                "hover": self._icon_hover,
+                "checked": self._icon_checked}[self.icon_state()]
+        if icon is not None:
+            self.setIcon(icon)
+
+    def enterEvent(self, event):  # noqa: ARG002 - Qt 接口
+        self._hovered = True
+        self._sync_icon()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):  # noqa: ARG002 - Qt 接口
+        self._hovered = False
+        self._sync_icon()
+        super().leaveEvent(event)
+
+
+class HintToast:
+    """画在控件上的临时提示气泡（默认 2.6 秒后自己消失）。
+
+    为什么不是 QMessageBox：这里要表达的是"点了没反应，原因是还没有动作"——
+    是**解释**不是**决策**，弹窗会打断操作、还得再点一次"确定"。画在用户刚点的
+    那块画布上，既在视线里又不挡路。使用方在 paintEvent 末尾调 ``paint()``，
+    并在交互入口调 ``show()``。
+    """
+
+    BG = QColor(28, 28, 28, 238)
+    BORDER = QColor("#E91E63")
+    TEXT = QColor("#f2f2f2")
+    PAD_X = 12
+    HEIGHT = 28
+    MARGIN_BOTTOM = 16
+
+    def __init__(self, widget: QWidget, duration_ms: int = 2600) -> None:
+        self._widget = widget
+        self._duration_ms = int(duration_ms)
+        self._text = ""
+        self._timer = QTimer(widget)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.clear)
+
+    # ---- 状态 ----
+    def show(self, text: str) -> None:
+        """显示提示；重复调用会刷新文字并重新计时。"""
+        self._text = str(text)
+        self._timer.start(self._duration_ms)
+        self._widget.update()
+
+    def clear(self) -> None:
+        if not self._text:
+            return
+        self._text = ""
+        self._timer.stop()
+        self._widget.update()
+
+    def active(self) -> bool:
+        return bool(self._text)
+
+    def text(self) -> str:
+        return self._text
+
+    def _font(self) -> QFont:
+        font = QFont("Microsoft YaHei UI")
+        font.setPixelSize(12)
+        return font
+
+    # ---- 绘制 ----
+    def paint(self, painter: QPainter, rect: QRect | None = None) -> None:
+        """在 rect（默认整个控件）底部居中画气泡；没有提示时什么都不做。"""
+        if not self._text:
+            return
+        rect = self._widget.rect() if rect is None else rect
+        font = self._font()
+        fm = QFontMetricsF(font)
+        width = fm.horizontalAdvance(self._text) + self.PAD_X * 2
+        box = QRectF(rect.center().x() - width / 2.0,
+                     rect.bottom() - self.HEIGHT - self.MARGIN_BOTTOM,
+                     width, self.HEIGHT)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(self.BORDER, 1.0))
+        painter.setBrush(self.BG)
+        painter.drawRoundedRect(box, 4, 4)
+        painter.setPen(self.TEXT)
+        painter.setFont(font)
+        painter.drawText(box, int(Qt.AlignmentFlag.AlignCenter), self._text)
+        painter.restore()
 
 
 class _Ruler(QWidget):

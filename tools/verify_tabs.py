@@ -374,6 +374,52 @@ def main() -> int:
           f"进度 {bar2._close_progress:.2f}")
 
     print()
+    print("=== 11. 未保存圆点：选中的标签用品牌红，没选中的保持灰 ===")
+    # 用户原话：「选中工程名字后面的白点改成我们的红色 未选中工程不用管」。
+    # 改之前是把 " ●" 拼在名字后面当文字画 —— 于是它跟着文字色走，活动标签上是**白**的。
+    # 现在圆点单独绘制，颜色按"是不是当前标签"取。
+    def dot_scan(image, rect):
+        """在标签正文带（避开顶部玫红条）里数红色像素，并给出红像素的最右位置。"""
+        red = 0
+        rightmost = None
+        for y in range(rect.top() + 3, rect.bottom() - 1):
+            for x in range(rect.left(), rect.right() + 1):
+                if is_brand_red(image.pixelColor(x, y)):
+                    red += 1
+                    rightmost = x if rightmost is None else max(rightmost, x)
+        return red, rightmost
+
+    bar3, dirty_img = rendered(["甲工程", "乙工程"], dirty_index=None, current=0)
+    bar3.set_dirty(0, True)
+    bar3.set_dirty(1, True)
+    app.processEvents()
+    dirty_img = bar3.grab().toImage()
+    rect_active, rect_idle = bar3.tab_rects()[0], bar3.tab_rects()[1]
+    red_active, right_active = dot_scan(dirty_img, rect_active)
+    red_idle, _ = dot_scan(dirty_img, rect_idle)
+    print(f"  两个标签都标脏：选中标签红色像素 {red_active}（最右 x={right_active}），"
+          f"未选中标签红色像素 {red_idle}")
+    check("选中的标签：圆点是品牌红", red_active >= 8, f"红色像素 {red_active}")
+    check("未选中的标签：圆点不红（保持灰）", red_idle == 0, f"红色像素 {red_idle}")
+    close_rect_active = bar3._close_rect(0)
+    check("红点画在名字之后、关闭叉号之前（不是叉号变红）",
+          right_active is not None and right_active < close_rect_active.left(),
+          f"红点最右 x={right_active}，叉号左边界 {close_rect_active.left()}")
+
+    # 干净标签不该有红点
+    bar4, clean_img2 = rendered(["甲工程", "乙工程"], dirty_index=None, current=0)
+    red_clean, _ = dot_scan(clean_img2, bar4.tab_rects()[0])
+    check("干净标签没有红点", red_clean == 0, f"红色像素 {red_clean}")
+
+    # 未选中标签标脏后墨迹要变多（证明灰点确实画了）
+    bar5, idle_clean = rendered(["甲工程", "乙工程"], dirty_index=None, current=0)
+    ink_clean = ink_count(idle_clean, bar5.tab_rects()[1])
+    ink_dirty = ink_count(dirty_img, rect_idle)
+    print(f"  未选中标签：干净 {ink_clean} 墨迹 -> 标脏 {ink_dirty} 墨迹")
+    check("未选中标签标脏后确实多画了灰点", ink_dirty > ink_clean,
+          f"{ink_clean} -> {ink_dirty}")
+
+    print()
     print(f"TABS FAILED {len(FAILURES)}" if FAILURES else "TABS OK")
     if FAILURES:
         print("失败项：", *FAILURES, sep="\n  - ")

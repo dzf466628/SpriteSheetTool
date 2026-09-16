@@ -34,9 +34,13 @@ from .transform import (
     compute_preview_layout, frame_base_size,
 )
 from .widgets import (
-    CompactComboBox, CompactSpinBox, EditableNumberLabel, ResponsiveButtonGrid,
-    _BIPOLAR_SLIDER_QSS, _GROUP_QSS, _SLIDER_QSS, make_tool_icon, paint_checkerboard,
+    CompactComboBox, CompactSpinBox, EditableNumberLabel, HintToast, HoverIconButton,
+    ResponsiveButtonGrid, _BIPOLAR_SLIDER_QSS, _GROUP_QSS, _SLIDER_QSS, make_tool_icon,
+    paint_checkerboard,
 )
+
+# 无动作时点控件的统一提示（四处入口共用一句，避免文案漂移）
+NO_ACTION_HINT = "请先添加动作：点左侧「+ 添加动作」"
 
 # 四角顺序（与 DEFAULT_QUAD 一致）：0=左上 1=右上 2=右下 3=左下。
 # 源矩形里 (0,1) 与 (2,3) 是**水平**边，(1,2) 与 (3,0) 是垂直边 ——
@@ -222,6 +226,59 @@ class PreviewCanvas(QWidget):
         self._hover_timer.setInterval(45)
         self._hover_timer.timeout.connect(self._advance_handle_hover)
         self._hover_timer.start()
+        # ---- 偏移拖动期间冻结画布区域 ----
+        # 用户反馈："拖动滑块（帧）不动、只有区域在动，很难受；让帧真的动，
+        # 松手以后再计算区域"。所以拖动期间画布尺寸/位置全部冻结，只把"相对拖动
+        # 起点的偏移增量"加到当前帧上；松手再按新偏移重算并集。
+        self._frozen_layout: tuple | None = None
+        self._frozen_index: int = 0
+        self._frozen_offset: tuple[int, int] = (0, 0)
+        self._toast = HintToast(self)
+
+    # ---- 无动作提示 ----
+    def hint_no_action(self) -> None:
+        """没有当前动作时，在被点的控件上给出"先添加动作"的提示。"""
+        self._toast.show(NO_ACTION_HINT)
+
+    # ---- 偏移拖动：冻结画布区域 ----
+    def begin_layout_freeze(self) -> None:
+        """冻结画布尺寸与各帧位置（拖动偏移滑块/方向按钮时调用）。"""
+        if self._frozen_layout is not None:
+            return
+        if not self._action or not self._action.frames:
+            return
+        if not (0 <= self._frame_index < len(self._action.frames)):
+            return
+        self._frozen_layout = compute_preview_layout(self._action, self._frame_index)
+        self._frozen_index = self._frame_index
+        self._frozen_offset = self._action.frame_offsets.get(self._frame_index, (0, 0))
+        self.update()
+
+    def end_layout_freeze(self) -> None:
+        """松手：解除冻结并重绘画布（区域并集按新偏移重算）。"""
+        if self._frozen_layout is None:
+            return
+        self._frozen_layout = None
+        self.update()
+
+    def layout_frozen(self) -> bool:
+        return self._frozen_layout is not None
+
+    def _paint_layout(self):
+        """绘制用的布局：冻结期间 = 冻结布局 + 当前帧的偏移增量。"""
+        if self._frozen_layout is None:
+            return self._current_layout()
+        canvas_w, canvas_h, positions, meta = self._frozen_layout
+        idx = self._frozen_index
+        if self._action and 0 <= idx < len(positions):
+            cur = self._action.frame_offsets.get(idx, (0, 0))
+            dx = cur[0] - self._frozen_offset[0]
+            dy = cur[1] - self._frozen_offset[1]
+            if dx or dy:
+                positions = list(positions)
+                tx, ty, fw, fh = positions[idx]
+                positions[idx] = (tx + dx, ty + dy, fw, fh)
+        return canvas_w, canvas_h, positions, meta
 
     def set_toolbar(self, toolbar):
         self._toolbar = toolbar
@@ -239,6 +296,7 @@ class PreviewCanvas(QWidget):
     def set_action(self, action: Action | None):
         self._action = action
         self._frame_index = 0
+        self._frozen_layout = None
         self._hover_kind, self._hover_index = None, -1
         self._direction = 1
         self._bg_scroll = 0.0
@@ -253,6 +311,8 @@ class PreviewCanvas(QWidget):
 
     def set_frame(self, idx: int):
         if self._action and 0 <= idx < len(self._action.frames):
+            # 换帧时丢弃冻结布局：冻结里的"当前帧偏移增量"只对冻结时的帧有意义
+            self._frozen_layout = None
             self._frame_index = idx
             self._hover_kind, self._hover_index = None, -1
             self.update()
@@ -787,6 +847,11 @@ class PreviewCanvas(QWidget):
         if self._panning and event.button() == Qt.MouseButton.LeftButton:
             self._pan_start = event.position() - self._offset
             return
+        # 没有动作时画布上只有"选择动作以预览"几个字，点它是没有任何反应的；
+        # 直接给出原因（用户要求：点图片或控件要提示先添加动作）。
+        if (not self._action or not self._action.frames) and event.button() == Qt.MouseButton.LeftButton:
+            self.hint_no_action()
+            return
         if self._transform_mode and event.button() == Qt.MouseButton.LeftButton:
             kind, idx = self._hit_test(event.position())
             if kind is None:
@@ -824,12 +889,12 @@ class PreviewCanvas(QWidget):
             p.setPen(QColor("#666"))
             p.setFont(QFont("Microsoft YaHei", 11))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "选择动作以预览")
+            self._toast.paint(p, self.rect())
             p.end()
             return
 
-        canvas_w, canvas_h, positions, (pad, max_w, max_h) = compute_preview_layout(
-            self._action, self._frame_index
-        )
+        # 冻结期间（拖偏移）用冻结布局：画布区域不动，帧真的跟着偏移走
+        canvas_w, canvas_h, positions, (pad, max_w, max_h) = self._paint_layout()
         # 缩放居中（支持用户缩放和拖动）
         scale = self._zoom
         cx = self._offset.x()
@@ -902,6 +967,7 @@ class PreviewCanvas(QWidget):
         if self._transform_mode:
             self._draw_transform_handles(p)
 
+        self._toast.paint(p, self.rect())
         p.end()
 
     def _draw_transform_handles(self, p: QPainter) -> None:
@@ -992,6 +1058,10 @@ class AnimAdjustPanel(QWidget):
         self._action: Action | None = None
         self._actions: list = []
         self._transform_changed = False
+        self.canvas = None
+        # 偏移拖动（滑块/方向按钮按住）期间为 True：画布区域冻结，
+        # 松手时才重算并集（用户要求：拖动时帧要真的动、松手再算区域）。
+        self._offset_drag = False
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -1132,10 +1202,14 @@ class AnimAdjustPanel(QWidget):
         # 清空变换：**红色**（与其他按钮"反着"）—— 别的按钮平时是灰字灰边、悬停才显红，
         # 它平时就是红字红边 + 红色图标，悬停反相成红底白字，一眼能看出它是个"动作"
         # 而不是模式。所以不走 _small_btn（那个是 24x24 定尺、灰底样式）。
-        self.btn_clear_transform = QPushButton("清空变换")
+        # 用 HoverIconButton：悬停底色变玫红后红图标会糊在底上，用户要求悬停时**图标转白**
+        # ——QSS 改不了 pixmap 颜色，只能换 QIcon。
+        self.btn_clear_transform = HoverIconButton("清空变换")
         self.btn_clear_transform.setToolTip(
             "清空当前帧的 旋转 / 镜像 / 透视 / 旋转中心（帧偏移不动）")
-        self.btn_clear_transform.setIcon(make_tool_icon("reset", 14, color="#E91E63"))
+        self.btn_clear_transform.set_state_icons(
+            make_tool_icon("reset", 14, color="#E91E63"),
+            make_tool_icon("reset", 14, color="#ffffff"))
         self.btn_clear_transform.setIconSize(QSize(14, 14))
         self.btn_clear_transform.setStyleSheet(
             "QPushButton { background: #2b2b2b; border: 1px solid #E91E63; border-radius: 3px;"
@@ -1235,14 +1309,22 @@ class AnimAdjustPanel(QWidget):
         offset_header.addStretch()
         g3_layout.addLayout(offset_header)
 
-        self.btn_up = self._small_btn("", "当前帧上移1px", "arrow_up")
-        self.btn_down = self._small_btn("", "当前帧下移1px", "arrow_down")
-        self.btn_left = self._small_btn("", "当前帧左移1px", "arrow_left")
-        self.btn_right = self._small_btn("", "当前帧右移1px", "arrow_right")
+        self.btn_up = self._small_btn("", "当前帧上移1px（可按住连续移动）", "arrow_up")
+        self.btn_down = self._small_btn("", "当前帧下移1px（可按住连续移动）", "arrow_down")
+        self.btn_left = self._small_btn("", "当前帧左移1px（可按住连续移动）", "arrow_left")
+        self.btn_right = self._small_btn("", "当前帧右移1px（可按住连续移动）", "arrow_right")
         self.btn_up.clicked.connect(lambda: self._adjust_frame(0, -1))
         self.btn_down.clicked.connect(lambda: self._adjust_frame(0, 1))
         self.btn_left.clicked.connect(lambda: self._adjust_frame(-1, 0))
         self.btn_right.clicked.connect(lambda: self._adjust_frame(1, 0))
+        # 按住不放 = 连续微调（用户要"真的在移动"的感觉；单点一次仍是 1px）
+        for btn in (self.btn_up, self.btn_down, self.btn_left, self.btn_right):
+            btn.setAutoRepeat(True)
+            btn.setAutoRepeatDelay(400)
+            btn.setAutoRepeatInterval(60)
+            # 按下即冻结画布区域，松开才重算 —— 否则帧"不动"、只有画布在长大
+            btn.pressed.connect(self._begin_offset_drag)
+            btn.released.connect(self._end_offset_drag)
         self.btn_reset = self._small_btn("", "重置当前帧偏移", "reset")
         self.btn_reset.clicked.connect(self._reset_frame_offset)
 
@@ -1256,6 +1338,9 @@ class AnimAdjustPanel(QWidget):
         self.slider_off_h.setStyleSheet(_BIPOLAR_SLIDER_QSS)
         self.slider_off_h.setToolTip("大幅调节水平偏移（-200 ~ +200，居中为 0）")
         self.slider_off_h.valueChanged.connect(self._on_offset_slider_h)
+        # 拖动期间冻结画布区域（帧真的动），松手再重算并集
+        self.slider_off_h.sliderPressed.connect(self._begin_offset_drag)
+        self.slider_off_h.sliderReleased.connect(self._end_offset_drag)
         self.slider_off_v = QSlider(Qt.Orientation.Vertical)
         self.slider_off_v.setRange(-200, 200)
         self.slider_off_v.setValue(0)
@@ -1263,6 +1348,8 @@ class AnimAdjustPanel(QWidget):
         self.slider_off_v.setStyleSheet(_BIPOLAR_SLIDER_QSS)
         self.slider_off_v.setToolTip("大幅调节垂直偏移（-200 ~ +200，居中为 0，向上为负）")
         self.slider_off_v.valueChanged.connect(self._on_offset_slider_v)
+        self.slider_off_v.sliderPressed.connect(self._begin_offset_drag)
+        self.slider_off_v.sliderReleased.connect(self._end_offset_drag)
 
         offset_grid = QGridLayout()
         offset_grid.setContentsMargins(0, 0, 0, 0)
@@ -1398,9 +1485,28 @@ class AnimAdjustPanel(QWidget):
             w.setValue(max(w.minimum(), min(w.maximum(), v)))
             w.blockSignals(False)
 
+    def _begin_offset_drag(self) -> None:
+        """偏移拖动开始：冻结画布区域，期间帧跟着偏移真实移动。"""
+        if self._offset_drag:
+            return
+        self._offset_drag = True
+        if self.canvas is not None:
+            self.canvas.begin_layout_freeze()
+
+    def _end_offset_drag(self) -> None:
+        """偏移拖动结束：重算画布区域（并集可能因偏移扩大/缩小）并刷新标签。"""
+        if not self._offset_drag:
+            return
+        self._offset_drag = False
+        if self.canvas is not None:
+            self.canvas.end_layout_freeze()
+        self._refresh_canvas_label()
+        self.changed.emit()
+
     def _set_current_offset(self, dx: int | None = None, dy: int | None = None) -> None:
         """设置当前帧偏移的某个分量并刷新界面。"""
         if not self._action or not self._action.frames:
+            self._hint_no_action()
             return
         idx = getattr(self, "_current_frame", 0)
         if not (0 <= idx < len(self._action.frames)):
@@ -1414,8 +1520,13 @@ class AnimAdjustPanel(QWidget):
             self._action.frame_offsets.pop(idx, None)
         else:
             self._action.frame_offsets[idx] = (nx, ny)
-        self._sync_offset_widgets(nx, ny)
-        self._refresh_canvas_label()   # 边缘并集随微调实时变化
+        if self._offset_drag:
+            # 拖动中：画布区域冻结（用户要求"松手以后再计算区域"），
+            # 只同步控件显示；区域尺寸留到 _end_offset_drag 再算。
+            self._sync_offset_widgets(nx, ny)
+        else:
+            self._sync_offset_widgets(nx, ny)
+            self._refresh_canvas_label()   # 边缘并集随微调实时变化
         self.changed.emit()
 
     def _on_offset_label_changed(self, _value: int) -> None:
@@ -1429,6 +1540,7 @@ class AnimAdjustPanel(QWidget):
 
     def _on_type_changed(self):
         if not self._action:
+            self._hint_no_action()
             return
         if self.btn_type_move.isChecked():
             self._action.action_type = "move"
@@ -1481,6 +1593,7 @@ class AnimAdjustPanel(QWidget):
     def _adjust_frame(self, dx: int, dy: int):
         """方向按钮：当前帧偏移微调 1px。"""
         if not self._action or not self._action.frames:
+            self._hint_no_action()
             return
         idx = getattr(self, "_current_frame", 0)
         if 0 <= idx < len(self._action.frames):
@@ -1489,6 +1602,7 @@ class AnimAdjustPanel(QWidget):
 
     def _reset_frame_offset(self):
         if not self._action:
+            self._hint_no_action()
             return
         idx = getattr(self, "_current_frame", 0)
         if idx in self._action.frame_offsets:
@@ -1577,9 +1691,26 @@ class AnimAdjustPanel(QWidget):
     def set_canvas(self, canvas) -> None:
         self.canvas = canvas
 
+    def _hint_no_action(self) -> bool:
+        """没有当前动作时给出"先添加动作"提示；返回 True 表示调用方应直接返回。
+
+        用户报的是"加了图片、点控件完全没反应"。这些控件在无动作时确实是空转
+        （数据没地方落），所以不是静默 return，而是把原因画到预览画布上。
+        """
+        if self._action and self._action.frames:
+            return False
+        canvas = getattr(self, "canvas", None)
+        if canvas is not None:
+            canvas.hint_no_action()
+        return True
+
     def _on_mode_button(self, mode: str, on: bool) -> None:
         canvas = getattr(self, "canvas", None)
         if canvas is None:
+            return
+        if on and self._hint_no_action():
+            # 无动作时不允许进入变换模式：按钮立刻弹回，避免"按钮亮着手柄却没有"
+            self._on_canvas_mode_changed("")
             return
         if on:
             canvas.set_transform_mode(mode)
@@ -1663,6 +1794,7 @@ class AnimAdjustPanel(QWidget):
         帧偏移不在这里清（它属于下面"当前帧微调"那一栏，有自己的重置按钮）。
         """
         if not self._action or not self._action.frames:
+            self._hint_no_action()
             return
         for act, indices in self._transform_targets():
             for i in indices:
@@ -1683,6 +1815,7 @@ class AnimAdjustPanel(QWidget):
 
     def _toggle_mirror(self, axis: str) -> None:
         if not self._action or not self._action.frames:
+            self._hint_no_action()
             return
         checked = (self.btn_mirror_h if axis == "h" else self.btn_mirror_v).isChecked()
         for act, indices in self._transform_targets():

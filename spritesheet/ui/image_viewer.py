@@ -29,12 +29,15 @@ from PyQt6.QtWidgets import (
 
 from spritesheet.settings import last_directory, set_last_directory
 from .models import Action
-from .widgets import RULER_SIZE, _Ruler, make_tool_icon, paint_checkerboard
+from .widgets import RULER_SIZE, HintToast, _Ruler, make_tool_icon, paint_checkerboard
 
 
 SUPPORTED_IMAGE_EXT = {".png", ".webp", ".jpeg", ".jpg", ".gif", ".bmp"}
 MIN_ZOOM = 0.05
 MAX_ZOOM = 20
+
+# 无动作时点画布/控件的统一提示（与预览面板同一句，避免文案漂移）
+NO_ACTION_HINT = "请先添加动作：点左侧「+ 添加动作」"
 
 
 def _detect_frames_image(img: QImage, alpha_threshold: int = 10,
@@ -189,6 +192,11 @@ class _Canvas(QWidget):
         self._panning = False
         self._pan_start = None
         self._selection_rect = None
+        # 无动作时的提示气泡（"先添加动作"），画在画布底部
+        self._toast = HintToast(self)
+
+    def hint_no_action(self) -> None:
+        self._toast.show(NO_ACTION_HINT)
 
     def resizeEvent(self, event):
         toolbar = getattr(self._viewer, "_toolbar", None)
@@ -399,6 +407,7 @@ class _Canvas(QWidget):
             p.setPen(QColor("#666"))
             p.setFont(QFont("Microsoft YaHei", 12))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "拖入图片\n或点击添加")
+        self._toast.paint(p, self.rect())
         p.end()
 
     def wheelEvent(self, event):
@@ -444,6 +453,11 @@ class _Canvas(QWidget):
             self._pan_start = event.position() - self._viewer._offset
             return
         if event.button() == Qt.MouseButton.LeftButton and self._viewer._pixmap:
+            if not self._viewer.current_action:
+                # 有图但还没有动作：框选出来的帧没有地方存（selected_indices 属于动作），
+                # 点了只会"完全没反应"。用户要求这种时候直接提示先添加动作。
+                self.hint_no_action()
+                return
             # 记录框选起点
             self._drag_start = event.position()
             self._selection_rect = QRectF(event.position(), event.position())
@@ -913,6 +927,13 @@ class ImageViewer(QWidget):
         self.canvas.update()
 
     def set_compose_mode(self, enabled: bool) -> None:
+        if enabled and not self.current_action:
+            # 没有动作 → 合成出来的帧没有地方存。按钮弹回 + 提示原因，
+            # 否则用户看到按钮亮着、点帧却毫无反应。
+            self.canvas.hint_no_action()
+            if self._toolbar is not None and self._toolbar.btn_compose.isChecked():
+                self._toolbar.btn_compose.setChecked(False)
+            return
         self._manual_compose = enabled
         # Ctrl 临时激活时，合成按钮必须保持高亮；按钮点击只决定
         # Ctrl 松开后的手动模式是否继续保留。
@@ -998,6 +1019,12 @@ class ImageViewer(QWidget):
 
     def set_reuse_mode(self, enabled: bool) -> None:
         """切换复用按钮的保持模式；按钮/Alt 任一激活时都处于复用模式。"""
+        if enabled and not self.current_action:
+            # 同上：没有动作时复用出来的帧没有地方存，提示并让按钮弹回。
+            self.canvas.hint_no_action()
+            if self._toolbar is not None and self._toolbar.btn_reuse.isChecked():
+                self._toolbar.btn_reuse.setChecked(False)
+            return
         self._manual_reuse = bool(enabled)
         self.reuse_mode = self._manual_reuse or self._alt_reusing
         if self._toolbar is not None and self._toolbar.btn_reuse.isChecked() != self.reuse_mode:

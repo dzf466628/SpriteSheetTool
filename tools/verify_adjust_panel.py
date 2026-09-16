@@ -14,6 +14,8 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import QEvent, QPointF
+from PyQt6.QtGui import QEnterEvent
 from PyQt6.QtWidgets import QApplication
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -147,6 +149,55 @@ def main() -> int:
     print(f"  图标里的红色像素 {red_pixels}")
     check("按钮图标也是红色的", red_pixels >= 3, f"红色像素 {red_pixels}")
     check("按钮够宽放得下「清空变换」四个字", clear.width() >= 72, f"宽 {clear.width()}")
+
+    print()
+    print("=== 5. 8 个变换按钮一样长（清空变换不许比别人长） ===")
+    widths = [b.width() for b in grid._buttons]
+    names = [(b.text(), b.width()) for b in grid._buttons]
+    print(f"  各按钮宽度：{names}")
+    # 改之前 QGridLayout 会把第 2 列吃满剩余空间：338px 的网格里第 0 列 80px、
+    # 第 1 列 253px —— "清空变换"正好在第 1 列，看着比邻居长一倍多（用户报的）。
+    check("所有变换按钮等宽", len(set(widths)) == 1, f"实际 {sorted(set(widths))}")
+    check("清空变换与邻居等宽", clear.width() == grid._buttons[0].width(),
+          f"{clear.width()} vs {grid._buttons[0].width()}")
+    for width in (420, 300, 260):
+        win.preview.setFixedWidth(width)
+        app.processEvents()
+        row = [b.width() for b in grid._buttons]
+        print(f"  面板 {width}px -> 网格 {grid.width()}px，列数 {grid.columns()}，宽度 {sorted(set(row))}")
+        check(f"面板 {width}px 时仍然等宽", len(set(row)) == 1, f"实际 {sorted(set(row))}")
+    win.preview.setFixedWidth(420)
+    app.processEvents()
+
+    print()
+    print("=== 6. 清空变换悬停时图标转白（QSS 改不了 pixmap，靠换图标） ===")
+    check("按钮是会换图标的类型", hasattr(clear, "set_state_icons"), type(clear).__name__)
+    normal_icon = clear.icon().pixmap(14, 14).toImage()
+    normal_red = sum(1 for y in range(normal_icon.height()) for x in range(normal_icon.width())
+                     if normal_icon.pixelColor(x, y).red() - normal_icon.pixelColor(x, y).green() > 40
+                     and normal_icon.pixelColor(x, y).alpha() > 60)
+    print(f"  悬停前的红色像素 {normal_red}，图标状态 {getattr(clear, 'icon_state', lambda: '?')()}")
+    enter = QEnterEvent(QPointF(1, 1), QPointF(1, 1), QPointF(1, 1))
+    app.sendEvent(clear, enter)
+    app.processEvents()
+    hover_icon = clear.icon().pixmap(14, 14).toImage()
+    white = 0
+    red_now = 0
+    for y in range(hover_icon.height()):
+        for x in range(hover_icon.width()):
+            c = hover_icon.pixelColor(x, y)
+            if c.alpha() > 60:
+                if c.red() > 220 and c.green() > 220 and c.blue() > 220:
+                    white += 1
+                if c.red() - c.green() > 40:
+                    red_now += 1
+    print(f"  悬停后：白色像素 {white}，红色像素 {red_now}，状态 {clear.icon_state()}")
+    check("悬停时切到悬停图标", clear.icon_state() == "hover", f"实际 {clear.icon_state()}")
+    check("悬停图标是白色的", white >= 3 and red_now == 0,
+          f"白 {white} 红 {red_now}")
+    app.sendEvent(clear, QEvent(QEvent.Type.Leave))
+    app.processEvents()
+    check("移开后恢复红色图标", clear.icon_state() == "normal", f"实际 {clear.icon_state()}")
 
     win.close()
     print()

@@ -265,6 +265,60 @@ def main() -> int:
               f"name_rows={bool(name_rows)} close_rows={bool(close_rows)}")
 
     print()
+    print("=== 7. 未保存红点：真实字体下的位置与颜色 ===")
+    # 用户要求：「选中工程名字后面的白点改成我们的红色」。红点在 offscreen 下只能验
+    # "有没有红像素、在不在叉号左边"；真字体下才能验它**紧贴在名字后面**、与名字垂直居中。
+    #
+    # ⚠️ 这里的红色判定必须比上面验叉号的 `reddish` **更严**：Windows 下 Qt 的文字是
+    # 次像素（ClearType）抗锯齿的，"甲工程"的字缘天生带一点红边，用 r-g>40 会把字缘
+    # 也判成红点（实测 62 个"红"像素里大半是字缘）—— 连带着把"名字墨迹"的取样窗口
+    # 挤成空区间。红点本体是实心 #E91E63，用强红判定才分得干净。
+    def strong_red(color) -> bool:
+        r, g, b = color.red(), color.green(), color.blue()
+        return r > 180 and r - g > 90 and r - b > 60
+
+    dot_bar = ProjectTabBar()
+    dot_bar.resize(400, dot_bar.HEIGHT)
+    dot_bar.add_tab("甲工程", select=False)
+    dot_bar.set_current(0)
+    dot_bar.set_dirty(0, True)
+    app.processEvents()
+    dot_image = dot_bar.grab().toImage()
+    dot_rect = dot_bar.tab_rects()[0]
+    dot_close = dot_bar._close_rect(0)
+    # 第 0~1 行是活动标签的品牌玫红条，从第 4 行起量
+    red_pixels = [(x, y) for y in range(4, dot_bar.height() - 1)
+                  for x in range(dot_rect.left(), dot_close.left())
+                  if strong_red(dot_image.pixelColor(x, y))]
+    name_pixels = [(x, y) for y in range(4, dot_bar.height() - 1)
+                   for x in range(dot_rect.left() + ProjectTabBar.PAD_X,
+                                  (min(p[0] for p in red_pixels) - 2) if red_pixels else dot_close.left())
+                   if dot_image.pixelColor(x, y).lightness() > 110]
+    print(f"  红点 {len(red_pixels)} 像素，名字墨迹 {len(name_pixels)} 像素")
+    check("红点画出来了", len(red_pixels) >= 6, f"红色像素 {len(red_pixels)}")
+    if red_pixels and name_pixels:
+        dot_x0 = min(p[0] for p in red_pixels)
+        dot_x1 = max(p[0] for p in red_pixels)
+        name_x1 = max(p[0] for p in name_pixels)
+        gap = dot_x0 - name_x1
+        dot_cy = (min(p[1] for p in red_pixels) + max(p[1] for p in red_pixels)) / 2
+        name_cy = (min(p[1] for p in name_pixels) + max(p[1] for p in name_pixels)) / 2
+        dot_w = dot_x1 - dot_x0 + 1
+        print(f"  红点 x[{dot_x0},{dot_x1}]（宽 {dot_w}），名字最右 x={name_x1}，"
+              f"间隙 {gap}px；红点中心 y={dot_cy:.1f}，名字中心 y={name_cy:.1f}")
+        check("红点紧跟在名字后面（间隙 2..12px）", 2 <= gap <= 12, f"间隙 {gap}px")
+        check("红点与名字垂直居中（相差 <= 2.5px）", abs(dot_cy - name_cy) <= 2.5,
+              f"差 {abs(dot_cy - name_cy):.1f}px")
+        check("红点是个小圆点（宽 3..8px）", 3 <= dot_w <= 8, f"宽 {dot_w}px")
+        center = dot_image.pixelColor((dot_x0 + dot_x1) // 2, int(dot_cy))
+        check("红点中心是品牌玫红（不是白点）",
+              reddish(center) and center.green() < 90,
+              f"中心色 #{center.red():02X}{center.green():02X}{center.blue():02X}")
+    else:
+        check("能量到红点与名字的墨迹", False,
+              f"红点={len(red_pixels)} 名字={len(name_pixels)}")
+
+    print()
     if FAILURES:
         print("GLYPHS FAILED：", *FAILURES, sep="\n  - ")
         return 1
