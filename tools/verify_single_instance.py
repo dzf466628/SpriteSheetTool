@@ -128,7 +128,11 @@ def main() -> int:
         check("第二个进程很快就退了（< 20s，说明没进事件循环）", elapsed < 20,
               f"实际 {elapsed:.2f}s")
         check("主实例收到了这个路径", main_received == [str(target)],
-              f"实际 {main_received}")
+              f"实际 {main_received}"
+              + ("" if main_received else
+                 "  ← 子进程转发成功但本实例没收到：多半是**另有一个实例**"
+                 "（比如先前测试启的打包版）占着同一个服务名，把请求接走了。"
+                 "用 Get-Process 查一下有没有残留的 SpriteSheetTool 进程。"))
         stdout = out.decode("utf-8", "replace")
         check("第二个进程明确说明已转交", "转交" in stdout or "已在运行" in stdout,
               f"stdout={stdout[:200]!r}")
