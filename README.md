@@ -70,7 +70,28 @@ python -m venv .venv
 | 本工具 JSON | `spritesheet.json` | 完整保留锚点/地面线/移动参数/烘焙偏移等编辑语义 |
 | TexturePacker JSON | `spritesheet.tp_hash.json` / `spritesheet.tp_array.json` | 适配 Phaser 2 / PixiJS / Cocos2d-x |
 | Aseprite JSON | `spritesheet.aseprite.json` | 带帧标签，适配 Godot / Phaser / Unity 导入器 |
-| 工程文件 | `project.sstool` | 完整工程（双击可打开恢复） |
+| 工程文件 | `project.sstool` | 完整工程（双击可打开恢复）；文件本身是一张 **PNG**，见下节 |
+
+### 工程文件的缩略图
+
+`.sstool` 的文件布局是「**一张合法 PNG + 容器数据**」：
+
+```
+[ 缩略图 PNG（工程当前画面 + 右下角 工程图标.png 角标）… IEND ] [ 工程数据 ]
+```
+
+系统图片解码器读到 `IEND` 即停、忽略尾部数据，而本程序从 PNG 结束处开始解析工程数据。
+配合安装包注册的缩略图处理器，**资源管理器会直接显示工程内容缩略图**（右下角带角标），
+而不是一个看不出内容的通用图标。要点：
+
+- 缩略图长边统一 192px；放大用最近邻（精灵图多为像素画，平滑会糊），缩小才用平滑。
+- 旧版工程（容器在最前）仍可正常打开，只是那种文件没有缩略图。
+- 缩略图处理器注册在 **当前用户** 范围（`HKCU\Software\Classes\.sstool\ShellEx\…`），
+  不需要管理员权限，随卸载清理。
+- 若旧文件仍显示旧图标，是资源管理器的缩略图缓存在起作用：**重装后新存的工程**会立即
+  有缩略图；老文件可改个名或清理缩略图缓存（`ie4uinit.exe -show`）后刷新。
+- 内容损坏/不是 PNG 的 `.sstool` 会**优雅回退**到 `SSTool.ico`，不会出现破图。
+
 
 ### 导入 / 往返保真度
 
@@ -216,6 +237,8 @@ models ← transform ← widgets ← image_viewer / export_dialog ← preview �
 | `verify_menu.py` | 菜单结构与顺序回归 |
 | `verify_roundtrip.py` | 导出→导入逐字段往返审计（四种 JSON 格式，含逐帧像素与帧间位移） |
 | `profile_hotpaths.py` | 热路径采样（先测再改：重绘 / 打包 / 导出 / 检测） |
+| `verify_project_format.py` | 工程文件格式回归（新布局 / 旧布局兼容 / 缩略图退回 / 损坏文件） |
+| `inspect_project_file.py` | 实存一个工程并检查其文件布局与缩略图 |
 
 
 ## 换电脑 / 迁移清单
