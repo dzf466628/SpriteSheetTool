@@ -128,35 +128,39 @@ python -m venv .venv
 
 #### 工程文件图标（SSTool.ico）
 
-`SSTool.ico` 是**原图比例**的多档图标，不是方形画布：
+`SSTool.ico` 是**方形多尺寸**（16/24/32/48/64/128/256），源图（185×256 竖幅）按长边适配
+居中 —— 方形画布两侧是透明的。
 
-| 档位 | 12×16 | 17×24 | 23×32 | 35×48 | 46×64 | 92×128 | 185×256 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
+**必须这样，不能改成"原比例帧"（非方形尺寸）。** 曾经试过一次，结果是图标被压扁：
+资源管理器图标视图走的是**系统图标列表**，列表项是方形位图，**非方形帧会被拉伸填满
+方形槽位**（185×256 拉成方形 = 横向拉宽 1.38 倍）。实测（`tools/verify_icon_imagelist.py`，
+走真实 shell 路径 `SHGetFileInfo`）：
 
-原图是竖幅（185×256），套进方形画布会在两侧留一圈透明边 —— 文件里存的是一堆正方形帧，
-内容只占宽 72%。改用原比例分档后，每档都是原图的等比缩放，实心内容占满整帧。
+| 图标文件 | 16px 档粉色框 | 32px 档粉色框 |
+| --- | --- | --- |
+| **方形帧（现行）** | 12×16（0.750） | 22×32（0.688） |
+| 非方形帧（错误做法） | 16×16（**1.000**） | 32×32（**1.000**） |
 
-> **注意**：这只改变图标文件的构成，**不改变显示大小**。资源管理器按**高度**把图标适配进
-> 方形槽位，两种做法的渲染结果逐像素相同（实测 48/96/256 三档亮像素数与范围完全一致，
-> 见 `tools/verify_icon_ratio.py` 与开发脚本 `spike_icon_ab.ps1`）。
-> 要让图标在槽位里"看起来更大"，只能铺满槽位，而 185×256 铺满 256×256 需要横向拉伸
-> 38%，会变形 —— 所以没有这么做。
+方形画布不代表"图更小"：**图按高度铺满整档**（256 档里就是 256 高），宽度按原比例
+（72%），这是不拉伸前提下的最大尺寸。
+
+> ⚠️ 验证图标**必须走 `SHGetFileInfo`**。`IShellItemImageFactory`（取缩略图用的接口）
+> **会**保持长宽比，拿它验证只会得出"没变化"的错误结论 —— 上一轮就是这么漏掉的。
+
+不想让"图只占 72% 宽"的观感，唯一不拉伸的办法是**给方形画布铺品牌色圆角底**
+（`--tile "#FB5582"`），让图标整体铺满槽位。
 
 重做图标的流程（原图已落库为 `SSTool_源图.png`）：
 
 ```powershell
-# 原比例模式（SSTool.ico 用这个）
-.venv\Scripts\python.exe tools\make_icons.py SSTool_源图.png SSTool.ico --natural
+# 生成 SSTool.ico（方形帧）
+.venv\Scripts\python.exe tools\make_icons.py SSTool_源图.png SSTool.ico
 # 把原图从现有 .ico 里取出来（裁掉透明边），换素材时用
 .venv\Scripts\python.exe tools\make_icons.py SSTool.ico SSTool_源图.png --extract
-# 方形模式（软件本体图标 SpriteSheetTool.ico 用这个）
-.venv\Scripts\python.exe tools\make_icons.py 源图.png SpriteSheetTool.ico
-.venv\Scripts\python.exe tools\inspect_icon.py SSTool.ico    # 校验尺寸表
-.venv\Scripts\python.exe tools\verify_icon_ratio.py         # 校验比例与占满
+.venv\Scripts\python.exe tools\inspect_icon.py SSTool.ico          # 校验尺寸表
+.venv\Scripts\python.exe tools\verify_icon_ratio.py                # 文件层：方形帧 + 比例 + 铺满
+.venv\Scripts\python.exe tools\verify_icon_imagelist.py            # shell 层：真实显示不变形
 ```
-
-方形模式下源图长宽比不是 1:1 时两侧会透明（不拉伸、不裁切）；若想让图标铺满槽位，
-加 `--tile "#FB5582"` 铺一层品牌色圆角底。
 
 
 ### 导入 / 往返保真度
@@ -324,9 +328,10 @@ settings_dialog / settings   是叶子（只被 main_window 引用），不反�
 | `verify_export_names.py` | 导出选项默认值与顺序 + 同名文件处理回归 |
 | `verify_updater.py` | 更新检查端到端核对（地址可达 / 证书严格校验 / 版本列表解析） |
 | `inspect_project_file.py` | 实存一个工程并检查其文件布局与缩略图 |
-| `make_icons.py` | 从源 PNG 生成多尺寸 `.ico`（方形模式 / `--natural` 原比例模式 / `--extract` 取原图） |
+| `make_icons.py` | 从源 PNG 生成多尺寸 `.ico`（方形帧；`--extract` 取原图；`--frames` 导出等比缩放序列） |
 | `inspect_icon.py` | 打印 `.ico` 内嵌尺寸表并校验是否全是标准方形尺寸 |
-| `verify_icon_ratio.py` | 图标比例回归（每档等比例、实心占满整帧、本体图标仍是方形） |
+| `verify_icon_ratio.py` | 图标文件层回归（方形帧 / 图比例不变 / 按高度铺满 / 逐档独立缩放） |
+| `verify_icon_imagelist.py` | 图标**显示**层回归（走 `SHGetFileInfo` 真实路径，确认没被拉伸压扁；含自检） |
 
 > `verify_move.py` / `verify_class_members.py` 需要传入「改动前 / 改动后」两个文件路径，
 > 是重构期间的一次性取证工具，不带参数运行会以 `IndexError` 退出，这是预期的。
