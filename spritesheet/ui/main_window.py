@@ -35,6 +35,10 @@ from .preview import ActionPreviewWidget
 from .transform import action_frame_pixmap
 from .widgets import ActionCardWidget, ActionItemDelegate, _APP_ROOT, make_logo_pixmap
 
+# 工程文件缩略图的长边尺寸：资源管理器按 96/256 显示，192 在"看得清"和
+# "文件不变胖"之间比较平衡（.sstool 以这张 PNG 开头）。
+_THUMB_LONG_SIDE = 192
+
 
 # 主窗口
 # 主窗口
@@ -320,26 +324,40 @@ class MainWindow(QMainWindow):
             thumb = add_pixmap("thumbnail.png", action_frame_pixmap(viewer.current_action, index))
         if thumb is None:
             thumb = add_pixmap("thumbnail.png", viewer._pixmap)
-        # Keep a small project-file badge inside the embedded thumbnail.  This
-        # is useful to thumbnail-capable file browsers without changing the
-        # application's own SpriteSheetTool icon.
+        # 工程文件缩略图：归一尺寸后在右下角叠加 工程图标.png 角标。
+        # .sstool 会以这张 PNG 开头，资源管理器（配好图片缩略图处理器后）直接显示它，
+        # 所以这张图要经得起"被缩到 96px 显示"：太小则角标盖住内容，太大则文件变胖。
         if thumb and "thumbnail.png" in sections:
-            badge = QPixmap(str(_APP_ROOT / "工程图标.png"))
             preview_pm = _pixmap_from_bytes(sections["thumbnail.png"])
-            if not badge.isNull() and not preview_pm.isNull():
-                side = max(24, min(preview_pm.width(), preview_pm.height()) // 5)
-                badge = badge.scaled(
-                    side, side,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                painter = QPainter(preview_pm)
-                painter.drawPixmap(
-                    preview_pm.width() - badge.width() - 4,
-                    preview_pm.height() - badge.height() - 4,
-                    badge,
-                )
-                painter.end()
+            badge = QPixmap(str(_APP_ROOT / "工程图标.png"))
+            if not preview_pm.isNull():
+                long_side = max(preview_pm.width(), preview_pm.height())
+                if long_side > 0 and long_side != _THUMB_LONG_SIDE:
+                    scale = _THUMB_LONG_SIDE / long_side
+                    # 放大用最近邻（精灵图多为像素画，平滑会糊），缩小才用平滑
+                    mode = (Qt.TransformationMode.FastTransformation if scale > 1.0
+                            else Qt.TransformationMode.SmoothTransformation)
+                    preview_pm = preview_pm.scaled(
+                        max(1, round(preview_pm.width() * scale)),
+                        max(1, round(preview_pm.height() * scale)),
+                        Qt.AspectRatioMode.IgnoreAspectRatio,
+                        mode,
+                    )
+                if not badge.isNull():
+                    side = max(16, min(preview_pm.width(), preview_pm.height()) // 4)
+                    margin = max(2, side // 8)
+                    badge = badge.scaled(
+                        side, side,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                    painter = QPainter(preview_pm)
+                    painter.drawPixmap(
+                        preview_pm.width() - badge.width() - margin,
+                        preview_pm.height() - badge.height() - margin,
+                        badge,
+                    )
+                    painter.end()
                 sections["thumbnail.png"] = _pixmap_bytes(preview_pm)
         manifest = {
             "format": "spritesheet-tool-project", "version": 1,

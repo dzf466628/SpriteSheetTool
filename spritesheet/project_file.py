@@ -3,6 +3,15 @@
 The format is intentionally not an archive.  It is a small binary container
 with a JSON manifest and length-delimited PNG sections, similar in spirit to
 an editor document with embedded assets.
+
+**文件布局（v2，2026-09 起）**：为了让资源管理器能直接显示工程内容缩略图，
+``.sstool`` 文件以一张**合法 PNG** 开头（就是工程里存的那张带角标的缩略图），
+容器数据紧接在 PNG 的 IEND 之后：
+
+    [ PNG 图像数据 … IEND ] [ MAGIC + header + manifest + sections ]
+
+系统图片解码器读到 IEND 即停，尾部数据被忽略；本程序从 PNG 结束处开始解析容器。
+旧版（v1，容器在最前）仍可正常读取，只是那种文件没有可显示的缩略图。
 """
 from __future__ import annotations
 
@@ -20,11 +29,42 @@ _SECTION = struct.Struct("<HQ")       # name length, payload length
 MAX_MANIFEST = 64 * 1024 * 1024
 MAX_SECTION = 2 * 1024 * 1024 * 1024
 
+# PNG 头部魔数；缩略图 section 的名字（位于文件最前的那张图）
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+THUMB_SECTION = "thumbnail.png"
+
+
+def png_image_end(data: bytes) -> int | None:
+    """返回 PNG 数据的结束偏移（IEND 之后）；不是合法 PNG 时返回 None。
+
+    按块结构逐个跳过，而不是搜索 ``IEND`` 字面量 —— 后者可能出现在块数据里。
+    """
+    if not data.startswith(PNG_SIGNATURE):
+        return None
+    off = len(PNG_SIGNATURE)
+    total = len(data)
+    while off + 12 <= total:
+        length = struct.unpack_from(">I", data, off)[0]
+        ctype = data[off + 4:off + 8]
+        off += 12 + length            # 长度(4) + 类型(4) + 数据 + CRC(4)
+        if ctype == b"IEND":
+            return off if off <= total else None
+        if length > MAX_SECTION:      # 明显异常，避免无界循环
+            return None
+    return None
+
 
 def write_project(path: str | Path, manifest: dict, sections: dict[str, bytes]) -> None:
     """Write a complete project atomically as one binary .sstool file."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    # 缩略图提到文件最前（成为 .sstool 的"脸"），避免在容器里重复存一份
+    sections = dict(sections)
+    leading_png = sections.pop(THUMB_SECTION, b"")
+    if leading_png and png_image_end(leading_png) is None:
+        # 不是合法 PNG：放回容器，退回「无前置缩略图」的旧布局
+        sections[THUMB_SECTION] = leading_png
+        leading_png = b""
     manifest_bytes = json.dumps(
         manifest, ensure_ascii=False, separators=(",", ":")
     ).encode("utf-8")
@@ -32,6 +72,10 @@ def write_project(path: str | Path, manifest: dict, sections: dict[str, bytes]) 
         raise ValueError("工程清单过大")
     temp = target.with_name(target.name + ".tmp")
     with temp.open("wb") as fh:
+        # ① 前置图片：让 .sstool 本身是一张合法 PNG（资源管理器缩略图用）
+        if leading_png:
+            fh.write(leading_png)
+        # ② 容器正文
         fh.write(_HEADER.pack(MAGIC, VERSION, len(manifest_bytes), len(sections)))
         fh.write(manifest_bytes)
         for name, payload in sections.items():
@@ -47,9 +91,18 @@ def write_project(path: str | Path, manifest: dict, sections: dict[str, bytes]) 
 
 
 def read_project(path: str | Path) -> tuple[dict, dict[str, bytes]]:
-    """Read and validate a single-file project."""
+    """Read and validate a single-file project.
+
+    兼容两种布局：v2（文件以合法 PNG 开头，容器在 IEND 之后）与
+    v1（容器在最前）。前置图片会在读取时补回 ``sections["thumbnail.png"]``，
+    让上层看到的 section 集合与写入前一致。
+    """
     source = Path(path)
+    data = source.read_bytes()
+    offset = png_image_end(data) or 0        # 前置 PNG 的结束位置（无前置图则为 0）
+    leading_png = data[:offset]
     with source.open("rb") as fh:
+        fh.seek(offset)
         header = fh.read(_HEADER.size)
         if len(header) != _HEADER.size:
             raise ValueError("工程文件不完整")
@@ -82,6 +135,8 @@ def read_project(path: str | Path) -> tuple[dict, dict[str, bytes]]:
             if name in sections:
                 raise ValueError(f"工程资源重复：{name}")
             sections[name] = payload
+    if leading_png and THUMB_SECTION not in sections:
+        sections[THUMB_SECTION] = leading_png      # 前置图即缩略图，补回 section
     return manifest, sections
 
 
