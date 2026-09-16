@@ -374,6 +374,7 @@ settings_dialog / settings   是叶子（只被 main_window 引用），不反�
 | `verify_header.py` | 顶部名称栏回归（无图标 / 首字母更大 / 两段垂直中心对齐） |
 | `verify_tabs.py` | 工程标签页回归（位置 / 新建 / 切换不串味 / 改名 / 关闭 / 标签栏逐像素） |
 | `verify_single_instance.py` | 单实例回归（协议 / 探测 / 真起第二个进程的端到端转发） |
+| `inspect_theme.py` | 界面配色**诊断**（不是断言）：整窗渲染找"成条的浅色区域"并打印各部件颜色 |
 | `verify_settings.py` | 软件设置回归（默认值 / 关掉后不写缩略图 / 描边分层 / 弹窗接线） |
 | `verify_roundtrip.py` | 导出→导入逐字段往返审计（四种 JSON 格式，含逐帧像素与帧间位移） |
 | `profile_hotpaths.py` | 热路径采样（先测再改：重绘 / 打包 / 导出 / 检测） |
