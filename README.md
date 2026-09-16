@@ -63,7 +63,8 @@ python -m venv .venv
 
 ### 工程标签页（多工程）
 
-窗口**底部**有一条矮标签栏（26px），像 PS 的文档标签：
+窗口里从上到下是：菜单栏 → 软件名 → **工程标签栏**（26px 矮条）→ 内容区 → 状态栏。
+标签栏像 PS 的文档标签：
 
 | 操作 | 结果 |
 | --- | --- |
@@ -85,12 +86,29 @@ python -m venv .venv
 > 撤销栈是**每个文档一份**，切标签时会把 编辑 → 撤销 重新接到当前文档那份上。
 > 退出时若有多个未保存的工程，会一次性列出来问"全部保存 / 不保存退出 / 取消"。
 
+### 单实例（同时只跑一个窗口）
+
+整个系统只允许一个 SpriteSheetTool 进程。**第二次启动（含双击 `.sstool` 文件关联打开）
+不会开新窗口**，而是把文件转给已经在跑的实例，由它**开一个新标签页**，自己随即退出。
+
+- 机制：`QLocalServer`/`QLocalSocket`（Windows 上是命名管道，不需要管理员权限），
+  服务名固定为 `SpriteSheetTool.single-instance` —— 不带版本号，所以装了新版本后
+  从旧版本入口打开也能落到同一个窗口。
+- 文件转过去之后会把窗口提到前面。
+- 自己核对过：第二个进程 **0.2 秒**退出、退出码 0，主实例收到完整路径
+  （`tools/verify_single_instance.py`，含真的再起一个进程的端到端用例）。
+- 两个坑记在 `spritesheet/single_instance.py` 注释里：客户端写完立刻断开会把数据丢掉
+  （要等 ACK 才能走）、`listen()` 之前必须无条件 `removeServer()`（否则被强杀后会留下
+  连不上的僵尸服务名）。
+
 ### 顶部名称栏
 
 只有软件名，没有图标（原来左侧那个 54×54 白边图标已去掉）。
-软件名首字母 `S` 用 30px、其余 22px，两段**垂直中心对齐**（`AppNameLabel`）。
+软件名首字母 `S` 用 30px、其余 22px，两段**垂直中心对齐**（`AppNameLabel`）；
+版本号跟在名字后面，与名字**共用同一条基线**（也就是底对齐）。
 不用 QLabel 富文本的原因：Qt 富文本按基线对齐，放大首字母会整块往上冒，
 看起来是"吊在上面"而不是上下居中 —— 所以这里按墨迹盒自己算基线。
+名称控件高 54、名称栏高 64，下边缘留 5px，不会越界去盖住下面的标签栏。
 
 ### 导出格式
 
@@ -264,6 +282,7 @@ SpriteSheetTool/
     ├── importer.py             # JSON 工程导入（TP/Aseprite/本工具格式）
     ├── project_file.py         # .sstool 工程读写 + QPixmap/JSON 片段辅助
     ├── settings.py             # 软件设置键值（QSettings，工程缩略图开关）
+    ├── single_instance.py      # 单实例守卫（QLocalServer/Socket 转发打开请求）
     ├── updater.py              # 自动更新（版本检查/下载）
     └── ui/
         ├── main_window.py      # 主窗口装配 + 更新下载弹窗 + 撤销命令
@@ -353,7 +372,8 @@ settings_dialog / settings   是叶子（只被 main_window 引用），不反�
 | `verify_composite_badges.py` | 合成帧色块排版回归（多动作合成同一组元素时不得互相遮盖） |
 | `verify_menu.py` | 菜单结构与顺序回归（含「检查更新」已移出文件菜单） |
 | `verify_header.py` | 顶部名称栏回归（无图标 / 首字母更大 / 两段垂直中心对齐） |
-| `verify_tabs.py` | 工程标签页回归（新建 / 切换不串味 / 改名 / 关闭 / 标签栏逐像素） |
+| `verify_tabs.py` | 工程标签页回归（位置 / 新建 / 切换不串味 / 改名 / 关闭 / 标签栏逐像素） |
+| `verify_single_instance.py` | 单实例回归（协议 / 探测 / 真起第二个进程的端到端转发） |
 | `verify_settings.py` | 软件设置回归（默认值 / 关掉后不写缩略图 / 描边分层 / 弹窗接线） |
 | `verify_roundtrip.py` | 导出→导入逐字段往返审计（四种 JSON 格式，含逐帧像素与帧间位移） |
 | `profile_hotpaths.py` | 热路径采样（先测再改：重绘 / 打包 / 导出 / 检测） |
