@@ -10,6 +10,9 @@ import json
 import struct
 from pathlib import Path
 
+from PyQt6.QtCore import QByteArray, QBuffer, QIODevice
+from PyQt6.QtGui import QPixmap
+
 MAGIC = b"SSTOOL\x00\x01"
 VERSION = 1
 _HEADER = struct.Struct("<8sIQI")  # magic, version, manifest length, section count
@@ -80,32 +83,6 @@ def read_project(path: str | Path) -> tuple[dict, dict[str, bytes]]:
                 raise ValueError(f"工程资源重复：{name}")
             sections[name] = payload
     return manifest, sections
-
-
-# ---------------- QPixmap / JSON 片段辅助 ----------------
-# 原 main_window.py 顶部的工程序列化工具函数（按 SPLIT_GUIDE §5.3 归到本模块）。
-def _rect_from_dict(d: dict) -> tuple[int, int, int, int]:
-    """把 JSON 里的 rect 字典转成 (x, y, w, h) 元组。"""
-    return (int(d.get("x", 0)), int(d.get("y", 0)),
-            int(d.get("width", d.get("w", 0))), int(d.get("height", d.get("h", 0))))
-
-
-def _pixmap_bytes(pm: QPixmap | None) -> bytes:
-    if pm is None or pm.isNull():
-        return b""
-    data = QByteArray()
-    buffer = QBuffer(data)
-    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-    pm.save(buffer, "PNG")
-    buffer.close()
-    return bytes(data)
-
-
-def _pixmap_from_bytes(data: bytes) -> QPixmap:
-    pm = QPixmap()
-    if data:
-        pm.loadFromData(data, "PNG")
-    return pm
 
 
 # ---------------- QPixmap / JSON 片段辅助 ----------------

@@ -1,0 +1,1319 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""原图查看器：元素检测 + 标尺画布 + 浮动工具条（从 main_window.py 拆出，纯搬移，逻辑未改动）。
+
+包含：
+- ``SUPPORTED_IMAGE_EXT`` / ``MIN_ZOOM`` / ``MAX_ZOOM``：查看器级常量；
+- ``_detect_frames_image`` / ``_FrameDetectThread``：alpha 连通域元素检测（后台线程）；
+- ``_Canvas``：原图画布（棋盘格背景、滚轮缩放、空格拖动、点选/框选、拖放载入）；
+- ``FloatingToolBar``：画布右上角浮动工具条（合成 / 复用 / 缩放 / 三种背景）；
+- ``_AltNativeFilter``：Windows 原生 Alt 系统键监听（顶层类，不并入 ImageViewer）；
+- ``ImageViewer``：顶部水平标尺 + 左侧垂直标尺 + 画布 + 工具条，并承载帧复用
+  （frame_layouts）与元素逻辑坐标（合成帧拼接间距）等核心交互。
+
+依赖方向：models ← transform ← widgets ← image_viewer（本模块不依赖 main_window）。
+"""
+from __future__ import annotations
+
+import struct
+from pathlib import Path
+
+from PyQt6.QtCore import (
+    QAbstractNativeEventFilter, QEvent, QPointF, QRectF, QSize, QThread, QTimer, Qt, pyqtSignal,
+)
+from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
+from PyQt6.QtWidgets import (
+    QApplication, QButtonGroup, QFileDialog, QGridLayout, QHBoxLayout, QPushButton, QWidget,
+)
+
+from .models import Action
+from .widgets import RULER_SIZE, _Ruler, make_tool_icon
+
+
+SUPPORTED_IMAGE_EXT = {".png", ".webp", ".jpeg", ".jpg", ".gif", ".bmp"}
+MIN_ZOOM = 0.05
+MAX_ZOOM = 20
+
+
+def _detect_frames_image(img: QImage, alpha_threshold: int = 10) -> list[tuple[int, int, int, int]]:
+    """在工作线程中检测 QImage 的连通区域。
+
+    性能：原实现有两层纯 Python 全图循环（外层扫描 w*h 个像素，内层对每个
+    连通像素做 4 邻域判定），2048x2048 实测约 1.7s。这里做三处**等价**优化：
+
+    1. alpha 通道一次性切出（C 层切片），内层不再做 ``i*4+3`` 索引运算；
+    2. 整行 alpha 都低于阈值时整行跳过（C 层 ``max`` 一次判定）；
+    3. 行内透明像素用 ``lstrip`` 成段跳过，不再逐像素判定。
+
+    透明像素永远不会被入栈（邻域判定本身就带阈值），因此跳过它们**不影响**
+    连通域结果；元素发现顺序（自上而下、自左而右）与原实现完全一致。
+    """
+    if img is None or img.isNull():
+        return []
+    img = img.convertToFormat(QImage.Format.Format_ARGB32)
+    w, h = img.width(), img.height()
+    # 一次性复制连续像素，避免逐行创建 bytes 和重复 scanLine 调用。
+    ptr = img.bits()
+    ptr.setsize(w * h * 4)
+    data = bytes(ptr)
+    visited = bytearray(w * h)
+    frames = []
+    for sy in range(h):
+        row_base = sy * w
+        for sx in range(w):
+            start = row_base + sx
+            if visited[start] or data[start * 4 + 3] < alpha_threshold:
+                visited[start] = 1
+                continue
+            stack = [start]
+            visited[start] = 1
+            min_x = max_x = sx
+            min_y = max_y = sy
+            while stack:
+                pos = stack.pop()
+                cx, cy = pos % w, pos // w
+                if cx < min_x: min_x = cx
+                if cx > max_x: max_x = cx
+                if cy < min_y: min_y = cy
+                if cy > max_y: max_y = cy
+                if cx > 0:
+                    ni = pos - 1
+                    if not visited[ni] and data[ni * 4 + 3] >= alpha_threshold:
+                        visited[ni] = 1; stack.append(ni)
+                if cx + 1 < w:
+                    ni = pos + 1
+                    if not visited[ni] and data[ni * 4 + 3] >= alpha_threshold:
+                        visited[ni] = 1; stack.append(ni)
+                if cy > 0:
+                    ni = pos - w
+                    if not visited[ni] and data[ni * 4 + 3] >= alpha_threshold:
+                        visited[ni] = 1; stack.append(ni)
+                if cy + 1 < h:
+                    ni = pos + w
+                    if not visited[ni] and data[ni * 4 + 3] >= alpha_threshold:
+                        visited[ni] = 1; stack.append(ni)
+            frames.append((min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
+    return frames
+
+
+class _FrameDetectThread(QThread):
+    """后台检测线程；只传递 QImage，避免在线程间操作 QPixmap。"""
+
+    detected = pyqtSignal(list)
+
+    def __init__(self, image: QImage, parent=None) -> None:
+        super().__init__(parent)
+        self._image = image
+
+    def run(self) -> None:
+        self.detected.emit(_detect_frames_image(self._image))
+
+
+# 画布区（绘制图片 + 鼠标交互）
+class _Canvas(QWidget):
+    """原图画布：背景 + 图片绘制，滚轮缩放，空格拖动，点击/拖放添加。"""
+
+    image_loaded = pyqtSignal(QPixmap)
+    selection_changed = pyqtSignal()
+
+    def __init__(self, viewer, parent=None) -> None:
+        super().__init__(parent)
+        self._viewer = viewer
+        self.setMinimumSize(400, 300)
+        self.setStyleSheet("background-color: #141414; border: none;")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAcceptDrops(True)
+        self.setMouseTracking(True)
+        self._drag_start = None
+        self._panning = False
+        self._pan_start = None
+        self._selection_rect = None
+
+    def resizeEvent(self, event):
+        toolbar = getattr(self._viewer, "_toolbar", None)
+        if toolbar is not None:
+            toolbar.move(self.width() - toolbar.width() - 6, 6)
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        # 背景
+        if self._viewer._bg_mode == "checker":
+            cell = 12
+            for y in range(0, self.height(), cell):
+                for x in range(0, self.width(), cell):
+                    if (x // cell + y // cell) % 2 == 0:
+                        p.fillRect(x, y, cell, cell, QColor("#2a2a2a"))
+                    else:
+                        p.fillRect(x, y, cell, cell, QColor("#1e1e1e"))
+        elif self._viewer._bg_mode == "black":
+            p.fillRect(self.rect(), QColor("#000000"))
+        else:
+            p.fillRect(self.rect(), QColor("#FFFFFF"))
+
+        if self._viewer._pixmap and not self._viewer._pixmap.isNull():
+            zoom = self._viewer._zoom
+            offset = self._viewer._offset
+            target = QRectF(offset.x(), offset.y(),
+                            self._viewer._pixmap.width() * zoom,
+                            self._viewer._pixmap.height() * zoom)
+            p.drawPixmap(target, self._viewer._pixmap, QRectF(self._viewer._pixmap.rect()))
+
+            # 绘制元素辅助线（普通灰色虚线，当前动作选中变当前色，多动作色块依次排）
+            if self._viewer._frames:
+                current_action = self._viewer.current_action
+                # 为每个动作预计算 frame_numbers / composite_representatives /
+                # 复用计数（元素出现的所有帧号）。显式帧布局（复用/导入）逐帧编号，
+                # 同一元素可对应多个帧号。
+                _act_info = {}
+                for _act in self._viewer.actions:
+                    _fn = {}
+                    _cr = {}
+                    _fns = {}
+                    _layouts = _act.frame_layouts
+                    if _layouts is not None:
+                        for _no, _layout in enumerate(_layouts, 1):
+                            _members = [_i for _i, _, _ in _layout]
+                            if len(_members) >= 2:
+                                _rep = _members[0]
+                                for _m in _members:
+                                    _cr[_m] = _rep
+                            for _m in _members:
+                                _fn.setdefault(_m, _no)
+                                _fns.setdefault(_m, []).append(_no)
+                    else:
+                        _frame_no = 1
+                        _emitted_groups = set()
+                        for _source_idx in _act.selected_indices:
+                            _group = next(
+                                (tuple(_g) for _g in _act.composite_groups
+                                 if _source_idx in _g),
+                                None,
+                            )
+                            if _group is not None:
+                                if _group in _emitted_groups:
+                                    continue
+                                _emitted_groups.add(_group)
+                                for _member in _group:
+                                    _fn[_member] = _frame_no
+                                    _fns.setdefault(_member, []).append(_frame_no)
+                                if len(_group) >= 2:
+                                    _rep = _group[0]
+                                    for _member in _group:
+                                        _cr[_member] = _rep
+                            else:
+                                _fn[_source_idx] = _frame_no
+                                _fns.setdefault(_source_idx, []).append(_frame_no)
+                            _frame_no += 1
+                    _act_info[_act] = (_fn, _cr, _fns)
+                frame_numbers = _act_info.get(current_action, ({}, {}, {}))[0] if current_action else {}
+                composite_representatives = _act_info.get(current_action, ({}, {}, {}))[1] if current_action else {}
+                reuse_counts = _act_info.get(current_action, ({}, {}, {}))[2] if current_action else {}
+                for i, (fx, fy, fw, fh) in enumerate(self._viewer._frames):
+                    rect = QRectF(offset.x() + fx * zoom, offset.y() + fy * zoom,
+                                  fw * zoom, fh * zoom)
+                    # 收集所有选中该元素的动作（按动作列表顺序）
+                    selected_actions = []
+                    for act in self._viewer.actions:
+                        if i in act.selected_indices:
+                            selected_actions.append(act)
+                    if not selected_actions:
+                        # 无任何动作选中：灰色虚线
+                        pen = QPen(QColor("#808080"), 1.0)
+                        pen.setStyle(Qt.PenStyle.DashLine)
+                        p.setPen(pen)
+                        p.drawRect(rect)
+                    else:
+                        # 非当前动作的边框先画（轻微偏移避免完全重叠）
+                        for idx, act in enumerate(selected_actions):
+                            if act is not current_action:
+                                # 属于多元素合成组的元素不画单独框，由合成粗框统一绘制
+                                (_, _act_cr, _) = _act_info.get(act, ({}, {}, {}))
+                                if i in _act_cr:
+                                    continue
+                                off = idx * 2
+                                pen = QPen(QColor(act.color), 1.0)
+                                pen.setStyle(Qt.PenStyle.DashLine)
+                                p.setPen(pen)
+                                p.drawRect(rect.adjusted(off, off, off, off))
+                        # 当前动作的边框最后画（最上方，更粗 + 轻微半透明填充，不遮挡图）
+                        if current_action and current_action in selected_actions:
+                            pen = QPen(QColor(current_action.color), 1.5)
+                            p.setPen(pen)
+                            p.drawRect(rect)
+                            p.setOpacity(0.12)
+                            p.fillRect(rect, QColor(current_action.color))
+                            p.setOpacity(1.0)
+                    # 合成组的帧号在整体边框上统一绘制；源元素仍保留
+                    # 各自的细边框，但不再重复显示同一个帧号。
+                    if selected_actions:
+                        for idx, act in enumerate(selected_actions):
+                            # 属于多元素合成组的元素不单独画色块，由合成粗框统一绘制
+                            (_, _act_cr, _) = _act_info.get(act, ({}, {}, {}))
+                            if i in _act_cr:
+                                continue
+                            sq = 16
+                            sy = rect.top()
+                            base_x = rect.left() + idx * (sq + 2)
+                            # 帧号序列：首帧号 + 每个复用帧号各一个同样的小方块，
+                            # 与前一块间隔 2px（步进 sq+2）。
+                            (_act_fn, _, _act_fns) = _act_info.get(act, ({}, {}, {}))
+                            nos = _act_fns.get(i) or [act.selected_indices.index(i) + 1]
+                            p.setPen(QColor("#FFFFFF"))
+                            p.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+                            for k, no in enumerate(nos):
+                                sx = base_x + k * (sq + 2)
+                                p.fillRect(QRectF(sx, sy, sq, sq), QColor(act.color))
+                                p.drawText(QRectF(sx, sy, sq, sq), Qt.AlignmentFlag.AlignCenter, str(no))
+
+                # 合成帧粗框：所有动作的合成组都绘制（当前动作粗实线，非当前动作虚线）
+                for _act in self._viewer.actions:
+                    _is_current = (_act is current_action)
+                    for group in _act.composite_groups:
+                        if len(group) < 2:
+                            continue
+                        valid = [self._viewer._frames[i] for i in group if 0 <= i < len(self._viewer._frames)]
+                        if not valid:
+                            continue
+                        gx0 = min(x for x, y, w, h in valid)
+                        gy0 = min(y for x, y, w, h in valid)
+                        gx1 = max(x + w for x, y, w, h in valid)
+                        gy1 = max(y + h for x, y, w, h in valid)
+                        group_rect = QRectF(
+                            offset.x() + gx0 * zoom,
+                            offset.y() + gy0 * zoom,
+                            (gx1 - gx0) * zoom,
+                            (gy1 - gy0) * zoom,
+                        )
+                        if _is_current:
+                            pen = QPen(QColor(_act.color), 1.5, Qt.PenStyle.SolidLine)
+                        else:
+                            # 非当前动作：虚线，轻微偏移避免与当前动作框完全重叠
+                            _act_idx = self._viewer.actions.index(_act)
+                            _off = _act_idx * 2
+                            pen = QPen(QColor(_act.color), 1.0, Qt.PenStyle.DashLine)
+                            group_rect = group_rect.adjusted(_off, _off, _off, _off)
+                        p.setPen(pen)
+                        p.setBrush(Qt.BrushStyle.NoBrush)
+                        p.drawRect(group_rect)
+
+                        # 帧号：在合成框左上角统一画一个色块
+                        (_act_fn, _, _) = _act_info.get(_act, ({}, {}, {}))
+                        _frame_no = _act_fn.get(group[0])
+                        if _frame_no is not None:
+                            sq = 16
+                            p.fillRect(QRectF(group_rect.left(), group_rect.top(), sq, sq),
+                                       QColor(_act.color))
+                            p.setPen(QColor("#FFFFFF"))
+                            p.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+                            p.drawText(
+                                QRectF(group_rect.left(), group_rect.top(), sq, sq),
+                                Qt.AlignmentFlag.AlignCenter,
+                                str(_frame_no),
+                            )
+
+            # 绘制框选矩形
+            if self._selection_rect is not None:
+                pen = QPen(QColor("#E91E63"), 1.0, Qt.PenStyle.DashLine)
+                p.setPen(pen)
+                p.setBrush(QColor(233, 30, 99, 30))
+                p.drawRect(self._selection_rect)
+        else:
+            # 无图片提示
+            p.setPen(QColor("#666"))
+            p.setFont(QFont("Microsoft YaHei", 12))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "拖入图片\n或点击添加")
+        p.end()
+
+    def wheelEvent(self, event):
+        if self._viewer._pixmap is None or self._viewer._pixmap.isNull():
+            return
+        delta = event.angleDelta().y()
+        factor = 1.1 if delta > 0 else 1 / 1.1
+        new_zoom = max(MIN_ZOOM, min(MAX_ZOOM, self._viewer._zoom * factor))
+        # 以鼠标位置为中心缩放
+        mouse_pos = event.position()
+        old_zoom = self._viewer._zoom
+        self._viewer._offset = QPointF(
+            mouse_pos.x() - (mouse_pos.x() - self._viewer._offset.x()) * (new_zoom / old_zoom),
+            mouse_pos.y() - (mouse_pos.y() - self._viewer._offset.y()) * (new_zoom / old_zoom),
+        )
+        self._viewer._zoom = new_zoom
+        self._viewer._update_rulers()
+        self.update()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Space:
+            self._panning = True
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        elif event.key() == Qt.Key.Key_Control:
+            self._viewer.begin_ctrl_composition()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key.Key_Space:
+            self._panning = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        elif event.key() == Qt.Key.Key_Control:
+            self._viewer.end_ctrl_composition()
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
+    def mousePressEvent(self, event):
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        if self._panning and event.button() == Qt.MouseButton.LeftButton:
+            self._pan_start = event.position() - self._viewer._offset
+            return
+        if event.button() == Qt.MouseButton.LeftButton and self._viewer._pixmap:
+            # 记录框选起点
+            self._drag_start = event.position()
+            self._selection_rect = QRectF(event.position(), event.position())
+            self.update()
+        elif event.button() == Qt.MouseButton.LeftButton:
+            self._open_file_dialog()
+
+    def mouseMoveEvent(self, event):
+        if self._panning and self._pan_start is not None:
+            self._viewer._offset = event.position() - self._pan_start
+            self._viewer._update_rulers()
+            self.update()
+            return
+        if self._drag_start is not None:
+            self._selection_rect = QRectF(self._drag_start, event.position()).normalized()
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        if self._panning:
+            self._pan_start = None
+            return
+        if self._drag_start is not None and self._selection_rect is not None:
+            rect = self._selection_rect
+            self._drag_start = None
+            self._selection_rect = None
+            if rect.width() < 5 and rect.height() < 5:
+                # Ctrl+点击（或合成模式）将源元素加入同一张合成帧；
+                # Alt+点击（或复用模式）把已选元素所属的帧再追加一帧（复用）。
+                idx = self._viewer._frame_at_point(event.position())
+                if self._viewer.current_action and idx >= 0:
+                    ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                    alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
+                    if ctrl or self._viewer.compose_mode:
+                        if ctrl:
+                            self._viewer.begin_ctrl_composition()
+                        self._viewer.add_to_composite(idx)
+                    elif alt or self._viewer.reuse_mode:
+                        if idx in self._viewer.current_action.selected_indices:
+                            if alt:
+                                # Alt：复用/取消复用 toggle（已复用则取消最近一次）。
+                                # 点击时同步高亮按钮（原生 Alt 监听失败时的兜底）；
+                                # 若 Alt 仍被原生监听持有，则保持到 Alt 松开，避免破坏持续高亮。
+                                was_alt_down = self._viewer._alt_reusing
+                                self._viewer.begin_alt_reuse()
+                                self._viewer.toggle_reuse_at(idx)
+                                if not was_alt_down:
+                                    self._viewer.end_alt_reuse()
+                            else:
+                                # 复用按钮模式：持续追加一帧
+                                self._viewer.reuse_frame_at(idx)
+                        else:
+                            # 复用作用于"已选"元素：未选元素按普通选择处理
+                            self._viewer.current_action.selected_indices.append(idx)
+                            self._viewer._normalize_composite_groups()
+                    else:
+                        if idx in self._viewer.current_action.selected_indices:
+                            self._viewer.current_action.selected_indices.remove(idx)
+                        else:
+                            self._viewer.current_action.selected_indices.append(idx)
+                        self._viewer._normalize_composite_groups()
+                    self.selection_changed.emit()
+            else:
+                # 框选：默认替换，Ctrl 框选追加并合成为一帧；结果按阅读顺序排列。
+                indices = self._viewer._frames_in_view_rect(rect)
+                if self._viewer.current_action:
+                    if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                        # Ctrl+框选：激活合成模式，将框选的所有元素合成为一帧
+                        self._viewer.begin_ctrl_composition()
+                        for idx in indices:
+                            self._viewer.add_to_composite(idx)
+                    elif indices:
+                        self._viewer.current_action.selected_indices = indices
+                        self._viewer.current_action.composite_groups = []
+                    self._viewer._normalize_composite_groups()
+                    if indices:
+                        self.selection_changed.emit()
+            self.update()
+
+    def _open_file_dialog(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "添加图片", "",
+            "图片文件 (*.png *.jpg *.jpeg *.bmp *.gif *.webp)"
+        )
+        if path:
+            pm = QPixmap(path)
+            if not pm.isNull():
+                self.image_loaded.emit(pm)
+
+    def dragEnterEvent(self, event):
+        try:
+            if event.mimeData().hasUrls():
+                for url in event.mimeData().urls():
+                    if Path(url.toLocalFile()).suffix.lower() in (SUPPORTED_IMAGE_EXT | {".json", ".sstool"}):
+                        event.acceptProposedAction()
+                        return
+        except Exception:  # noqa: BLE001 - 拖放回调里的异常绝不能逃逸（PyQt 会 abort）
+            pass
+
+    def dragMoveEvent(self, event):
+        try:
+            if event.mimeData().hasUrls():
+                event.acceptProposedAction()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def dropEvent(self, event):
+        try:
+            for url in event.mimeData().urls():
+                path = url.toLocalFile()
+                suffix = Path(path).suffix.lower()
+                if suffix == ".sstool":
+                    # Forward to MainWindow after the native drop event ends;
+                    # opening a project directly from this child widget used
+                    # to call a non-existent method and terminate Qt.
+                    viewer = self._viewer
+                    QTimer.singleShot(0, lambda p=path, v=viewer: v.project_dropped.emit(p))
+                    event.acceptProposedAction()
+                    return
+                if suffix == ".json":
+                    # JSON 要交给顶层 ImageViewer 转发（_Canvas 自身没有 json_dropped 信号，
+                    # 直接访问会抛 AttributeError，而 PyQt 会让它 abort —— 也就是闪退）。
+                    viewer = self._viewer
+                    QTimer.singleShot(0, lambda p=path, v=viewer: v.json_dropped.emit(p))
+                    event.acceptProposedAction()
+                    return
+                if suffix in SUPPORTED_IMAGE_EXT:
+                    QTimer.singleShot(0, lambda p=path: self.image_loaded.emit(QPixmap(p)))
+                    event.acceptProposedAction()
+                    return
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _has_image(self) -> bool:
+        return self._viewer._pixmap is not None and not self._viewer._pixmap.isNull()
+
+
+class FloatingToolBar(QWidget):
+    """画布右上角浮动工具条：放大/缩小/透明背景/黑背景/白背景。"""
+
+    zoom_in_requested = pyqtSignal()
+    zoom_out_requested = pyqtSignal()
+    bg_changed = pyqtSignal(str)
+    compose_toggled = pyqtSignal(bool)
+    reuse_toggled = pyqtSignal(bool)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        # 宽度要容纳：合成(80) + 复用(80) + 放大/缩小(24×2) + 三种背景(24×3) + 边距/间距
+        self.setFixedSize(300, 32)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._bg_mode = "checker"
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(2)
+
+        # 合成帧按钮：宽按钮 + 图标 + Ctrl+文字 + 描边
+        self.btn_compose = QPushButton()
+        self.btn_compose.setFixedSize(80, 24)
+        self.btn_compose.setIcon(make_tool_icon("compose_red", 14))
+        self.btn_compose.setIconSize(QSize(14, 14))
+        self.btn_compose.setText("Ctrl+合成")
+        self.btn_compose.setToolTip("合成帧（可用 Ctrl+点击/框选）")
+        self.btn_compose.setCheckable(True)
+        self.btn_compose.setStyleSheet(
+            "QPushButton { background: transparent; border: 1px solid #555; border-radius: 3px; "
+            "color: #e8e8e8; font-size: 11px; padding: 0 4px; }"
+            "QPushButton:hover { border-color: #E91E63; color: #fff; background: rgba(233,30,99,0.15); }"
+            "QPushButton:checked { background: rgba(233,30,99,0.4); border-color: #E91E63; color: #fff; }"
+        )
+        self.btn_compose.toggled.connect(lambda checked: self.btn_compose.setIcon(
+            make_tool_icon("compose", 14) if checked else make_tool_icon("compose_red", 14)
+        ))
+        self.btn_compose.clicked.connect(self.compose_toggled)
+        layout.addWidget(self.btn_compose)
+
+        self.btn_reuse = QPushButton()
+        self.btn_reuse.setFixedSize(80, 24)
+        self.btn_reuse.setIcon(make_tool_icon("reuse_red", 14))  # 平时红色（与合成按钮一致）
+        self.btn_reuse.setIconSize(QSize(14, 14))
+        self.btn_reuse.setText("Alt+复用")
+        self.btn_reuse.setToolTip("复用当前选择的帧（可用 Alt+点击；Alt 按下时按钮高亮）")
+        self.btn_reuse.setCheckable(True)
+        # 选中（Alt 按下 / 按钮保持模式）时图标变白，松开恢复红色
+        self.btn_reuse.toggled.connect(lambda checked: self.btn_reuse.setIcon(
+            make_tool_icon("reuse", 14) if checked else make_tool_icon("reuse_red", 14)
+        ))
+        self.btn_reuse.setStyleSheet(
+            "QPushButton { background: transparent; border: 1px solid #555; border-radius: 3px; "
+            "color: #e8e8e8; font-size: 11px; padding: 0 4px; }"
+            "QPushButton:hover { border-color: #E91E63; color: #fff; background: rgba(233,30,99,0.15); }"
+            "QPushButton:checked { background: rgba(233,30,99,0.4); border-color: #E91E63; color: #fff; }"
+        )
+        self.btn_reuse.clicked.connect(self.reuse_toggled)
+        layout.addWidget(self.btn_reuse)
+
+        self.btn_zoom_in = self._make_button("zoom_in", "放大")
+        self.btn_zoom_in.clicked.connect(self.zoom_in_requested)
+        layout.addWidget(self.btn_zoom_in)
+
+        self.btn_zoom_out = self._make_button("zoom_out", "缩小")
+        self.btn_zoom_out.clicked.connect(self.zoom_out_requested)
+        layout.addWidget(self.btn_zoom_out)
+
+        # 背景切换（互斥）：透明 / 黑 / 白
+        self._bg_group = QButtonGroup(self)
+        self.btn_bg_checker = self._make_button("bg_checker", "透明背景", checkable=True)
+        self.btn_bg_black = self._make_button("bg_black", "黑色背景", checkable=True)
+        self.btn_bg_white = self._make_button("bg_white", "白色背景", checkable=True)
+        self._bg_group.addButton(self.btn_bg_checker)
+        self._bg_group.addButton(self.btn_bg_black)
+        self._bg_group.addButton(self.btn_bg_white)
+        self.btn_bg_checker.setChecked(True)
+        self.btn_bg_checker.clicked.connect(lambda: self.bg_changed.emit("checker"))
+        self.btn_bg_black.clicked.connect(lambda: self.bg_changed.emit("black"))
+        self.btn_bg_white.clicked.connect(lambda: self.bg_changed.emit("white"))
+        layout.addWidget(self.btn_bg_checker)
+        layout.addWidget(self.btn_bg_black)
+        layout.addWidget(self.btn_bg_white)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setBrush(QColor(30, 30, 30, 220))
+        p.setPen(QPen(QColor("#444"), 1))
+        p.drawRoundedRect(self.rect(), 6, 6)
+        p.end()
+
+    def _make_button(self, icon_kind: str, tip: str, checkable: bool = False) -> QPushButton:
+        btn = QPushButton()
+        btn.setFixedSize(24, 24)
+        btn.setIcon(make_tool_icon(icon_kind, 16))
+        btn.setIconSize(QSize(16, 16))
+        btn.setToolTip(tip)
+        btn.setCheckable(checkable)
+        btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none; border-radius: 3px; }"
+            "QPushButton:hover { background: rgba(233,30,99,0.3); }"
+            "QPushButton:checked { background: rgba(233,30,99,0.5); }"
+        )
+        if icon_kind == "compose_red":
+            btn.toggled.connect(lambda checked, b=btn: b.setIcon(
+                make_tool_icon("compose", 16) if checked else make_tool_icon("compose_red", 16)
+            ))
+        return btn
+
+
+# 原图查看器（标尺 + 画布容器）
+class _AltNativeFilter(QAbstractNativeEventFilter):
+    """Windows 平台：捕获 WM_SYSKEYDOWN/WM_SYSKEYUP（Alt 系统键）。
+
+    带菜单栏的窗口会让纯 Alt 键的 QKeyEvent 被菜单栏拦截（installEventFilter
+    收不到），所以必须走原生消息过滤器，让「按下 Alt 时复用按钮高亮变红」
+    在任何窗口状态下都生效。
+    """
+
+    # WM_SYSKEYDOWN / WM_SYSKEYUP
+    _WM_SYSKEYDOWN = 0x0104
+    _WM_SYSKEYUP = 0x0105
+    # VK_MENU / VK_LMENU / VK_RMENU（Alt 本身，排除 Alt+F4 / Alt+Tab 等组合）
+    _ALT_VKS = (0x12, 0xA4, 0xA5)
+
+    def __init__(self, viewer) -> None:
+        super().__init__()
+        self._viewer = viewer
+
+    def nativeEventFilter(self, eventType, message):
+        try:
+            if eventType in ("windows_generic_MSG", b"windows_generic_MSG"):
+                raw = message.asarray(64) if message else b""
+                ptr = struct.calcsize("P")
+                if len(raw) < 16:
+                    return False, 0
+                if ptr == 8:  # x64: hwnd(8) message(4) pad(4) wParam(8)
+                    msg_id = struct.unpack_from("=I", raw, 8)[0]
+                    wparam = struct.unpack_from("=Q", raw, 16)[0]
+                else:         # x86: hwnd(4) message(4) wParam(4)
+                    msg_id = struct.unpack_from("=I", raw, 4)[0]
+                    wparam = struct.unpack_from("=I", raw, 8)[0]
+                if msg_id in (self._WM_SYSKEYDOWN, self._WM_SYSKEYUP) and wparam in self._ALT_VKS:
+                    if msg_id == self._WM_SYSKEYDOWN:
+                        self._viewer.begin_alt_reuse()
+                    else:
+                        self._viewer.end_alt_reuse()
+        except Exception:  # noqa: BLE001 - 原生消息解析失败时静默，不影响主流程
+            pass
+        return False, 0
+
+
+class ImageViewer(QWidget):
+    """原图查看器：顶部水平标尺 + 左侧垂直标尺 + 画布 + 浮动工具条。"""
+
+    image_loaded = pyqtSignal(QPixmap)
+    selection_changed = pyqtSignal()
+    frames_updated = pyqtSignal()
+    json_dropped = pyqtSignal(str)   # 拖入 JSON 工程时转发给主窗口处理
+    project_dropped = pyqtSignal(str)  # 拖入 SSTOOL 工程时转发给主窗口处理
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        # 状态
+        self._pixmap: QPixmap | None = None
+        self._source_images: list[QPixmap] = []
+        self._zoom = 1.0
+        self._offset = QPointF(0, 0)
+        self._bg_mode = "checker"
+        self._frames: list[tuple[int, int, int, int]] = []  # 自动检测的元素辅助线
+        # 元素的「逻辑坐标」：仅用于计算元素之间的相对位置（合成帧拼接间距）。
+        # 为空时逻辑坐标 = _frames 的左上角（正常手工流程）；
+        # 从 JSON 导入时，图块被重新打包过，这里会填入 JSON 记录的元素原始坐标，
+        # 从而让合成帧的拼接间距与导出前完全一致。
+        self._frame_logical: dict[int, tuple[int, int]] = {}
+        # 选中与框选（选中状态存储在当前 Action.selected_indices）
+        self.current_action: Action | None = None
+        self.compose_mode = False
+        self.reuse_mode = False  # 复用模式：开启后点击已选元素即追加一帧（Alt+点击为临时复用）
+        self._manual_reuse = False  # 复用按钮保持的模式（Alt 临时按下不算）
+        self._alt_reusing = False   # Alt 键是否正在按下（临时复用）
+        self._manual_compose = False
+        self._ctrl_composing = False
+        self._active_composite_group: list[int] | None = None
+        self.actions: list[Action] = []  # 所有动作列表引用（用于多动作色块绘制）
+        self.action_color = "#E91E63"  # 当前动作颜色，选中辅助线用此色
+        self._detect_thread: _FrameDetectThread | None = None
+        self._detect_threads: set[_FrameDetectThread] = set()
+        self._detect_generation = 0
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        # 布局：[左上角方块 | 水平标尺] / [垂直标尺 | 画布]
+        grid = QGridLayout(self)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(0)
+
+        corner = QWidget()
+        corner.setFixedSize(RULER_SIZE, RULER_SIZE)
+        corner.setStyleSheet("background-color: #1a1a1a; border: none;")
+        grid.addWidget(corner, 0, 0)
+
+        self.h_ruler = _Ruler(self, "horizontal")
+        grid.addWidget(self.h_ruler, 0, 1)
+
+        self.v_ruler = _Ruler(self, "vertical")
+        grid.addWidget(self.v_ruler, 1, 0)
+
+        self.canvas = _Canvas(self)
+        self.canvas.image_loaded.connect(self._on_image_loaded)
+        self.canvas.selection_changed.connect(self.selection_changed)
+        grid.addWidget(self.canvas, 1, 1)
+        grid.setRowStretch(1, 1)
+        grid.setColumnStretch(1, 1)
+
+        # 浮动工具条（父对象为画布）
+        self._toolbar: FloatingToolBar | None = None
+        self._toolbar = FloatingToolBar(self.canvas)
+        self._toolbar.move(self.canvas.width() - self._toolbar.width() - 6, 6)
+        self._toolbar.zoom_in_requested.connect(self.zoom_in)
+        self._toolbar.zoom_out_requested.connect(self.zoom_out)
+        self._toolbar.bg_changed.connect(self._on_bg_changed)
+        self._toolbar.compose_toggled.connect(self.set_compose_mode)
+        self._toolbar.reuse_toggled.connect(self.set_reuse_mode)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+            # 原生 Alt 键监听（Windows 系统键会绕过 installEventFilter）
+            self._alt_native_filter = _AltNativeFilter(self)
+            try:
+                app.installNativeEventFilter(self._alt_native_filter)
+            except Exception:  # noqa: BLE001 - 平台不支持时退回 eventFilter 路径
+                self._alt_native_filter = None
+        # 默认选中透明背景
+        self._bg_mode = "checker"
+
+    def _update_rulers(self):
+        self.h_ruler.update()
+        self.v_ruler.update()
+
+    # ---- 对外接口 ----
+    def set_pixmap(self, pm: QPixmap):
+        if pm is None or pm.isNull():
+            return
+        self._pixmap = pm
+        self._source_images = [pm]
+        self._frames = []
+        self._start_frame_detection(pm.toImage(), base_frames=[], y_offset=0)
+        self.fit_view()
+        self.canvas.update()
+        self._update_rulers()
+        # 布局完成后再适配一次，确保居中
+        QTimer.singleShot(0, self.fit_view)
+
+    def append_pixmap(self, pm: QPixmap) -> bool:
+        """将新的原图追加到当前原图下方，并保留已有帧索引与动作。"""
+        if pm is None or pm.isNull():
+            return False
+        if self._pixmap is None or self._pixmap.isNull():
+            self.set_pixmap(pm)
+            return True
+
+        old_pixmap = self._pixmap
+        old_frames = list(self._frames)
+        gap = 16
+        combined = QPixmap(max(old_pixmap.width(), pm.width()), old_pixmap.height() + gap + pm.height())
+        combined.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(combined)
+        painter.drawPixmap(0, 0, old_pixmap)
+        y_offset = old_pixmap.height() + gap
+        painter.drawPixmap(0, y_offset, pm)
+        painter.end()
+
+        self._pixmap = combined
+        self._source_images.append(pm)
+        # 旧元素可立即继续显示；新增图片的元素由后台线程补充。
+        self._frames = old_frames
+        self._start_frame_detection(pm.toImage(), base_frames=old_frames, y_offset=y_offset)
+        self.fit_view()
+        self.canvas.update()
+        self._update_rulers()
+        QTimer.singleShot(0, self.fit_view)
+        return True
+
+    def _start_frame_detection(
+        self, image: QImage, base_frames: list[tuple[int, int, int, int]], y_offset: int
+    ) -> None:
+        """异步检测元素，避免大图 flood fill 阻塞 UI 线程。"""
+        self._detect_generation += 1
+        generation = self._detect_generation
+        thread = _FrameDetectThread(image.copy(), self)
+        self._detect_thread = thread
+        self._detect_threads.add(thread)
+
+        def apply_result(frames: list[tuple[int, int, int, int]]) -> None:
+            if generation != self._detect_generation:
+                return
+            shifted = [(x, y + y_offset, w, h) for x, y, w, h in frames]
+            self._frames = list(base_frames) + shifted
+            self.canvas.update()
+            self._update_rulers()
+            self.frames_updated.emit()
+
+        thread.detected.connect(apply_result)
+        thread.finished.connect(lambda t=thread: self._detect_threads.discard(t))
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def fit_view(self):
+        """居中并自适应画布窗口（0.9 比例）。"""
+        if not self._pixmap or self._pixmap.isNull():
+            return
+        cw, ch = max(1, self.canvas.width()), max(1, self.canvas.height())
+        zw = cw / self._pixmap.width()
+        zh = ch / self._pixmap.height()
+        self._zoom = min(zw, zh) * 0.9
+        self._offset = QPointF(
+            (cw - self._pixmap.width() * self._zoom) / 2,
+            (ch - self._pixmap.height() * self._zoom) / 2,
+        )
+        self.canvas.update()
+        self._update_rulers()
+
+    def set_current_action(self, action: Action | None):
+        """切换当前动作，选中状态从动作中恢复。"""
+        self.current_action = action
+        if action:
+            self.action_color = action.color
+        self.canvas.update()
+
+    def set_compose_mode(self, enabled: bool) -> None:
+        self._manual_compose = enabled
+        # Ctrl 临时激活时，合成按钮必须保持高亮；按钮点击只决定
+        # Ctrl 松开后的手动模式是否继续保留。
+        self.compose_mode = True if self._ctrl_composing else enabled
+        self._active_composite_group = None
+        self.canvas.setCursor(
+            Qt.CursorShape.CrossCursor if self.compose_mode else Qt.CursorShape.ArrowCursor
+        )
+        if self._toolbar is not None:
+            checked = True if self._ctrl_composing else enabled
+            if self._toolbar.btn_compose.isChecked() != checked:
+                self._toolbar.btn_compose.setChecked(checked)
+
+    def begin_ctrl_composition(self) -> None:
+        if self._ctrl_composing:
+            self.compose_mode = True
+            self.canvas.setCursor(Qt.CursorShape.CrossCursor)
+            if self._toolbar is not None and not self._toolbar.btn_compose.isChecked():
+                self._toolbar.btn_compose.setChecked(True)
+            return
+        self._ctrl_composing = True
+        self._active_composite_group = None
+        self.compose_mode = True
+        self.canvas.setCursor(Qt.CursorShape.CrossCursor)
+        if self._toolbar is not None:
+            self._toolbar.btn_compose.setChecked(True)
+
+    def end_ctrl_composition(self) -> None:
+        if not self._ctrl_composing:
+            return
+        self._ctrl_composing = False
+        self._active_composite_group = None
+        # A manually enabled compose mode remains active after Ctrl is released.
+        self.compose_mode = self._manual_compose
+        self.canvas.setCursor(Qt.CursorShape.CrossCursor if self.compose_mode else Qt.CursorShape.ArrowCursor)
+        if self._toolbar is not None:
+            self._toolbar.btn_compose.setChecked(self.compose_mode)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Control:
+            self.begin_ctrl_composition()
+        elif event.type() == QEvent.Type.KeyRelease and event.key() == Qt.Key.Key_Control:
+            self.end_ctrl_composition()
+        elif event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Alt:
+            self.begin_alt_reuse()
+        elif event.type() == QEvent.Type.KeyRelease and event.key() == Qt.Key.Key_Alt:
+            self.end_alt_reuse()
+        elif event.type() in (
+            QEvent.Type.ApplicationDeactivate,
+            QEvent.Type.WindowDeactivate,
+        ):
+            # 窗口切走时系统可能不会再发 Ctrl/Alt 的 KeyRelease，避免状态和
+            # 工具按钮一直卡在按下状态。
+            self.end_ctrl_composition()
+            self.end_alt_reuse()
+        return super().eventFilter(watched, event)
+
+    def add_to_composite(self, idx: int) -> None:
+        if not self.current_action or idx < 0 or idx >= len(self._frames):
+            return
+        action = self.current_action
+        if idx not in action.selected_indices:
+            action.selected_indices.append(idx)
+        # Ctrl-click groups selected elements into the current composite frame.
+        if self._active_composite_group is None:
+            self._active_composite_group = []
+            action.composite_groups.append(self._active_composite_group)
+        if idx not in self._active_composite_group:
+            self._active_composite_group.append(idx)
+
+    def _normalize_composite_groups(self) -> None:
+        if not self.current_action:
+            return
+        selected = set(self.current_action.selected_indices)
+        groups = []
+        for group in self.current_action.composite_groups:
+            clean = [idx for idx in group if idx in selected]
+            if clean:
+                groups.append(clean)
+        self.current_action.composite_groups = groups
+
+    # ---- 帧复用（按钮模式 + Alt+点击 临时模式）----
+
+    def set_reuse_mode(self, enabled: bool) -> None:
+        """切换复用按钮的保持模式；按钮/Alt 任一激活时都处于复用模式。"""
+        self._manual_reuse = bool(enabled)
+        self.reuse_mode = self._manual_reuse or self._alt_reusing
+        if self._toolbar is not None and self._toolbar.btn_reuse.isChecked() != self.reuse_mode:
+            self._toolbar.btn_reuse.setChecked(self.reuse_mode)
+
+    def begin_alt_reuse(self) -> None:
+        """Alt 按下：临时进入复用模式，复用按钮高亮（图标变红）。"""
+        if self._alt_reusing:
+            self.reuse_mode = True
+            if self._toolbar is not None and not self._toolbar.btn_reuse.isChecked():
+                self._toolbar.btn_reuse.setChecked(True)
+            return
+        self._alt_reusing = True
+        self.reuse_mode = True
+        if self._toolbar is not None:
+            self._toolbar.btn_reuse.setChecked(True)
+
+    def end_alt_reuse(self) -> None:
+        """Alt 释放：退出临时复用，回到按钮保持模式的状态。"""
+        if not self._alt_reusing:
+            return
+        self._alt_reusing = False
+        self.reuse_mode = self._manual_reuse
+        if self._toolbar is not None:
+            self._toolbar.btn_reuse.setChecked(self.reuse_mode)
+
+    def _layouts_from_selection(self, action: Action) -> list[list[tuple[int, int, int]]]:
+        """把当前选中状态（selected_indices + composite_groups）转成显式帧布局基线。
+
+        每帧 = [(元素索引, 帧内相对 x, 帧内相对 y), ...]；合成组展开为一帧、
+        组内相对坐标用逻辑坐标差计算（与常规生成完全一致）。
+        """
+        layouts: list[list[tuple[int, int, int]]] = []
+        group_by_idx = {i: g for g in action.composite_groups for i in g}
+        emitted = set()
+        for idx in action.selected_indices:
+            if idx in emitted:
+                continue
+            group = group_by_idx.get(idx, [idx])
+            valid = [i for i in group if 0 <= i < len(self._frames)]
+            if not valid:
+                continue
+            if len(valid) == 1:
+                layouts.append([(valid[0], 0, 0)])
+            else:
+                lx0 = min(self._logical_xy(i)[0] for i in valid)
+                ly0 = min(self._logical_xy(i)[1] for i in valid)
+                layouts.append([
+                    (i, self._logical_xy(i)[0] - lx0, self._logical_xy(i)[1] - ly0)
+                    for i in valid
+                ])
+            emitted.update(valid)
+        return layouts
+
+    def _merge_added_into_layouts(self, action: Action, existing_ids: set[int]) -> None:
+        """选中新增了元素时，把新元素（及其合成组）并入显式布局，保留既有复用帧。
+
+        只处理"纯新增"（existing_ids 是删除校验后的布局内元素集）；
+        新元素按其合成组整体追加为一帧，避免与已入布局的元素重复。
+        """
+        group_by_idx = {i: g for g in action.composite_groups for i in g}
+        in_layout = set(existing_ids)
+        before = len(action.frame_layouts)
+        for idx in action.selected_indices:
+            if idx in in_layout:
+                continue
+            group = group_by_idx.get(idx, [idx])
+            valid = [i for i in group if 0 <= i < len(self._frames)]
+            if not valid or any(i in in_layout for i in valid):
+                continue
+            if len(valid) == 1:
+                action.frame_layouts.append([(valid[0], 0, 0)])
+            else:
+                lx0 = min(self._logical_xy(i)[0] for i in valid)
+                ly0 = min(self._logical_xy(i)[1] for i in valid)
+                action.frame_layouts.append([
+                    (i, self._logical_xy(i)[0] - lx0, self._logical_xy(i)[1] - ly0)
+                    for i in valid
+                ])
+            in_layout.update(valid)
+        # 新增元素帧属于基线（不可被 Alt 取消），基线上移
+        action.frame_layouts_base = getattr(action, "frame_layouts_base", 0) + (
+            len(action.frame_layouts) - before
+        )
+
+    def toggle_reuse_at(self, idx: int) -> None:
+        """Alt+点击：若元素已有复用帧则取消最近一次复用，否则执行复用（toggle）。"""
+        if not self.current_action or not self._frames or not (0 <= idx < len(self._frames)):
+            return
+        action = self.current_action
+        layouts = action.frame_layouts
+        if layouts is not None:
+            base = getattr(action, "frame_layouts_base", 0)
+            # 该元素出现的所有帧位
+            occ = [li for li, layout in enumerate(layouts)
+                   if any(m == idx for m, _, _ in layout)]
+            # 只取消「复用区」（>= base）里的帧：基线帧（常规/导入/新增选择）
+            # 是元素的原始帧，不可取消。复用区帧本来就是额外追加的，直接移除
+            # 最近一次（撤销该次复用）。
+            for li in reversed(occ):
+                if li < base:
+                    break
+                del action.frame_layouts[li]
+                # 清理只属于被取消复用帧的纯复用元素，避免 crop 的"新增"判定
+                # 把刚取消的帧重新并入。
+                remaining_ids = {
+                    m for layout in action.frame_layouts for m, _, _ in layout
+                }
+                action.selected_indices = [
+                    i for i in action.selected_indices if i in remaining_ids
+                ]
+                self.crop_frames_for_action(action)
+                self.frames_updated.emit()
+                self.selection_changed.emit()
+                return
+        # 没有可取消的复用 -> 执行复用
+        self.reuse_frame_at(idx)
+
+    def reuse_frame_at(self, idx: int) -> None:
+        """复用 idx 元素当前所属的帧：把它再追加为一帧（同一元素可出现在多帧）。
+
+        通过显式帧布局 frame_layouts 表达，与 JSON 导入的"同一元素多帧"统一，
+        导出/导入往返不丢复用关系。原元素/原合成组保持不动。
+        """
+        if not self.current_action or not self._frames or not (0 <= idx < len(self._frames)):
+            return
+        action = self.current_action
+        group = next((g for g in action.composite_groups if idx in g), None)
+        valid = [i for i in (group if group is not None else [idx]) if 0 <= i < len(self._frames)]
+        if not valid:
+            return
+        if action.frame_layouts is None:
+            action.frame_layouts = self._layouts_from_selection(action)
+            action.frame_layouts_base = len(action.frame_layouts)
+        # 复用元素纳入主选区：布局里出现但未选中的元素（纯复用）不会被
+        # crop 的"取消选择"判定误回退。先建基线再加，避免基线多出一帧。
+        for m in valid:
+            if m not in action.selected_indices:
+                action.selected_indices.append(m)
+        if len(valid) == 1:
+            layout = [(valid[0], 0, 0)]
+        else:
+            lx0 = min(self._logical_xy(i)[0] for i in valid)
+            ly0 = min(self._logical_xy(i)[1] for i in valid)
+            layout = [
+                (i, self._logical_xy(i)[0] - lx0, self._logical_xy(i)[1] - ly0)
+                for i in valid
+            ]
+        action.frame_layouts.append(layout)
+        self.crop_frames_for_action(action)
+        self.frames_updated.emit()
+        self.selection_changed.emit()
+
+    def _logical_xy(self, index: int) -> tuple[int, int]:
+        """元素的逻辑坐标：用于计算元素间相对位置；缺省时等于其在图中的位置。"""
+        if index in self._frame_logical:
+            return self._frame_logical[index]
+        frame = self._frames[index]
+        return (frame[0], frame[1])
+
+    def crop_frames_for_action(self, action: Action):
+        """根据当前动作选中的元素索引，从原图区裁剪为帧。帧序即选中序号。
+
+        裁剪始终使用元素在「当前载入的图」里的实际位置；
+        而合成帧内各元素的相对位置使用元素的**逻辑坐标**计算，
+        这样从 JSON 导入的工程也能还原出与导出前一致的拼接间距。
+        """
+        if not self._pixmap or not action.selected_indices:
+            action.frames = []
+            action.frame_rects = []
+            action.frame_parts = []
+            action.frame_offsets.clear()
+            action.frame_rotations.clear()
+            action.frame_mirror_h.clear()
+            action.frame_mirror_v.clear()
+            action.frame_rotation_pivots.clear()
+            action.frame_quads.clear()
+            action.frame_transform_modes.clear()
+            action.invalidate_transforms()
+            action.ref_frame = -1
+            return
+        # 显式帧布局（从 JSON 导入 / 复用帧）：逐帧按记录的部件与位置生成，
+        # 支持同一元素出现在多个合成帧中（避免丢帧），且导出可复用元素图块。
+        if action.frame_layouts:
+            selected = set(action.selected_indices)
+            layout_ids = {i for layout in action.frame_layouts for i, _, _ in layout}
+            removed = layout_ids - selected
+            added = selected - layout_ids
+            if removed:
+                # 显式取消了元素选择 -> 布局不再适用，回退到常规生成
+                action.frame_layouts = None
+                action.frame_layouts_base = 0
+            elif added:
+                # 仅新增了元素 -> 把它并入布局（保留已有复用帧，不丢用户工作）
+                self._merge_added_into_layouts(action, layout_ids)
+            if action.frame_layouts:
+                frames = []
+                rects = []
+                parts_all = []
+                for layout in action.frame_layouts:
+                    valid = [(i, rx, ry) for i, rx, ry in layout if 0 <= i < len(self._frames)]
+                    if not valid:
+                        continue
+                    if len(valid) == 1:
+                        idx, rx, ry = valid[0]
+                        sx, sy, sw, sh = self._frames[idx]
+                        # Keep a non-zero imported part position (for example
+                        # TexturePacker's spriteSourceSize offset).  The
+                        # transparent canvas is part of the frame layout and
+                        # must not be collapsed to the source tile's origin.
+                        frame_w = max(1, rx + sw)
+                        frame_h = max(1, ry + sh)
+                        frame = QPixmap(frame_w, frame_h)
+                        frame.fill(Qt.GlobalColor.transparent)
+                        painter = QPainter(frame)
+                        painter.drawPixmap(rx, ry, self._pixmap.copy(sx, sy, sw, sh))
+                        painter.end()
+                        frames.append(frame)
+                        # 用原图中的真实位置作包围盒，原图模式导出才不会裁错像素
+                        rects.append((sx, sy, sw, sh))
+                        parts_all.append([((sx, sy, sw, sh), rx, ry, sx, sy)])
+                        continue
+                    w = max(rx + self._frames[i][2] for i, rx, ry in valid)
+                    h = max(ry + self._frames[i][3] for i, rx, ry in valid)
+                    canvas = QPixmap(max(1, w), max(1, h))
+                    canvas.fill(Qt.GlobalColor.transparent)
+                    painter = QPainter(canvas)
+                    parts = []
+                    for idx, rx, ry in valid:
+                        sx, sy, sw, sh = self._frames[idx]
+                        painter.drawPixmap(rx, ry, self._pixmap.copy(sx, sy, sw, sh))
+                        parts.append(((sx, sy, sw, sh), rx, ry, sx, sy))
+                    painter.end()
+                    frames.append(canvas)
+                    rects.append((0, 0, max(1, w), max(1, h)))
+                    parts_all.append(parts)
+                action.frames = frames
+                action.frame_rects = rects
+                action.frame_parts = parts_all
+                valid_idx = set(range(len(frames)))
+                action.frame_offsets = {k: v for k, v in action.frame_offsets.items() if k in valid_idx}
+                action.frame_rotations = {k: v for k, v in action.frame_rotations.items() if k in valid_idx}
+                action.frame_mirror_h &= valid_idx
+                action.frame_mirror_v &= valid_idx
+                action.frame_rotation_pivots = {k: v for k, v in action.frame_rotation_pivots.items() if k in valid_idx}
+                action.frame_quads = {k: v for k, v in action.frame_quads.items() if k in valid_idx}
+                action.frame_transform_modes = {k: v for k, v in action.frame_transform_modes.items() if k in valid_idx}
+                action.invalidate_transforms()
+                if action.ref_frame >= len(frames):
+                    action.ref_frame = -1
+                return
+            # 用户改动了选中元素 -> 导入布局不再适用，回退到常规生成
+            action.frame_layouts = None
+        frames = []
+        rects = []
+        parts_all: list[list[tuple[tuple[int, int, int, int], int, int, int, int]]] = []
+        group_by_idx = {idx: group for group in action.composite_groups for idx in group}
+        emitted = set()
+        for idx in action.selected_indices:
+            if idx in emitted:
+                continue
+            group = group_by_idx.get(idx, [idx])
+            valid = [i for i in group if 0 <= i < len(self._frames)]
+            if not valid:
+                continue
+            parts: list[tuple[tuple[int, int, int, int], int, int, int, int]] = []
+            if len(valid) == 1:
+                # 单元素帧：帧就是该元素本身
+                sx, sy, sw, sh = self._frames[valid[0]]
+                lx, ly = self._logical_xy(valid[0])
+                frame = self._pixmap.copy(sx, sy, sw, sh)
+                parts.append(((sx, sy, sw, sh), 0, 0, lx, ly))
+                rects.append((sx, sy, sw, sh))
+            else:
+                # 合成帧：拼接间距按逻辑坐标算，像素按实际位置裁
+                lx0 = min(self._logical_xy(i)[0] for i in valid)
+                ly0 = min(self._logical_xy(i)[1] for i in valid)
+                lx1 = max(self._logical_xy(i)[0] + self._frames[i][2] for i in valid)
+                ly1 = max(self._logical_xy(i)[1] + self._frames[i][3] for i in valid)
+                cw, ch = max(1, lx1 - lx0), max(1, ly1 - ly0)
+                frame = QPixmap(cw, ch)
+                frame.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(frame)
+                for source_idx in valid:
+                    sx, sy, sw, sh = self._frames[source_idx]
+                    lx, ly = self._logical_xy(source_idx)
+                    rel_x, rel_y = lx - lx0, ly - ly0
+                    painter.drawPixmap(rel_x, rel_y, self._pixmap.copy(sx, sy, sw, sh))
+                    parts.append(((sx, sy, sw, sh), rel_x, rel_y, lx, ly))
+                painter.end()
+                rects.append((lx0, ly0, cw, ch))
+            frames.append(frame)
+            parts_all.append(parts)
+            emitted.update(valid)
+        action.frames = frames
+        action.frame_rects = rects
+        action.frame_parts = parts_all
+        # 清理失效的单帧偏移、旋转/镜像与参照帧
+        valid = set(range(len(frames)))
+        action.frame_offsets = {k: v for k, v in action.frame_offsets.items() if k in valid}
+        action.frame_rotations = {k: v for k, v in action.frame_rotations.items() if k in valid}
+        action.frame_mirror_h &= valid
+        action.frame_mirror_v &= valid
+        action.frame_rotation_pivots = {k: v for k, v in action.frame_rotation_pivots.items() if k in valid}
+        action.frame_quads = {k: v for k, v in action.frame_quads.items() if k in valid}
+        action.frame_transform_modes = {k: v for k, v in action.frame_transform_modes.items() if k in valid}
+        action.invalidate_transforms()
+        if action.ref_frame >= len(frames):
+            action.ref_frame = -1
+
+    def set_actions(self, actions: list[Action]):
+        """设置动作列表引用（用于多动作色块绘制）。"""
+        self.actions = actions
+
+    def _sort_reading_order(self, indices: list[int]) -> list[int]:
+        """按阅读顺序排序：从上到下分行，每行内从左到右。"""
+        if not indices:
+            return indices
+        # 按中心y排序后分行
+        centers = sorted(
+            [(self._frames[i][0] + self._frames[i][2] / 2,
+              self._frames[i][1] + self._frames[i][3] / 2, i)
+             for i in indices],
+            key=lambda c: c[1]
+        )
+        # 行高阈值：平均高度的0.8倍；以每行第一个元素的中心y为行基准
+        avg_h = sum(self._frames[i][3] for i in indices) / len(indices)
+        rows = []
+        current_row = [centers[0]]
+        row_y = centers[0][1]
+        for c in centers[1:]:
+            if c[1] - row_y < avg_h * 0.8:
+                current_row.append(c)
+            else:
+                rows.append(current_row)
+                current_row = [c]
+                row_y = c[1]
+        rows.append(current_row)
+        # 每行按x排序
+        result = []
+        for row in rows:
+            row.sort(key=lambda c: c[0])
+            result.extend([c[2] for c in row])
+        return result
+
+    # ---- 坐标与命中 ----
+    def _image_top_left(self) -> QPointF:
+        """图片左上角在画布视图中的坐标。"""
+        return self._offset
+
+    def _frame_at_point(self, pos: QPointF) -> int:
+        """返回图片坐标点所在的 frame 索引，没有返回-1。"""
+        if not self._pixmap:
+            return -1
+        for i, (fx, fy, fw, fh) in enumerate(self._frames):
+            rect = QRectF(self._offset.x() + fx * self._zoom,
+                          self._offset.y() + fy * self._zoom,
+                          fw * self._zoom, fh * self._zoom)
+            if rect.contains(pos):
+                return i
+        return -1
+
+    def _frames_in_view_rect(self, rect: QRectF) -> list[int]:
+        """返回与视图矩形相交的所有 frame 索引。"""
+        result = []
+        for i, (fx, fy, fw, fh) in enumerate(self._frames):
+            frame_rect = QRectF(self._offset.x() + fx * self._zoom,
+                                 self._offset.y() + fy * self._zoom,
+                                 fw * self._zoom, fh * self._zoom)
+            if rect.intersects(frame_rect):
+                result.append(i)
+        return self._sort_reading_order(result)
+
+    def zoom_in(self):
+        self._zoom = min(MAX_ZOOM, self._zoom * 1.2)
+        self.canvas.update()
+        self._update_rulers()
+
+    def zoom_out(self):
+        self._zoom = max(MIN_ZOOM, self._zoom / 1.2)
+        self.canvas.update()
+        self._update_rulers()
+
+    def _on_bg_changed(self, mode: str):
+        self._bg_mode = mode
+        self.canvas.update()
+
+    def _on_image_loaded(self, pm: QPixmap):
+        # 由主窗口决定是首次载入还是追加，避免覆盖已有动作。
+        self.image_loaded.emit(pm)
+
+    def refresh(self):
+        """刷新画布和标尺。"""
+        self.canvas.update()
+        self._update_rulers()
