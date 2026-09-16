@@ -33,11 +33,16 @@ from .image_viewer import SUPPORTED_IMAGE_EXT, ImageViewer
 from .models import Action, MACARON_COLORS
 from .preview import ActionPreviewWidget
 from .transform import action_frame_pixmap
-from .widgets import ActionCardWidget, ActionItemDelegate, _APP_ROOT, make_logo_pixmap
+from .widgets import (
+    ActionCardWidget, ActionItemDelegate, _APP_ROOT, make_logo_pixmap, paint_checkerboard,
+)
 
-# 工程文件缩略图的长边尺寸：资源管理器按 96/256 显示，取 256 保证"超大图标"
-# 视图下也清晰（.sstool 以这张 PNG 开头，是它的"脸"）。
-_THUMB_LONG_SIDE = 256
+# 工程文件缩略图：**正方形** 256×256（资源管理器用方形槽位显示，按画面比例输出
+# 会让宽条素材显示成一条）。内容按比例装进 _THUMB_SIZE-2*_THUMB_PAD，
+# 余下部分用底色盖住（跟随动作的预览背景：棋盘格/黑/白）。
+_THUMB_SIZE = 256
+_THUMB_PAD = 8
+_THUMB_CHECKER_CELL = 12
 
 
 # 主窗口
@@ -324,41 +329,52 @@ class MainWindow(QMainWindow):
             thumb = add_pixmap("thumbnail.png", action_frame_pixmap(viewer.current_action, index))
         if thumb is None:
             thumb = add_pixmap("thumbnail.png", viewer._pixmap)
-        # 工程文件缩略图：归一尺寸后在右下角叠加 工程图标.png 角标。
-        # .sstool 会以这张 PNG 开头，资源管理器（配好图片缩略图处理器后）直接显示它，
-        # 所以这张图要经得起"被缩到 96px 显示"：太小则角标盖住内容，太大则文件变胖。
+        # 工程文件缩略图：**正方形**画布 + 底色铺底 + 内容等比居中 + 右下角角标。
+        # .sstool 以这张 PNG 开头，资源管理器（配好图片缩略图处理器后）直接显示它。
+        # 为什么必须正方形：资源管理器用方形槽位显示缩略图，若按画面比例输出，
+        # 宽条素材（如 8:1 的横排精灵）会被显示成细细一条 —— 所以统一 256×256，
+        # 内容装不满的余下部分用底色盖住（跟随该动作的预览背景：棋盘格/黑/白）。
         if thumb and "thumbnail.png" in sections:
             preview_pm = _pixmap_from_bytes(sections["thumbnail.png"])
             badge = QPixmap(str(_APP_ROOT / "工程图标.png"))
             if not preview_pm.isNull():
-                long_side = max(preview_pm.width(), preview_pm.height())
-                if long_side > 0 and long_side != _THUMB_LONG_SIDE:
-                    scale = _THUMB_LONG_SIDE / long_side
+                canvas = QPixmap(_THUMB_SIZE, _THUMB_SIZE)
+                bg_mode = (viewer.current_action.bg_mode
+                           if viewer.current_action else "checker")
+                painter = QPainter(canvas)
+                if bg_mode == "checker":
+                    paint_checkerboard(painter, canvas.rect(), _THUMB_CHECKER_CELL)
+                else:
+                    canvas.fill(QColor("#000000" if bg_mode == "black" else "#FFFFFF"))
+                avail = _THUMB_SIZE - 2 * _THUMB_PAD
+                scaled = preview_pm.scaled(
+                    avail, avail,
+                    Qt.AspectRatioMode.KeepAspectRatio,
                     # 放大用最近邻（精灵图多为像素画，平滑会糊），缩小才用平滑
-                    mode = (Qt.TransformationMode.FastTransformation if scale > 1.0
-                            else Qt.TransformationMode.SmoothTransformation)
-                    preview_pm = preview_pm.scaled(
-                        max(1, round(preview_pm.width() * scale)),
-                        max(1, round(preview_pm.height() * scale)),
-                        Qt.AspectRatioMode.IgnoreAspectRatio,
-                        mode,
-                    )
+                    Qt.TransformationMode.FastTransformation
+                    if max(preview_pm.width(), preview_pm.height()) < avail
+                    else Qt.TransformationMode.SmoothTransformation,
+                )
+                painter.drawPixmap(
+                    (_THUMB_SIZE - scaled.width()) // 2,
+                    (_THUMB_SIZE - scaled.height()) // 2,
+                    scaled,
+                )
                 if not badge.isNull():
-                    side = max(16, min(preview_pm.width(), preview_pm.height()) // 4)
+                    side = max(16, _THUMB_SIZE // 4)
                     margin = max(2, side // 8)
                     badge = badge.scaled(
                         side, side,
                         Qt.AspectRatioMode.KeepAspectRatio,
                         Qt.TransformationMode.SmoothTransformation,
                     )
-                    painter = QPainter(preview_pm)
                     painter.drawPixmap(
-                        preview_pm.width() - badge.width() - margin,
-                        preview_pm.height() - badge.height() - margin,
+                        _THUMB_SIZE - badge.width() - margin,
+                        _THUMB_SIZE - badge.height() - margin,
                         badge,
                     )
-                    painter.end()
-                sections["thumbnail.png"] = _pixmap_bytes(preview_pm)
+                painter.end()
+                sections["thumbnail.png"] = _pixmap_bytes(canvas)
         manifest = {
             "format": "spritesheet-tool-project", "version": 1,
             "app_version": __version__, "combined_image": combined_id,
