@@ -1,4 +1,4 @@
-"""字形回归 —— **必须跑在真实的 windows 平台下**（本脚本自己强制切换）。
+﻿"""字形回归 —— **必须跑在真实的 windows 平台下**（本脚本自己强制切换）。
 
 为什么单独一个脚本：`QT_QPA_PLATFORM=offscreen` 的回归环境**没有真实字体**，
 任何字符（连 ASCII 'x' 都是）都会被画成同一个方框（tofu）：
@@ -100,8 +100,6 @@ def main() -> int:
     label = AppNameLabel(version="v1.1.27")
     label.resize(label.sizeHint())
     image = label.grab().toImage()
-    head_rect = label.head_rect()
-    body_rect = label.body_rect()
     version_rect = label.version_rect()
     baseline = label._baselines()[0]
 

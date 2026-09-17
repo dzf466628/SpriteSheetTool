@@ -5,7 +5,6 @@
 
 Usage: .venv\\Scripts\\python.exe tools\\verify_project_format.py
 """
-import io
 import json
 import os
 import sys

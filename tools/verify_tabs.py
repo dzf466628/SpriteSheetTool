@@ -307,7 +307,6 @@ def main() -> int:
     print()
     print("=== 10. 关闭叉号：字形 + 悬停转 30° 变红（不是大红点）===")
     bar2, before_img = rendered(["甲工程"], current=0)
-    rect0 = bar2.tab_rects()[0]
     close_rect = bar2._close_rect(0)
 
     def mask_of(image, rect):

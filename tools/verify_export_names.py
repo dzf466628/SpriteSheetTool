@@ -97,7 +97,6 @@ def run_case(label: str, separate: bool) -> None:
     planned0 = dlg._planned_names(root)
     check("空目录无冲突", dlg.resolve_name_conflicts(str(tmp)) == "")
     written0 = dlg._export_to_directory(str(tmp))
-    made0 = set(written0) | {p for p in planned0 if p.is_dir()}
     missing = [p for p in planned0 if not p.exists()]
     check("预告路径与实际写入一致", not missing, f"缺失 {[p.name for p in missing]}")
     print(f"    首次产出 {len(written0)} 个文件：{[p.name for p in written0][:6]}")
@@ -114,7 +113,7 @@ def run_case(label: str, separate: bool) -> None:
     suffix = dlg.resolve_name_conflicts(str(tmp))
     check("有同名时返回序号", suffix == "_2", f"得到 {suffix!r}")
     planned2 = dlg._planned_names(dlg.target_root(tmp, suffix), suffix)
-    written2 = dlg._export_to_directory(str(tmp), suffix=suffix)
+    dlg._export_to_directory(str(tmp), suffix=suffix)
     missing2 = [p for p in planned2 if not p.exists()]
     check("序号路径的预告与实际一致", not missing2, f"缺失 {[p.name for p in missing2]}")
     after = {p: p.stat().st_mtime_ns for p in tmp.rglob("*") if p.is_file()}
