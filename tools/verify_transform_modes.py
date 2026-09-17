@@ -132,7 +132,7 @@ def main() -> int:
         dy = got[k].y() - base[k].y()
         print(f"  拖 {CORNER_NAMES[k]}：水平邻角={CORNER_NAMES[h_neighbor]} "
               f"垂直邻角={CORNER_NAMES[v_neighbor]} 对角={CORNER_NAMES[opposite]}")
-        check(f"  拖动角两个轴都动了", abs(dx) > 1e-4 and abs(dy) > 1e-4,
+        check("  拖动角两个轴都动了", abs(dx) > 1e-4 and abs(dy) > 1e-4,
               f"dx={dx:.4f} dy={dy:.4f}")
         check(f"  对角（{CORNER_NAMES[opposite]}）不动",
               near(got[opposite].x(), base[opposite].x(), 1e-5)
