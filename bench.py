@@ -1,4 +1,4 @@
-"""Performance benchmark for SpriteSheetTool hot paths (A/B where possible).
+﻿"""Performance benchmark for SpriteSheetTool hot paths (A/B where possible).
 
 Reports the optimized implementations, and for the checkerboard does a true
 same-process A/B against the original per-cell fillRect loop.
@@ -57,7 +57,8 @@ def make_frame(w, h):
 
 
 def main() -> int:
-    app = QApplication(sys.argv)
+    # 必须保留实例引用，否则临时对象被 GC 回收后进程崩溃（坑1/坑29：pyflakes F841 为误报）。
+    app = QApplication(sys.argv)  # noqa: F841
     print("=== 1. _alpha_bounds（每次变换都会调用）===")
     for size, key in ((256, "alpha_256"), (512, "alpha_512"), (1024, "alpha_1024")):
         pm = make_frame(size, size)

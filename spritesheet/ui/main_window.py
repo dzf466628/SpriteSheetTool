@@ -32,6 +32,7 @@ from spritesheet.settings import (
 )
 from spritesheet.updater import UPDATE_URL, UpdateCheckThread, UpdateDownloadThread
 
+from .anim_settings import AnimSettingsBar
 from .image_viewer import SUPPORTED_IMAGE_EXT, ImageViewer
 from .models import Action, MACARON_COLORS
 from .preview import ActionPreviewWidget
@@ -395,6 +396,7 @@ class MainWindow(QMainWindow):
                 "reuse_frame_settings": action.reuse_frame_settings,
                 "show_anchor": action.show_anchor, "anchor": list(action.anchor),
                 "frame_offsets": {str(k): list(v) for k, v in action.frame_offsets.items()},
+                "frame_durations": {str(k): int(v) for k, v in action.frame_durations.items()},
                 "frame_rotations": {str(k): v for k, v in action.frame_rotations.items()},
                 "frame_mirror_h": sorted(action.frame_mirror_h),
                 "frame_mirror_v": sorted(action.frame_mirror_v),
@@ -933,6 +935,7 @@ class MainWindow(QMainWindow):
                 action.frames.append(frame)
             action.anchor = tuple(float(x) for x in self._tuple2(raw.get("anchor"), (0.5, 0.5)))
             action.frame_offsets = {int(k): tuple(map(int, v)) for k, v in (raw.get("frame_offsets") or {}).items()}
+            action.frame_durations = {int(k): max(1, int(v)) for k, v in (raw.get("frame_durations") or {}).items()}
             action.frame_rotations = {int(k): int(v) for k, v in (raw.get("frame_rotations") or {}).items()}
             action.frame_mirror_h = set(map(int, raw.get("frame_mirror_h", [])))
             action.frame_mirror_v = set(map(int, raw.get("frame_mirror_v", [])))
@@ -1043,7 +1046,20 @@ class MainWindow(QMainWindow):
         self.image_viewer.selection_changed.connect(self._on_selection_changed)
         self.image_viewer.selection_changed.connect(self._mark_project_dirty)
         self.image_viewer.frames_updated.connect(self._on_frames_updated)
-        self.splitter.addWidget(self.image_viewer)
+
+        # 左列：原图区 + 下方「动画设置」横条（整段动画参数）
+        left_column = QWidget()
+        left_column.setObjectName("LeftColumn")
+        # ID 选择器只涂容器自身，避免级联污染 image_viewer 内部子控件
+        left_column.setStyleSheet("#LeftColumn { background-color: #1f1f1f; }")
+        left_layout = QVBoxLayout(left_column)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
+        left_layout.addWidget(self.image_viewer, 1)
+        self.anim_bar = AnimSettingsBar()
+        self.anim_bar.set_actions(self.actions)
+        left_layout.addWidget(self.anim_bar)
+        self.splitter.addWidget(left_column)
 
         self.preview = ActionPreviewWidget()
         self.preview.set_actions(self.actions)
@@ -1055,9 +1071,17 @@ class MainWindow(QMainWindow):
         self.preview.adjust_panel.changed.connect(self._mark_project_dirty)
         self.preview.canvas.transform_edit_started.connect(self._begin_transform_history)
         self.preview.canvas.transform_edit_finished.connect(self._finish_transform_history)
-        self.preview.toolbar.loop_changed.connect(lambda _mode: self._mark_project_dirty())
-        self.preview.toolbar.anchor_toggled.connect(lambda _checked: self._mark_project_dirty())
         self.preview.toolbar.bg_changed.connect(lambda _mode: self._mark_project_dirty())
+        # 「动画设置」横条：当前动作切换时同步；改动后刷新预览并标脏
+        self.preview.action_changed.connect(self.anim_bar.set_action)
+        self.anim_bar.changed.connect(self.preview._on_adjust_changed)
+        self.anim_bar.changed.connect(self._mark_project_dirty)
+        # 底部横条「变换（全部帧）」模式 → 预览画布（作用于全部帧）
+        self.anim_bar.mode_requested.connect(self.preview.adjust_panel.enter_transform_mode_all)
+        # 画布变换模式变化（进入/退出/点空白）→ 同步底部横条按钮
+        self.preview.canvas.transform_mode_changed.connect(self.anim_bar.set_mode)
+        # 当前帧切换 → 底部横条「微调（全部帧）」以当前帧偏移为起点
+        self.preview.frame_changed.connect(self.anim_bar.set_current_frame)
         self.image_viewer._toolbar.bg_changed.connect(lambda _mode: self._mark_project_dirty())
         self.image_viewer._toolbar.compose_toggled.connect(lambda _checked: self._mark_project_dirty())
         # 程序退出（含未走 close 的路径）也要收尾原图区与更新检查线程，
@@ -1503,6 +1527,12 @@ class MainWindow(QMainWindow):
                             ids.append(tile_id)
                 action.selected_indices = ids
             viewer.crop_frames_for_action(action)
+            # 逐帧时长：只记录与 fps 默认值不同的帧（kept_frames 与最终帧同序）
+            default_ms = max(1, round(1000 / max(1, action.fps)))
+            for _fi, _fr in enumerate(kept_frames):
+                _ms = max(1, int(getattr(_fr, "duration_ms", 0) or default_ms))
+                if _ms != default_ms:
+                    action.frame_durations[_fi] = _ms
             self._restore_imported_canvas(action, imported, kept_frames)
             total_frames += len(action.frames)
             self.actions.append(action)

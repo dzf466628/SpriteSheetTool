@@ -53,6 +53,8 @@ class Action:
         # 每个动作独立的逻辑画布锚点；归一化坐标，左上角为 (0, 0)。
         self.anchor: tuple[float, float] = (0.5, 0.5)
         self.frame_offsets: dict[int, tuple[int, int]] = {}  # 单帧偏移 {idx: (dx,dy)}
+        # 单帧显示时长（毫秒），只存被改过的帧；未记录的帧按 fps 推导。
+        self.frame_durations: dict[int, int] = {}
         # 每帧旋转与镜像（帧设置里编辑；勾选"数据复用"时整组帧一起改）
         self.frame_rotations: dict[int, int] = {}  # {帧索引: 旋转角度(度, 0-359)}
         self.frame_mirror_h: set[int] = set()      # 水平镜像（左右翻转）的帧索引
@@ -70,13 +72,20 @@ class Action:
         # (idx,rot,mh,mv,pivot) -> 未加 quad 的帧尺寸缓存（交互路径高频调用）
         self._base_size_cache: dict = {}
         self.ref_frame: int = -1  # 参照帧索引（洋葱皮）
-        self.ref_opacity: float = 0.4  # 参照帧透明度（固定）
+        self.ref_opacity: float = 1.0  # 参照帧透明度（固定，不透明）
         self.frame_opacity: float = 1.0  # 当前帧透明度
         self.bg_mode: str = "checker"  # checker/black/white 预览背景
         # ---- 动作类型（静止/移动）----
         self.action_type: str = "static"  # static / move
         self.move_direction: str = "right"  # up/down/left/right
         self.move_speed: int = 10  # 1-100
+
+    def frame_duration_ms(self, idx: int) -> int:
+        """该帧显示时长（毫秒）：逐帧覆盖优先，缺省由 fps 推导。"""
+        ms = self.frame_durations.get(idx)
+        if ms is not None:
+            return max(1, int(ms))
+        return max(1, round(1000 / max(1, self.fps)))
 
     def invalidate_transforms(self) -> None:
         """旋转中心/旋转/镜像或帧内容变化后清空变换缓存。"""

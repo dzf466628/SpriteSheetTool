@@ -61,7 +61,7 @@ def make_tool_icon(kind: str, size: int = 18, color: str | None = None) -> QIcon
         p.setPen(QPen(QColor(color or "#d8d8d8"), 1.5))
         p.drawRect(2, 2, size - 4, size - 4)
         p.end()
-        return QIcon(pm)
+        return _icon_with_disabled(pm)
     renderer = QSvgRenderer(str(path))
     pm = QPixmap(size, size)
     pm.fill(Qt.GlobalColor.transparent)
@@ -76,7 +76,22 @@ def make_tool_icon(kind: str, size: int = 18, color: str | None = None) -> QIcon
         p3.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
         p3.fillRect(pm.rect(), QColor(tint))
         p3.end()
-    return QIcon(pm)
+    return _icon_with_disabled(pm)
+
+
+def _icon_with_disabled(pm: QPixmap) -> QIcon:
+    """给图标附加禁用态（灰色）版本，保证按钮置灰时图标清晰可见为灰。"""
+    icon = QIcon(pm)
+    gray = QPixmap(pm.size())
+    gray.fill(Qt.GlobalColor.transparent)
+    gp = QPainter(gray)
+    gp.drawPixmap(0, 0, pm)
+    gp.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    gp.fillRect(gray.rect(), QColor(120, 120, 120))
+    gp.end()
+    icon.addPixmap(gray, QIcon.Mode.Disabled, QIcon.State.Off)
+    icon.addPixmap(gray, QIcon.Mode.Disabled, QIcon.State.On)
+    return icon
 
 
 def _blend(start: QColor, end: QColor, t: float) -> QColor:
@@ -1062,6 +1077,11 @@ _SLIDER_QSS = (
     "QSlider::handle:vertical { width: 8px; height: 8px; margin: 0 -3px;"
     " background: #E91E63; border-radius: 4px; }"
     "QSlider::handle:vertical:hover { background: #F06292; }"
+    # 禁用态：轨道与手柄整体置灰（伪状态须写在子控件之后才生效）
+    "QSlider::groove:horizontal:disabled { background: #2a2a2a; }"
+    "QSlider::handle:horizontal:disabled { background: #555555; }"
+    "QSlider::groove:vertical:disabled { background: #2a2a2a; }"
+    "QSlider::handle:vertical:disabled { background: #555555; }"
 )
 
 # 双向滑块的样式：和上面同款，但**不填 sub-page**。
@@ -1084,6 +1104,11 @@ _BIPOLAR_SLIDER_QSS = (
     "QSlider::handle:vertical { width: 8px; height: 8px; margin: 0 -3px;"
     " background: #E91E63; border-radius: 4px; }"
     "QSlider::handle:vertical:hover { background: #F06292; }"
+    # 禁用态：轨道与手柄整体置灰（伪状态须写在子控件之后才生效）
+    "QSlider::groove:horizontal:disabled { background: #2a2a2a; }"
+    "QSlider::handle:horizontal:disabled { background: #555555; }"
+    "QSlider::groove:vertical:disabled { background: #2a2a2a; }"
+    "QSlider::handle:vertical:disabled { background: #555555; }"
 )
 
 

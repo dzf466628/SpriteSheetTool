@@ -6,7 +6,8 @@
 - ``PreviewFloatingBar``：播放器右上角浮动工具条（缩放 / 循环模式 / 锚点准星 / 背景）；
 - ``PreviewCanvas``：预览画布（居中叠放播放、移动背景滚动、洋葱皮、锚点、地面线，
   以及 PS 式自由变换手柄：旋转 / 缩放 / 斜切 / 透视 / 扭曲）；
-- ``AnimAdjustPanel``：动画调节组（动作类型、帧设置、自由变换、地面与锚点、当前帧微调）；
+- ``AnimAdjustPanel``：帧编辑面板（当前帧的自由变换、偏移、本帧时长、参照帧/透明度）；
+  动作级参数（动作类型/帧速/扩展/循环/锚点/地面线）在 ``anim_settings.AnimSettingsBar``；
 - ``ActionPreviewWidget``：预览窗口整体装配（画布 + 工具条 + 播放控制 + 帧缩略图 + 调节组）。
 
 依赖方向：models ← transform ← widgets ← export_dialog ← preview（本模块不依赖 main_window；
@@ -21,7 +22,7 @@ from PyQt6.QtGui import (
     QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform,
 )
 from PyQt6.QtWidgets import (
-    QButtonGroup, QCheckBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+    QAbstractItemView, QButtonGroup, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QPushButton, QScrollArea, QSizePolicy, QSlider,
     QSplitter, QVBoxLayout, QWidget,
 )
@@ -49,25 +50,16 @@ _HORIZONTAL_EDGES = frozenset({(0, 1), (2, 3)})
 
 
 class PreviewFloatingBar(QWidget):
-    """播放器右上角浮动工具条：循环模式 / 锚点准星 / 背景切换（仿原图工具条）。"""
+    """播放器右上角浮动工具条：缩放 / 背景切换（循环与锚点已移至「动画设置」横条）。"""
 
-    loop_changed = pyqtSignal(str)
-    anchor_toggled = pyqtSignal(bool)
     bg_changed = pyqtSignal(str)
     zoom_in_requested = pyqtSignal()
     zoom_out_requested = pyqtSignal()
 
-    LOOP_ICONS = {
-        Action.LOOP: ("loop", "循环播放"),
-        Action.ONCE: ("once", "单次播放"),
-        Action.PINGPONG: ("pingpong", "往返播放"),
-    }
-
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedSize(232, 32)
+        self.setFixedSize(136, 32)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self._loop_mode = Action.LOOP
         self._bg_mode = "checker"
 
         layout = QHBoxLayout(self)
@@ -81,14 +73,6 @@ class PreviewFloatingBar(QWidget):
         self.btn_zoom_out = self._make_button("zoom_out", "缩小")
         self.btn_zoom_out.clicked.connect(self.zoom_out_requested)
         layout.addWidget(self.btn_zoom_out)
-
-        self.btn_loop = self._make_button("loop", "循环模式：循环播放（点击切换）")
-        self.btn_loop.clicked.connect(self._cycle_loop)
-        layout.addWidget(self.btn_loop)
-
-        self.btn_anchor = self._make_button("anchor", "锚点准星", checkable=True)
-        self.btn_anchor.clicked.connect(lambda: self.anchor_toggled.emit(self.btn_anchor.isChecked()))
-        layout.addWidget(self.btn_anchor)
 
         # 背景切换
         self._bg_group = QButtonGroup(self)
@@ -106,22 +90,8 @@ class PreviewFloatingBar(QWidget):
         layout.addWidget(self.btn_bg_black)
         layout.addWidget(self.btn_bg_white)
 
-    def _cycle_loop(self):
-        order = [Action.LOOP, Action.ONCE, Action.PINGPONG]
-        idx = order.index(self._loop_mode)
-        self._loop_mode = order[(idx + 1) % len(order)]
-        icon_kind, tip = self.LOOP_ICONS[self._loop_mode]
-        self.btn_loop.setIcon(make_tool_icon(icon_kind, 16))
-        self.btn_loop.setToolTip(f"循环模式：{tip}（点击切换）")
-        self.loop_changed.emit(self._loop_mode)
-
     def sync_action(self, action: Action):
-        """从动作同步按钮状态（不触发信号）。"""
-        self._loop_mode = action.loop_mode
-        icon_kind, tip = self.LOOP_ICONS[action.loop_mode]
-        self.btn_loop.setIcon(make_tool_icon(icon_kind, 16))
-        self.btn_loop.setToolTip(f"循环模式：{tip}（点击切换）")
-        self.btn_anchor.setChecked(action.show_anchor)
+        """从动作同步背景按钮状态（不触发信号）。"""
         self._bg_mode = action.bg_mode
         if action.bg_mode == "checker":
             self.btn_bg_checker.setChecked(True)
@@ -232,6 +202,8 @@ class PreviewCanvas(QWidget):
         # 起点的偏移增量"加到当前帧上；松手再按新偏移重算并集。
         self._frozen_layout: tuple | None = None
         self._frozen_index: int = 0
+        # 多选叠加帧（除主帧外的选中帧，半透明叠加显示）
+        self._overlay_frames: list[int] = []
         self._frozen_offset: tuple[int, int] = (0, 0)
         self._toast = HintToast(self)
 
@@ -307,6 +279,11 @@ class PreviewCanvas(QWidget):
         if action is None:
             self.setMinimumHeight(100)
             self.setMaximumHeight(16777215)
+        self.update()
+
+    def set_overlay_frames(self, indices: list[int]) -> None:
+        """设置除主帧外需叠加显示的帧（Ctrl 多选）。"""
+        self._overlay_frames = list(indices)
         self.update()
 
     def set_frame(self, idx: int):
@@ -928,6 +905,16 @@ class PreviewCanvas(QWidget):
             p.drawPixmap(ref_rect, ref_pm, QRectF(ref_pm.rect()))
             p.setOpacity(1.0)
 
+        # 多选叠加帧（Ctrl 多选：除主帧外的选中帧，半透明叠加显示）
+        for fi in self._overlay_frames:
+            if 0 <= fi < len(self._action.frames) and fi != self._frame_index:
+                ox, oy, ow, oh = positions[fi]
+                o_rect = QRectF(cx + ox * scale, cy + oy * scale, ow * scale, oh * scale)
+                p.setOpacity(0.5)
+                o_pm = action_frame_pixmap(self._action, fi)
+                p.drawPixmap(o_rect, o_pm, QRectF(o_pm.rect()))
+                p.setOpacity(1.0)
+
         # 当前帧（始终显示一帧，居中显示）
         if self._transform_mode and self._drag_layout is not None:
             # 拖动期间锁定布局位置，并用 quad 包围盒最小角变化补偿，避免帧跳动
@@ -1049,7 +1036,11 @@ class PreviewCanvas(QWidget):
 
 
 class AnimAdjustPanel(QWidget):
-    """动画调节组：统一画布/帧速度、对齐与地面、当前帧微调与参照帧、动作类型。"""
+    """帧编辑面板：只作用于**当前帧**的变换、偏移、时长、参照帧/透明度。
+
+    作用于整段动作的参数（类型/帧速/扩展/循环/锚点/地面线）已移至
+    原图区下方的 ``AnimSettingsBar``。
+    """
 
     changed = pyqtSignal()
 
@@ -1062,6 +1053,8 @@ class AnimAdjustPanel(QWidget):
         # 偏移拖动（滑块/方向按钮按住）期间为 True：画布区域冻结，
         # 松手时才重算并集（用户要求：拖动时帧要真的动、松手再算区域）。
         self._offset_drag = False
+        # 变换作用域：右侧按钮 = 单帧(frame)；底部「动画设置」横条 = 全部帧(all)
+        self._transform_scope = "frame"
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -1070,108 +1063,14 @@ class AnimAdjustPanel(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
-        # ---- 动作类型 ----
-        g_type = QGroupBox("动作类型")
-        type_layout = QVBoxLayout(g_type)
-        type_layout.setContentsMargins(6, 12, 6, 6)
-        type_layout.setSpacing(4)
-        self.btn_type_static = QPushButton("静止")
-        self.btn_type_static.setCheckable(True)
-        self.btn_type_static.setChecked(True)
-        self.btn_type_move = QPushButton("移动")
-        self.btn_type_move.setCheckable(True)
-        self._type_group = QButtonGroup(self)
-        self._type_group.addButton(self.btn_type_static)
-        self._type_group.addButton(self.btn_type_move)
-        self.btn_type_static.clicked.connect(self._on_type_changed)
-        self.btn_type_move.clicked.connect(self._on_type_changed)
-        type_buttons_row = QHBoxLayout()
-        type_buttons_row.setContentsMargins(0, 0, 0, 0)
-        type_buttons_row.setSpacing(4)
-        type_buttons_row.addWidget(self.btn_type_static)
-        type_buttons_row.addWidget(self.btn_type_move)
-        type_layout.addLayout(type_buttons_row)
-
-        # 移动方向
-        self.dir_widget = QWidget()
-        dir_layout = QHBoxLayout(self.dir_widget)
-        dir_layout.setContentsMargins(0, 0, 0, 0)
-        dir_layout.setSpacing(2)
-        dir_layout.addWidget(QLabel("方向"))
-        self._dir_group = QButtonGroup(self)
-        self.btn_dir_up = self._small_btn("", "向上移动", "arrow_up")
-        self.btn_dir_down = self._small_btn("", "向下移动", "arrow_down")
-        self.btn_dir_left = self._small_btn("", "向左移动", "arrow_left")
-        self.btn_dir_right = self._small_btn("", "向右移动", "arrow_right")
-        for btn in (self.btn_dir_up, self.btn_dir_down, self.btn_dir_left, self.btn_dir_right):
-            btn.setCheckable(True)
-            self._dir_group.addButton(btn)
-            dir_layout.addWidget(btn)
-        self.btn_dir_right.setChecked(True)
-        self.btn_dir_up.clicked.connect(lambda: self._set_direction("up"))
-        self.btn_dir_down.clicked.connect(lambda: self._set_direction("down"))
-        self.btn_dir_left.clicked.connect(lambda: self._set_direction("left"))
-        self.btn_dir_right.clicked.connect(lambda: self._set_direction("right"))
-        type_layout.addWidget(self.dir_widget)
-
-        # 移动速度
-        self.speed_widget = QWidget()
-        speed_layout = QHBoxLayout(self.speed_widget)
-        speed_layout.setContentsMargins(0, 0, 0, 0)
-        speed_layout.setSpacing(4)
-        self.lbl_speed = QLabel("速度")
-        self.slider_speed = QSlider(Qt.Orientation.Horizontal)
-        self.slider_speed.setRange(1, 100)
-        self.slider_speed.setValue(10)
-        self.slider_speed.setStyleSheet(_SLIDER_QSS)
-        self.slider_speed.valueChanged.connect(self._on_speed_changed)
-        self.lbl_speed_value = QLabel("10")
-        self.lbl_speed_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.lbl_speed_value.setMinimumWidth(28)
-        self.slider_speed.valueChanged.connect(lambda value: self.lbl_speed_value.setText(str(value)))
-        speed_layout.addWidget(self.lbl_speed)
-        speed_layout.addWidget(self.slider_speed, 1)
-        speed_layout.addWidget(self.lbl_speed_value)
-        type_layout.addWidget(self.speed_widget)
-
-        self.dir_widget.hide()
-        self.speed_widget.hide()
-        layout.addWidget(g_type)
-
-        # ---- 帧设置 ----
-        g1 = QGroupBox("帧设置")
+        # ---- 帧变换（只作用于当前帧；整段动画参数在「动画设置」横条）----
+        g1 = QGroupBox("帧变换")
         f1 = QFormLayout(g1)
         f1.setContentsMargins(6, 12, 6, 6)
         f1.setSpacing(4)
-        self.spin_padding = CompactSpinBox()
-        self.spin_padding.setRange(0, 200)
-        self.spin_padding.setValue(0)
-        self.spin_padding.valueChanged.connect(self._on_padding_changed)
-        f1.addRow("四周扩展", self.spin_padding)
-
-        fps_row = QHBoxLayout()
-        fps_row.setContentsMargins(0, 0, 0, 0)
-        fps_row.setSpacing(6)
-        self.slider_fps = QSlider(Qt.Orientation.Horizontal)
-        self.slider_fps.setRange(1, 60)
-        self.slider_fps.setValue(10)
-        self.slider_fps.setStyleSheet(_SLIDER_QSS)
-        self.slider_fps.valueChanged.connect(self._on_fps_changed)
-        self.lbl_fps = QLabel("10")
-        self.lbl_fps.setFixedWidth(24)
-        self.slider_fps.valueChanged.connect(lambda v: self.lbl_fps.setText(str(v)))
-        fps_row.addWidget(self.slider_fps, 1)
-        fps_row.addWidget(self.lbl_fps)
-        fps_w = QWidget()
-        fps_w.setLayout(fps_row)
-        f1.addRow("帧速度", fps_w)
-
         self.lbl_canvas = QLabel("-")
         self.lbl_canvas.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.lbl_canvas.setMinimumWidth(72)
-        self.chk_reuse = QCheckBox("数据复用")
-        self.chk_reuse.setChecked(True)
-        self.chk_reuse.stateChanged.connect(self._on_reuse_toggled)
         # 用显式透明容器：QFormLayout.addRow(布局) 会自动包一层 QWidget，
         # 那层容器会带上全局 QWidget 的底色，与面板背景不一致。
         canvas_wrap = QWidget()
@@ -1179,7 +1078,6 @@ class AnimAdjustPanel(QWidget):
         canvas_row = QHBoxLayout(canvas_wrap)
         canvas_row.setContentsMargins(0, 0, 0, 0)
         canvas_row.setSpacing(4)
-        canvas_row.addWidget(self.chk_reuse)
         canvas_row.addStretch(1)
         canvas_row.addWidget(QLabel("画布大小"))
         canvas_row.addWidget(self.lbl_canvas)
@@ -1262,32 +1160,6 @@ class AnimAdjustPanel(QWidget):
 
         layout.addWidget(g1)
 
-        # ---- 地面与锚点 ----
-        g2 = QGroupBox("地面与锚点")
-        g2_layout = QVBoxLayout(g2)
-        g2_layout.setContentsMargins(6, 12, 6, 6)
-        g2_layout.setSpacing(4)
-        self.chk_ground = QCheckBox("显示地面线")
-        self.chk_ground.setChecked(False)
-        self.chk_ground.stateChanged.connect(self._on_ground_toggled)
-
-        ground_row = QHBoxLayout()
-        ground_row.setSpacing(4)
-        ground_row.addWidget(self.chk_ground)
-        ground_row.addWidget(QLabel("微调"))
-        self.btn_ground_up = self._small_btn("", "地面线上移1px", "arrow_up")
-        self.btn_ground_down = self._small_btn("", "地面线下移1px", "arrow_down")
-        self.lbl_ground_offset = QLabel("0")
-        self.lbl_ground_offset.setMinimumWidth(28)
-        self.btn_ground_up.clicked.connect(lambda: self._adjust_ground(1))
-        self.btn_ground_down.clicked.connect(lambda: self._adjust_ground(-1))
-        ground_row.addWidget(self.btn_ground_up)
-        ground_row.addWidget(self.btn_ground_down)
-        ground_row.addWidget(self.lbl_ground_offset)
-        ground_row.addStretch()
-        g2_layout.addLayout(ground_row)
-        layout.addWidget(g2)
-
         # ---- 当前帧微调 / 参照 ----
         g3 = QGroupBox("当前帧微调 / 参照")
         g3_layout = QVBoxLayout(g3)
@@ -1297,15 +1169,6 @@ class AnimAdjustPanel(QWidget):
         offset_header = QHBoxLayout()
         offset_header.setSpacing(4)
         offset_header.addWidget(QLabel("帧偏移"))
-        # 只显示数字，双击可直接输入（无上下调节箭头）
-        self.spin_off_x = EditableNumberLabel(0)
-        self.spin_off_x.setToolTip("当前帧水平偏移：双击可直接输入")
-        self.spin_off_x.value_edited.connect(self._on_offset_label_changed)
-        self.spin_off_y = EditableNumberLabel(0)
-        self.spin_off_y.setToolTip("当前帧垂直偏移：双击可直接输入")
-        self.spin_off_y.value_edited.connect(self._on_offset_label_changed)
-        offset_header.addWidget(self.spin_off_x)
-        offset_header.addWidget(self.spin_off_y)
         offset_header.addStretch()
         g3_layout.addLayout(offset_header)
 
@@ -1359,13 +1222,48 @@ class AnimAdjustPanel(QWidget):
         offset_grid.addWidget(self.btn_reset, 1, 1)
         offset_grid.addWidget(self.btn_right, 1, 2)
         offset_grid.addWidget(self.btn_down, 2, 1)
+        # 左右按钮紧贴中间（不加列拉伸）
         # 右侧：垂直滑块（跨 3 行）——调 Y
         offset_grid.addWidget(self.slider_off_v, 0, 3, 3, 1)
+        # 偏移数值：放到右边竖着显示（X 上 / Y 下），双击可直接输入
+        self.spin_off_x = EditableNumberLabel(0)
+        self.spin_off_x.setToolTip("当前帧水平偏移 X：双击可直接输入")
+        self.spin_off_x.value_edited.connect(self._on_offset_label_changed)
+        self.spin_off_y = EditableNumberLabel(0)
+        self.spin_off_y.setToolTip("当前帧垂直偏移 Y：双击可直接输入")
+        self.spin_off_y.value_edited.connect(self._on_offset_label_changed)
+        l_off_x = QHBoxLayout()
+        l_off_x.setSpacing(2)
+        l_off_x.addWidget(QLabel("X"))
+        l_off_x.addWidget(self.spin_off_x)
+        offset_grid.addLayout(l_off_x, 0, 4)
+        l_off_y = QHBoxLayout()
+        l_off_y.setSpacing(2)
+        l_off_y.addWidget(QLabel("Y"))
+        l_off_y.addWidget(self.spin_off_y)
+        offset_grid.addLayout(l_off_y, 1, 4)
         # 下方：水平滑块（跨 3 列）——调 X
         offset_grid.addWidget(self.slider_off_h, 3, 0, 1, 3)
-        offset_grid.setColumnStretch(0, 1)
-        offset_grid.setColumnStretch(2, 1)
         g3_layout.addLayout(offset_grid)
+
+        # 本帧时长：默认跟随帧速度(fps)，可逐帧覆盖（毫秒）
+        dur_wrap = QWidget()
+        dur_wrap.setStyleSheet("background: transparent;")
+        dur_row = QHBoxLayout(dur_wrap)
+        dur_row.setContentsMargins(0, 4, 0, 0)
+        dur_row.setSpacing(4)
+        dur_row.addWidget(QLabel("本帧时长"))
+        self.spin_duration = CompactSpinBox()
+        self.spin_duration.setRange(10, 5000)
+        self.spin_duration.setSingleStep(10)
+        self.spin_duration.setSuffix(" ms")
+        self.spin_duration.setToolTip("当前帧显示时长（毫秒）；等于默认时长时自动跟随帧速度，改了则只影响这一帧")
+        self.spin_duration.valueChanged.connect(self._on_duration_changed)
+        dur_row.addWidget(self.spin_duration, 1)
+        self.btn_duration_reset = self._small_btn("", "重置本帧时长为默认（跟随帧速度）", "reset")
+        self.btn_duration_reset.clicked.connect(self._reset_duration)
+        dur_row.addWidget(self.btn_duration_reset)
+        g3_layout.addWidget(dur_wrap)
 
         ref_row = QFormLayout()
         ref_row.setContentsMargins(0, 4, 0, 0)
@@ -1411,42 +1309,10 @@ class AnimAdjustPanel(QWidget):
         if action is None:
             self.lbl_canvas.setText("-")
             self._sync_offset_widgets(0, 0)
-            self.lbl_ground_offset.setText("0")
             self.combo_ref.clear()
             self._sync_transform_widgets()
+            self._sync_duration_widget()
             return
-        self.spin_padding.blockSignals(True)
-        self.spin_padding.setValue(action.padding)
-        self.spin_padding.blockSignals(False)
-        self.slider_fps.blockSignals(True)
-        self.slider_fps.setValue(action.fps)
-        self.lbl_fps.setText(str(action.fps))
-        self.slider_fps.blockSignals(False)
-        self.chk_ground.blockSignals(True)
-        self.chk_ground.setChecked(action.ground_enabled)
-        self.chk_ground.blockSignals(False)
-        self.chk_reuse.blockSignals(True)
-        self.chk_reuse.setChecked(action.reuse_frame_settings)
-        self.chk_reuse.blockSignals(False)
-        self.lbl_ground_offset.setText(str(action.ground_offset))
-        # 动作类型
-        if action.action_type == "move":
-            self.btn_type_move.setChecked(True)
-            self.dir_widget.show()
-            self.speed_widget.show()
-        else:
-            self.btn_type_static.setChecked(True)
-            self.dir_widget.hide()
-            self.speed_widget.hide()
-        # 方向
-        dir_map = {"up": self.btn_dir_up, "down": self.btn_dir_down,
-                   "left": self.btn_dir_left, "right": self.btn_dir_right}
-        dir_map.get(action.move_direction, self.btn_dir_right).setChecked(True)
-        # 速度
-        self.slider_speed.blockSignals(True)
-        self.slider_speed.setValue(action.move_speed)
-        self.slider_speed.blockSignals(False)
-        self.lbl_speed_value.setText(str(action.move_speed))
         # 参照帧下拉
         self.combo_ref.blockSignals(True)
         self.combo_ref.clear()
@@ -1463,6 +1329,7 @@ class AnimAdjustPanel(QWidget):
         self.slider_opacity.blockSignals(False)
         self._sync_transform_widgets()
         self._refresh_canvas_label()
+        self._sync_duration_widget()
 
     def _refresh_canvas_label(self):
         if self._action and self._action.frames:
@@ -1498,6 +1365,8 @@ class AnimAdjustPanel(QWidget):
         if not self._offset_drag:
             return
         self._offset_drag = False
+        # 变换作用域：右侧按钮 = 单帧(frame)；底部「动画设置」横条 = 全部帧(all)
+        self._transform_scope = "frame"
         if self.canvas is not None:
             self.canvas.end_layout_freeze()
         self._refresh_canvas_label()
@@ -1538,58 +1407,6 @@ class AnimAdjustPanel(QWidget):
     def _on_offset_slider_v(self, value: int) -> None:
         self._set_current_offset(dy=value)
 
-    def _on_type_changed(self):
-        if not self._action:
-            self._hint_no_action()
-            return
-        if self.btn_type_move.isChecked():
-            self._action.action_type = "move"
-            self.dir_widget.show()
-            self.speed_widget.show()
-        else:
-            self._action.action_type = "static"
-            self.dir_widget.hide()
-            self.speed_widget.hide()
-        self.changed.emit()
-
-    def _set_direction(self, direction: str):
-        if self._action:
-            self._action.move_direction = direction
-            self.changed.emit()
-
-    def _on_speed_changed(self, val: int):
-        if self._action:
-            self._action.move_speed = val
-            self.changed.emit()
-
-    def _on_padding_changed(self, val: int):
-        if self._action:
-            self._action.padding = val
-            self._refresh_canvas_label()
-            self.changed.emit()
-
-    def _on_fps_changed(self, val: int):
-        if self._action:
-            self._action.fps = val
-            self.changed.emit()
-
-    def _on_reuse_toggled(self, state):
-        if self._action:
-            self._action.reuse_frame_settings = state == 2
-            self.changed.emit()
-
-    def _on_ground_toggled(self, state):
-        if self._action:
-            self._action.ground_enabled = state == 2
-            self.changed.emit()
-
-    def _adjust_ground(self, delta: int):
-        """地面线上下调整：delta>0 上移，delta<0 下移。"""
-        if self._action:
-            self._action.ground_offset += delta
-            self.lbl_ground_offset.setText(str(self._action.ground_offset))
-            self.changed.emit()
-
     def _adjust_frame(self, dx: int, dy: int):
         """方向按钮：当前帧偏移微调 1px。"""
         if not self._action or not self._action.frames:
@@ -1625,6 +1442,7 @@ class AnimAdjustPanel(QWidget):
             self._sync_offset_widgets(*self._action.frame_offsets.get(idx, (0, 0)))
         else:
             self._sync_offset_widgets(0, 0)
+        self._sync_duration_widget()
 
     def set_actions(self, actions: list):
         """提供动作列表引用，用于"数据复用"跨动作传播旋转/镜像。"""
@@ -1668,23 +1486,11 @@ class AnimAdjustPanel(QWidget):
         self.lbl_transform_summary.setText("当前变换：" + (" · ".join(items) if items else "无变换"))
 
     def _transform_targets(self) -> list:
-        """返回 [(action, 帧索引迭代器)]。
-
-        勾选"数据复用"时覆盖本动作所有帧，并同步到其他勾选了复用帧设置的动作；
-        未勾选时只改当前帧。当前动作始终包含（即使未注册进动作列表）。
-        """
+        """变换目标：底部「动画设置」横条进入的模式 = 全部帧；右侧 = 当前帧。"""
         if not self._action:
             return []
-        if getattr(self._action, "reuse_frame_settings", False):
-            targets = []
-            seen: set[int] = set()
-            for act in getattr(self, "_actions", ()) or ():
-                if act is not None and act.reuse_frame_settings:
-                    targets.append((act, range(len(act.frames))))
-                    seen.add(id(act))
-            if id(self._action) not in seen:
-                targets.append((self._action, range(len(self._action.frames))))
-            return targets
+        if self._transform_scope == "all":
+            return [(self._action, list(range(len(self._action.frames))))]
         return [(self._action, [getattr(self, "_current_frame", 0)])]
 
     # ---- 自由变换：模式按钮 + 预览手柄回调 ----
@@ -1713,12 +1519,17 @@ class AnimAdjustPanel(QWidget):
             self._on_canvas_mode_changed("")
             return
         if on:
+            # 右侧按钮进入的变换模式只作用于当前帧
+            self._transform_scope = "frame"
             canvas.set_transform_mode(mode)
         elif canvas.transform_mode() == mode:
             canvas.set_transform_mode(None)
 
     def _on_canvas_mode_changed(self, mode: str) -> None:
         """预览画布侧的退出（点空白/Esc/再点同按钮）→ 同步按钮选中态。"""
+        if not mode:
+            # 画布退出变换模式：作用域回到单帧
+            self._transform_scope = "frame"
         btn = {"rotate": self.btn_mode_rotate, "scale": self.btn_mode_scale,
                "skew": self.btn_mode_skew, "perspective": self.btn_mode_perspective,
                "distort": self.btn_mode_distort}.get(mode)
@@ -1732,6 +1543,20 @@ class AnimAdjustPanel(QWidget):
             candidate.setChecked(candidate is btn)
             candidate.blockSignals(False)
         self._mode_group.setExclusive(True)
+
+    def enter_transform_mode_all(self, mode: str) -> None:
+        """底部「动画设置」横条激活变换模式：作用于全部帧。"""
+        canvas = getattr(self, "canvas", None)
+        if canvas is None:
+            return
+        if mode:
+            if self._hint_no_action():
+                return
+            self._transform_scope = "all"
+            canvas.set_transform_mode(mode)
+        elif canvas.transform_mode():
+            self._transform_scope = "frame"
+            canvas.set_transform_mode(None)
 
     def _apply_rotation(self, angle: int) -> None:
         """旋转角度变更（仅来自预览圆形手柄）→ 传播到目标帧。"""
@@ -1831,6 +1656,11 @@ class AnimAdjustPanel(QWidget):
 
         self._refresh_canvas_label()
 
+        self._refresh_canvas_label()
+        canvas = getattr(self, "canvas", None)
+        if canvas is not None:
+            canvas.update()
+
     def _on_ref_changed(self, idx: int):
         if self._action and idx >= 0:
             self._action.ref_frame = self.combo_ref.itemData(idx)
@@ -1842,11 +1672,51 @@ class AnimAdjustPanel(QWidget):
             self._action.frame_opacity = val / 100.0
             self.changed.emit()
 
+    def _sync_duration_widget(self) -> None:
+        """把当前帧时长同步到 spin（阻塞信号）；重置按钮仅在该帧被单独设置时可用。"""
+        idx = getattr(self, "_current_frame", 0)
+        if self._action and 0 <= idx < len(self._action.frames):
+            ms = self._action.frame_duration_ms(idx)
+            overridden = idx in self._action.frame_durations
+        else:
+            ms, overridden = 100, False
+        self.spin_duration.blockSignals(True)
+        self.spin_duration.setValue(ms)
+        self.spin_duration.blockSignals(False)
+        self.btn_duration_reset.setEnabled(overridden)
+
+    def _on_duration_changed(self, val: int) -> None:
+        """本帧时长 spin：等于默认时长则跟随帧速度，不同才逐帧覆盖。"""
+        if not self._action or not self._action.frames:
+            return
+        idx = getattr(self, "_current_frame", 0)
+        if not (0 <= idx < len(self._action.frames)):
+            return
+        val = max(10, int(val))
+        default_ms = max(1, round(1000 / max(1, self._action.fps)))
+        if val == default_ms:
+            self._action.frame_durations.pop(idx, None)
+        else:
+            self._action.frame_durations[idx] = val
+        self.btn_duration_reset.setEnabled(idx in self._action.frame_durations)
+        self.changed.emit()
+
+    def _reset_duration(self) -> None:
+        """本帧时长重置为默认（跟随帧速度）。"""
+        if not self._action:
+            return
+        idx = getattr(self, "_current_frame", 0)
+        self._action.frame_durations.pop(idx, None)
+        self._sync_duration_widget()
+        self.changed.emit()
+
+
 
 class ActionPreviewWidget(QWidget):
-    """动作预览窗口：预览画布 + 浮动工具条 + 播放控制 + 帧缩略图 + 动画调节组。"""
+    """动作预览窗口：预览画布 + 浮动工具条 + 播放控制 + 帧缩略图 + 帧编辑面板。"""
 
     frame_changed = pyqtSignal(int)
+    action_changed = pyqtSignal(object)  # 当前动作切换（供「动画设置」横条同步）
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1873,8 +1743,6 @@ class ActionPreviewWidget(QWidget):
         self.canvas.set_toolbar(self.toolbar)
         self.toolbar.zoom_in_requested.connect(self.canvas.zoom_in)
         self.toolbar.zoom_out_requested.connect(self.canvas.zoom_out)
-        self.toolbar.loop_changed.connect(self._on_loop_changed)
-        self.toolbar.anchor_toggled.connect(self._on_anchor_toggled)
         self.toolbar.bg_changed.connect(self._on_bg_changed)
 
         # 预览画布与下方控制区使用垂直分栏，用户可拖动横向分隔线调整高度。
@@ -1950,10 +1818,21 @@ class ActionPreviewWidget(QWidget):
             "QListWidget::item { width: 40px; height: 36px; margin: 2px; border: 1px solid #555555; border-radius: 3px; background: transparent; }"
             "QListWidget::item:selected { background: rgba(233,30,99,0.25); border: 1px solid #E91E63; }"
         )
+        self.thumb_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.thumb_list.currentRowChanged.connect(self._on_thumb_changed)
+        self.thumb_list.itemSelectionChanged.connect(self._on_thumb_selection_changed)
         lower_layout.addWidget(self.thumb_list)
 
-        # 动画调节组（可滚动）
+        # 帧编辑区总标题（与原图区下方「动画设置」横条对应：横条管整段，这里管单帧）
+        self.panel_title = QLabel("帧编辑·当前帧")
+        self.panel_title.setFixedHeight(22)
+        self.panel_title.setStyleSheet(
+            "QLabel { color: #F06292; font-size: 11px; background: #1f1f1f;"
+            " border: 1px solid #333333; border-radius: 3px; padding: 0 8px; }"
+        )
+        lower_layout.addWidget(self.panel_title)
+
+        # 帧编辑面板（可滚动）
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -2006,7 +1885,7 @@ class ActionPreviewWidget(QWidget):
 
     # ---- 对外接口 ----
     def set_actions(self, actions: list[Action]) -> None:
-        """提供动作列表引用，用于帧设置的数据复用。"""
+        """提供动作列表引用。"""
         self._actions = actions
         panel = getattr(self, "adjust_panel", None)
         if panel is not None:
@@ -2041,6 +1920,7 @@ class ActionPreviewWidget(QWidget):
         # Switching actions must not leave the previous playback timer running.
         self._timer.stop()
         self._action = action
+        self.action_changed.emit(action)
         self._frame_index = 0
         self._playing = False
         self.btn_play.setIcon(make_tool_icon("play", 16))
@@ -2054,7 +1934,7 @@ class ActionPreviewWidget(QWidget):
         self.adjust_panel.set_action(action)
         self.adjust_panel.set_current_frame(0)
         if action and action.frames:
-            self._timer.setInterval(int(1000 / max(1, action.fps)))
+            self._timer.setInterval(action.frame_duration_ms(0))
             self.slider.setRange(0, len(action.frames) - 1)
             self.slider.setValue(0)
             self._update_frame_label()
@@ -2063,7 +1943,8 @@ class ActionPreviewWidget(QWidget):
         else:
             self.slider.setRange(0, 0)
             self.lbl_frame.setText("0/0")
-            self.thumb_list.clear()
+            self._populate_placeholder_thumbs()
+            self._update_panel_title()
 
     def _populate_thumbs(self):
         self.thumb_list.clear()
@@ -2157,27 +2038,70 @@ class ActionPreviewWidget(QWidget):
         self.canvas.set_frame(self._frame_index)
         self.adjust_panel.set_current_frame(self._frame_index)
         self._update_frame_label()
+        # 程序性换行后同步标题与叠加（延迟到事件循环，信号期间读 selection 会原生崩溃）
+        self._on_thumb_selection_changed()
+        # 逐帧时长：每切一帧，定时器按该帧自己的时长走
+        if self._action and self._action.frames:
+            self._timer.setInterval(self._action.frame_duration_ms(self._frame_index))
         self.frame_changed.emit(self._frame_index)
 
     def _on_slider_changed(self, val: int):
         self._frame_index = val
         self._sync_frame()
 
+    _FRAME_DIGITS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+
+    def _populate_placeholder_thumbs(self):
+        """无动作时也显示帧描边占位框，不让缩略图区空着。"""
+        self.thumb_list.clear()
+        for _ in range(4):
+            item = QListWidgetItem("")
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            self.thumb_list.addItem(item)
+
+    def _selected_rows(self) -> list[int]:
+        """遍历 item.isSelected() 获取选中行（避免 selectedItems() 在部分平台原生崩溃）。"""
+        return [i for i in range(self.thumb_list.count())
+                if self.thumb_list.item(i).isSelected()]
+
+    def _update_panel_title(self):
+        """帧编辑标题：单选/多选都显示帧序号（如 帧编辑·①②）。"""
+        if not self._action or not self._action.frames:
+            self.panel_title.setText("帧编辑·当前帧")
+            return
+        rows = sorted(self._selected_rows())
+        if not rows:
+            self.panel_title.setText("帧编辑·当前帧")
+            return
+        digits = self._FRAME_DIGITS
+        nums = "".join(digits[i] if i < len(digits) else str(i + 1) for i in rows)
+        self.panel_title.setText(f"帧编辑·{nums}")
+
+    def _on_thumb_selection_changed(self):
+        """Ctrl 多选：除主帧外的选中帧叠加显示在预览窗口。
+
+        注意：不能在 itemSelectionChanged 信号处理期间直接读 selectedItems()，
+        在部分平台（offscreen/Windows）会触发原生崩溃；延迟到事件循环里处理。
+        """
+        QTimer.singleShot(0, self._apply_selection)
+
+    def _apply_selection(self):
+        """事件循环里读取当前选择，更新标题与叠加帧。"""
+        self._update_panel_title()
+        if not self._action or not self._action.frames:
+            return
+        rows = sorted(self._selected_rows())
+        main = self._frame_index
+        self.canvas.set_overlay_frames([r for r in rows if r != main])
+
     def _on_thumb_changed(self, row: int):
+        if not self._action or not self._action.frames:
+            return
         if row >= 0:
             self._frame_index = row
             self._sync_frame()
 
     # ---- 浮动工具条槽 ----
-    def _on_loop_changed(self, mode: str):
-        if self._action:
-            self._action.loop_mode = mode
-
-    def _on_anchor_toggled(self, checked: bool):
-        if self._action:
-            self._action.show_anchor = checked
-            self.canvas.update()
-
     def _on_bg_changed(self, mode: str):
         if self._action:
             self._action.bg_mode = mode
@@ -2185,14 +2109,9 @@ class ActionPreviewWidget(QWidget):
 
     def _on_adjust_changed(self):
         if self._action:
-            # 勾选“数据复用”的动作共享帧速度与四周扩展；未勾选动作
-            # 保留自己的设置。当前动作是本次编辑的唯一数据源。
-            if self._action.reuse_frame_settings:
-                for action in self._actions:
-                    if action is not self._action and action.reuse_frame_settings:
-                        action.padding = self._action.padding
-                        action.fps = self._action.fps
-            self._timer.setInterval(int(1000 / max(1, self._action.fps)))
+            # 帧速/四周扩展的跨动作同步改为「动画设置」横条上的显式一次性按钮，
+            # 单帧编辑不再隐式联动其它动作。
+            self._timer.setInterval(self._action.frame_duration_ms(self._frame_index))
             self.canvas._update_scroll_timer()
             if self.canvas._fit and not self.canvas._drag_kind:
                 # 拖动变换手柄期间保持视图缩放稳定，避免每帧重新自适应导致跳动

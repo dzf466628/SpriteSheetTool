@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import re
@@ -772,7 +773,7 @@ class ExportDialog(QDialog):
                 "source_size": {"width": sw, "height": sh},
                 "offset": {"x": frame_ox, "y": frame_oy},
                 "trimmed": bool(record.get("trimmed", False)),
-                "duration_ms": round(1000 / max(1, action.fps)),
+                "duration_ms": action.frame_duration_ms(index),
             })
         canvas_w, canvas_h, _, _ = compute_preview_layout(action, 0) if action.frames else (0, 0, [], (0, 0, 0))
         anchor_x, anchor_y = action_anchor_pixels(action, canvas_w, canvas_h)
@@ -808,9 +809,12 @@ class ExportDialog(QDialog):
         if not frames:
             return
         images = [_pixmap_to_pil(frame) for frame in frames]
+        # 逐帧时长（毫秒）；往返播放时反向段与正向帧时长一一对应
+        durations = [action.frame_duration_ms(i) for i in range(len(images))]
         if action.loop_mode == Action.PINGPONG and len(images) > 1:
             images = images + images[-2:0:-1]
-        duration = max(1, round(1000 / max(1, action.fps)))
+            durations = durations + durations[-2:0:-1]
+        duration = durations
         loop = 0 if action.loop_mode == Action.LOOP else 1
         images[0].save(
             str(path),
@@ -868,7 +872,7 @@ class ExportDialog(QDialog):
                         "name": "动作名（用于显示/查找，不一定唯一，按 name 查时取第一个匹配即可）",
                         "color": "动作的界面标识色（#RRGGBB），仅用于显示，不影响画面",
                         "type": "动作类型：static=静止，move=移动（配合 move 字段描述移动语义）",
-                        "fps": "播放帧率（帧/秒）；与 frames[].duration_ms 等价（duration_ms = round(1000/fps)）",
+                        "fps": "默认播放帧率（帧/秒）；某帧未单独指定时长时按它计算（默认 duration_ms = round(1000/fps)）",
                         "loop": "循环模式：loop/once/pingpong，见 usage.loop_values",
                         "canvas": {"width": "逻辑画布宽（像素），用于对齐帧", "height": "逻辑画布高（像素）", "padding": "画布四周扩展的安全边距（像素）"},
                         "anchor": {
@@ -896,7 +900,7 @@ class ExportDialog(QDialog):
                             "source_size": {"width": "该帧整体宽（合成帧为外接宽）", "height": "该帧整体高"},
                             "offset": {"x": "该帧在逻辑画布中的左上角 X", "y": "该帧在逻辑画布中的左上角 Y"},
                             "trimmed": "固定为 false：图块未做透明边裁剪",
-                            "duration_ms": "该帧显示时长（毫秒），与 fps 一致",
+                            "duration_ms": "该帧显示时长（毫秒）；可逐帧不同，未单独调整时 = round(1000/fps)",
                         },
                     },
                     "atlas": {"image": "图集图片文件名（与 JSON 同目录）", "width": "图集宽（像素）", "height": "图集高（像素）"},
@@ -1212,12 +1216,9 @@ class ExportDialog(QDialog):
         return generated
 
     def _perform_export(self) -> None:
-        if self.cb_gif.isChecked():
-            try:
-                from PIL import Image  # noqa: F401
-            except ImportError:
-                QMessageBox.critical(self, "无法导出", "GIF 导出需要 Pillow，请先安装 requirements.txt 中的依赖。")
-                return
+        if self.cb_gif.isChecked() and importlib.util.find_spec("PIL.Image") is None:
+            QMessageBox.critical(self, "无法导出", "GIF 导出需要 Pillow，请先安装 requirements.txt 中的依赖。")
+            return
         directory = QFileDialog.getExistingDirectory(self, "选择导出文件夹", last_directory())
         if not directory:
             return

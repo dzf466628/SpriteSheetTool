@@ -232,14 +232,14 @@ QGroupBox {{
     background-color: {BG_1};
     border: 1px solid {LINE};
     border-radius: 6px;
-    margin-top: 12px;
-    padding-top: 8px;
+    margin-top: 8px;
+    padding-top: 4px;
 }}
 QGroupBox::title {{
     subcontrol-origin: margin;
     subcontrol-position: top left;
-    left: 10px;
-    padding: 0 6px;
+    left: 6px;
+    padding: 0 4px;
     color: {ACCENT_HOVER};
     font-weight: bold;
 }}

@@ -1,4 +1,4 @@
-# Python
+﻿# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -54,3 +54,6 @@ packaged.err
 
 # 本机电脑编号标识（1号/2号），每台电脑各自创建，不进 Git
 .machine
+
+# 技能包备份（dudu-ai-dev-kit 等），不进仓库
+skills/*.rar

@@ -93,6 +93,7 @@ def _frame_entries(action, records, prefix: str) -> list[dict]:
             x, y, w, h = record
             ox, oy, cw, ch, trimmed = 0, 0, w, h, False
         entries.append({
+            "_index": index,  # 内部字段：供 Aseprite 填逐帧 duration，输出前移除
             "filename": f"{prefix}_{index}",
             "frame": {"x": x, "y": y, "w": w, "h": h},
             "rotated": False,
@@ -127,6 +128,7 @@ def build_tp_hash(actions, records, atlas_name: str, atlas_w: int, atlas_h: int,
     frames: dict = {}
     for action in actions:
         for entry in _frame_entries(action, records, prefix_map.get(action, action.name)):
+            entry.pop("_index", None)
             frames[entry.pop("filename")] = entry
     return {"frames": frames, "meta": _tp_meta(atlas_name, atlas_w, atlas_h, app_label)}
 
@@ -136,7 +138,9 @@ def build_tp_array(actions, records, atlas_name: str, atlas_w: int, atlas_h: int
     prefix_map = _prefixes_for(actions, prefixes)
     frames: list = []
     for action in actions:
-        frames.extend(_frame_entries(action, records, prefix_map.get(action, action.name)))
+        for entry in _frame_entries(action, records, prefix_map.get(action, action.name)):
+            entry.pop("_index", None)
+            frames.append(entry)
     return {"frames": frames, "meta": _tp_meta(atlas_name, atlas_w, atlas_h, app_label)}
 
 
@@ -151,8 +155,10 @@ def build_aseprite_array(actions, records, atlas_name: str, atlas_w: int, atlas_
         entries = _frame_entries(action, records, prefix)
         if not entries:
             continue
+        duration_of = getattr(action, "frame_duration_ms", None)
         for entry in entries:
-            entry["duration"] = _duration_ms(action.fps)
+            _idx = entry.pop("_index", 0)
+            entry["duration"] = int(duration_of(_idx)) if callable(duration_of) else _duration_ms(action.fps)
             frames.append(entry)
         tags.append({
             "name": prefix,
