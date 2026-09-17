@@ -21,12 +21,14 @@ FMT_NATIVE = "native"
 FMT_TP_HASH = "tp_hash"
 FMT_TP_ARRAY = "tp_array"
 FMT_ASEPRITE = "aseprite"
+FMT_DOUBAO = "doubao"
 
 FORMAT_LABELS = {
     FMT_NATIVE: "本工具格式",
     FMT_TP_HASH: "TexturePacker JSON-Hash",
     FMT_TP_ARRAY: "TexturePacker JSON-Array",
     FMT_ASEPRITE: "Aseprite JSON-Array",
+    FMT_DOUBAO: "豆包视频关键帧格式",
 }
 
 DEFAULT_FPS = 10
@@ -110,6 +112,15 @@ def detect_format(data: dict) -> str:
     if isinstance(frames, dict):
         return FMT_TP_HASH
     if isinstance(frames, list):
+        # 豆包视频关键帧工具：frames 平铺，entry 本身就是 {name,x,y,width,height,duration}
+        # （没有嵌套 frame/rect/region，也没有 filename 字段）
+        if frames and isinstance(frames[0], dict):
+            e0 = frames[0]
+            if (not e0.get("frame") and not e0.get("rect") and not e0.get("bounds")
+                and not e0.get("region") and not e0.get("filename")
+                and not e0.get("spriteSourceSize")
+                and ("x" in e0 or "width" in e0 or "w" in e0)):
+                return FMT_DOUBAO
         return FMT_TP_ARRAY
     raise ImportError_("JSON 结构无法识别。")
 
@@ -314,6 +325,45 @@ def _parse_aseprite(data: dict, warnings: list[str]) -> tuple[str, list[Imported
     return image_name, actions, []
 
 
+# ---------------- 豆包视频关键帧工具 ----------------
+
+def _parse_doubao(data: dict, warnings: list[str]) -> tuple[str, list[ImportedAction], list[dict]]:
+    """豆包视频关键帧工具导出的平铺格式：
+    {"image":..., "size":{width,height}, "fps":...,
+     "frames":[{name,x,y,width,height,duration}, ...]}
+    所有帧归为一个动作；每帧 duration 直接保留，fps 取顶层（round 到 int）。
+    """
+    image_name = data.get("image") or "spritesheet.png"
+    frames_raw = data.get("frames") or []
+    frames: list[ImportedFrame] = []
+    for entry in frames_raw:
+        if not isinstance(entry, dict):
+            continue
+        fx = int(entry.get("x", entry.get("X", 0)))
+        fy = int(entry.get("y", entry.get("Y", 0)))
+        fw = int(entry.get("width", entry.get("w", entry.get("W", 0))))
+        fh = int(entry.get("height", entry.get("h", entry.get("H", 0))))
+        if fw <= 0 or fh <= 0:
+            continue
+        duration = int(entry.get("duration") or entry.get("duration_ms") or 100)
+        frames.append(ImportedFrame(
+            parts=[ImportedPart(rect=(fx, fy, fw, fh), pos=(0, 0))],
+            duration_ms=duration,
+            canvas_pos=(0, 0),
+            canvas_size=(fw, fh),
+        ))
+    if not frames:
+        raise ImportError_("JSON 里没有可导入的帧。")
+    fps_raw = data.get("fps")
+    if fps_raw:
+        fps_val = max(1, round(float(fps_raw)))
+    else:
+        fps_val = max(1, round(1000 / max(1, frames[0].duration_ms)))
+    act = ImportedAction(name="动作1", frames=frames, fps=fps_val)
+    warnings.append(f"豆包视频关键帧格式：共 {len(frames)} 帧，已归为一个动作（fps={fps_val}）。")
+    return image_name, [act], []
+
+
 def load_project(json_path: str | Path) -> ImportedProject:
     """读取 JSON（可选自动找同目录图片）并解析为工程结构。"""
     path = Path(json_path)
@@ -338,6 +388,8 @@ def load_project(json_path: str | Path) -> ImportedProject:
         image_name, actions, _ = _parse_tp(data, warnings, is_hash=True)
     elif fmt == FMT_TP_ARRAY:
         image_name, actions, _ = _parse_tp(data, warnings, is_hash=False)
+    elif fmt == FMT_DOUBAO:
+        image_name, actions, _ = _parse_doubao(data, warnings)
     else:
         image_name, actions, _ = _parse_aseprite(data, warnings)
 
