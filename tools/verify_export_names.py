@@ -1,4 +1,4 @@
-"""导出同名处理回归。
+﻿"""导出同名处理回归。
 
 两件事要证明：
   1) `ExportDialog._planned_names()` 预告的路径与 `_export_to_directory()` 实际写入的
@@ -16,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QRect, Qt
 from PyQt6.QtGui import QColor, QPainter, QPixmap
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))

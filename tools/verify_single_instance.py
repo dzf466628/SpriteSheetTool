@@ -1,4 +1,4 @@
-"""单实例回归：第二个进程必须把文件转给已在跑的实例，自己不开窗口。
+﻿"""单实例回归：第二个进程必须把文件转给已在跑的实例，自己不开窗口。
 
 三层验证，从轻到重：
   1. 协议层：起一个主实例，用客户端 socket 发一个路径，断言信号收到同样的内容；
@@ -19,7 +19,6 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QTimer  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent

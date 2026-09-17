@@ -1,4 +1,4 @@
-"""存一个真实工程，检查 .sstool 的文件布局与缩略图。
+﻿"""存一个真实工程，检查 .sstool 的文件布局与缩略图。
 
 Usage: .venv\\Scripts\\python.exe tools\\inspect_project_file.py [输出路径]
 """
@@ -6,7 +6,6 @@ import io
 import os
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

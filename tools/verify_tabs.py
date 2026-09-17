@@ -1,4 +1,4 @@
-"""工程标签页回归：新建 / 切换 / 改名 / 关闭，且**每个标签的文档互不串味**。
+﻿"""工程标签页回归：新建 / 切换 / 改名 / 关闭，且**每个标签的文档互不串味**。
 
 要证明的四件事：
   1. 标签栏是"矮条"（高度 20..32），且能在标签上标出未保存状态；
@@ -17,7 +17,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt
+from PyQt6.QtCore import QPoint, QPointF, QRect, Qt
 from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPixmap
 from PyQt6.QtWidgets import QApplication
 

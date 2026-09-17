@@ -1,4 +1,4 @@
-"""工程文件格式回归：新布局（PNG 前置）、旧布局兼容、损坏文件处理。
+﻿"""工程文件格式回归：新布局（PNG 前置）、旧布局兼容、损坏文件处理。
 
 新布局让 .sstool 本身是一张合法 PNG，资源管理器（配好图片缩略图处理器后）
 就能直接显示内容缩略图；容器数据接在 PNG 的 IEND 之后。
@@ -8,14 +8,13 @@ Usage: .venv\\Scripts\\python.exe tools\\verify_project_format.py
 import io
 import json
 import os
-import struct
 import sys
 import tempfile
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap
+from PyQt6.QtGui import QColor, QPixmap
 from PyQt6.QtWidgets import QApplication
 
 ROOT = Path(__file__).resolve().parent.parent

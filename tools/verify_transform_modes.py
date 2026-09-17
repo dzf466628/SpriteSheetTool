@@ -1,4 +1,4 @@
-"""自由变换各模式的**行为**回归（不是看画面，是看角点数值）。
+﻿"""自由变换各模式的**行为**回归（不是看画面，是看角点数值）。
 
 四角顺序（与 DEFAULT_QUAD 一致）：0=左上 1=右上 2=右下 3=左下；
 源矩形里 (0,1)(2,3) 是水平边，(1,2)(3,0) 是垂直边。
@@ -25,7 +25,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QPointF, Qt
-from PyQt6.QtGui import QColor, QPainter, QPixmap
+from PyQt6.QtGui import QColor, QPixmap
 from PyQt6.QtWidgets import QApplication
 
 ROOT = Path(__file__).resolve().parent.parent
