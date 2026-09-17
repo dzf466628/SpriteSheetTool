@@ -1209,6 +1209,7 @@ class AnimAdjustPanel(QWidget):
         self.slider_off_v.setValue(0)
         self.slider_off_v.setFixedWidth(20)
         self.slider_off_v.setStyleSheet(_BIPOLAR_SLIDER_QSS)
+        self.slider_off_v.setInvertedAppearance(True)  # 向上拖=值减小=帧向上移
         self.slider_off_v.setToolTip("大幅调节垂直偏移（-200 ~ +200，居中为 0，向上为负）")
         self.slider_off_v.valueChanged.connect(self._on_offset_slider_v)
         self.slider_off_v.sliderPressed.connect(self._begin_offset_drag)
@@ -1811,6 +1812,8 @@ class ActionPreviewWidget(QWidget):
         self.thumb_list.setFlow(QListWidget.Flow.LeftToRight)
         self.thumb_list.setWrapping(False)
         self.thumb_list.setSpacing(2)
+        # IconMode 下固定格子大小，消除点击位置与视觉位置的偏移
+        self.thumb_list.setGridSize(QSize(44, 40))
         self.thumb_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.thumb_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.thumb_list.setStyleSheet(
@@ -2049,7 +2052,7 @@ class ActionPreviewWidget(QWidget):
         self._frame_index = val
         self._sync_frame()
 
-    _FRAME_DIGITS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+    # 帧序号用纯数字（逗号分隔），不再用带圈数字
 
     def _populate_placeholder_thumbs(self):
         """无动作时也显示帧描边占位框，不让缩略图区空着。"""
@@ -2065,7 +2068,7 @@ class ActionPreviewWidget(QWidget):
                 if self.thumb_list.item(i).isSelected()]
 
     def _update_panel_title(self):
-        """帧编辑标题：单选/多选都显示帧序号（如 帧编辑·①②）。"""
+        """帧编辑标题：单选/多选都显示帧序号（如 帧编辑·1,2）。"""
         if not self._action or not self._action.frames:
             self.panel_title.setText("帧编辑·当前帧")
             return
@@ -2073,8 +2076,7 @@ class ActionPreviewWidget(QWidget):
         if not rows:
             self.panel_title.setText("帧编辑·当前帧")
             return
-        digits = self._FRAME_DIGITS
-        nums = "".join(digits[i] if i < len(digits) else str(i + 1) for i in rows)
+        nums = ",".join(str(i + 1) for i in rows)
         self.panel_title.setText(f"帧编辑·{nums}")
 
     def _on_thumb_selection_changed(self):

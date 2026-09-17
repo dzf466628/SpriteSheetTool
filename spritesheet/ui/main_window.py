@@ -1370,6 +1370,11 @@ class MainWindow(QMainWindow):
         )
         for path in paths:
             self._remember_dialog_path(path)
+            # 导入图片时自动检索同目录同名 JSON，有则优先导入工程（JSON 会连带加载配套图片）
+            json_candidate = Path(path).with_suffix(".json")
+            if json_candidate.is_file():
+                self._import_project(str(json_candidate))
+                continue
             pm = QPixmap(path)
             if not pm.isNull():
                 self._on_image_loaded(pm)
