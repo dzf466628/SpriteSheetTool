@@ -92,8 +92,17 @@ def detect_format(data: dict) -> str:
     """按结构特征识别 JSON 格式。"""
     if isinstance(data.get("animations"), list) and isinstance(data.get("atlas"), dict):
         return FMT_NATIVE
+    # 顶层直接是数组（某些工具输出 [entry, entry, ...]）
+    if isinstance(data, list):
+        return FMT_TP_ARRAY
     frames = data.get("frames")
     meta = data.get("meta") or {}
+    if frames is None:
+        # 兼容：顶层有 Textures/frames 等变体键名
+        for alt in ("Textures", "textures", "sprites", "regions"):
+            if isinstance(data.get(alt), (list, dict)):
+                frames = data[alt]
+                break
     if frames is None:
         raise ImportError_("JSON 里没有 frames / animations 字段，无法识别格式。")
     if isinstance(meta.get("frameTags"), list):
@@ -107,6 +116,25 @@ def detect_format(data: dict) -> str:
 
 def _rect(d: dict, keys=("x", "y", "width", "height")) -> tuple[int, int, int, int]:
     return (int(d[keys[0]]), int(d[keys[1]]), int(d[keys[2]]), int(d[keys[3]]))
+
+
+def _wh(d: dict, w_keys=("w", "width", "W"), h_keys=("h", "height", "H")) -> tuple[int, int]:
+    """从字典里取宽高，兼容 w/h、width/height、W/H 等字段名。"""
+    w = 0
+    for k in w_keys:
+        if k in d:
+            w = int(d[k])
+            break
+    h = 0
+    for k in h_keys:
+        if k in d:
+            h = int(d[k])
+            break
+    return w, h
+
+
+def _xy(d: dict) -> tuple[int, int]:
+    return int(d.get("x", d.get("X", 0))), int(d.get("y", d.get("Y", 0)))
 
 
 # ---------------- 本工具格式 ----------------
@@ -175,22 +203,33 @@ def _parse_native(data: dict, base: Path, warnings: list[str]) -> tuple[str, lis
 # ---------------- TexturePacker / Aseprite ----------------
 
 def _entry_to_frame(entry: dict) -> ImportedFrame | None:
-    fr = entry.get("frame") or {}
-    if not fr:
+    # 帧矩形：标准 TP 用 entry.frame，其他工具可能用 rect/bounds/region，
+    # 甚至 entry 本身就是 {x,y,w,h}
+    fr = entry.get("frame") or entry.get("rect") or entry.get("bounds") \
+        or entry.get("region") or {}
+    if not fr or not isinstance(fr, dict):
+        # entry 本身可能就是矩形
+        if any(k in entry for k in ("w", "h", "width", "height")):
+            fr = entry
+        else:
+            return None
+    fx, fy = _xy(fr)
+    fw, fh = _wh(fr)
+    if fw <= 0 or fh <= 0:
         return None
-    rect = (int(fr.get("x", 0)), int(fr.get("y", 0)), int(fr.get("w", 0)), int(fr.get("h", 0)))
-    sss = entry.get("spriteSourceSize") or {}
-    pos = (int(sss.get("x", 0)), int(sss.get("y", 0)))
-    size = entry.get("sourceSize") or {}
+    rect = (fx, fy, fw, fh)
+    # 内容在源画布中的偏移（spriteSourceSize）
+    sss = entry.get("spriteSourceSize") or entry.get("spriteSource") or {}
+    pos = _xy(sss) if isinstance(sss, dict) else (0, 0)
+    size = entry.get("sourceSize") or entry.get("source") or {}
     canvas_size = None
-    if size:
-        cw, ch = int(size.get("w", 0)), int(size.get("h", 0))
+    if isinstance(size, dict):
+        cw, ch = _wh(size)
         if cw > 0 and ch > 0:
             canvas_size = (cw, ch)
-    # 帧原点即 sourceSize 原点（内容偏移已经体现在 pos 里），故 canvas_pos = (0, 0)；
-    # canvas_size 用于还原画布留边，保证各帧的相对位置不错位。
+    duration = entry.get("duration") or entry.get("duration_ms") or 100
     return ImportedFrame(parts=[ImportedPart(rect=rect, pos=pos)],
-                         duration_ms=int(entry.get("duration") or 100),
+                         duration_ms=int(duration),
                          canvas_pos=(0, 0),
                          canvas_size=canvas_size)
 
@@ -225,6 +264,15 @@ def _parse_tp(data: dict, warnings: list[str], is_hash: bool) -> tuple[str, list
     for stem in order:
         act = ImportedAction(name=stem)
         for entry in grouped[stem]:
+            frame = _entry_to_frame(entry)
+            if frame:
+                act.frames.append(frame)
+        if act.frames:
+            actions.append(act)
+    # 兜底：标准分组没解析出帧时，把所有原始 entry 尝试直接解析后放进一个动作
+    if not actions and entries:
+        act = ImportedAction(name="动作1")
+        for _name, entry in entries:
             frame = _entry_to_frame(entry)
             if frame:
                 act.frames.append(frame)
@@ -272,9 +320,12 @@ def load_project(json_path: str | Path) -> ImportedProject:
     if not path.exists():
         raise ImportError_(f"文件不存在：{path}")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))  # utf-8-sig 容忍 BOM
     except (OSError, json.JSONDecodeError) as exc:
         raise ImportError_(f"JSON 解析失败：{exc}") from exc
+    # 顶层直接是数组：包成 {"frames": [...]}
+    if isinstance(data, list):
+        data = {"frames": data}
     if not isinstance(data, dict):
         raise ImportError_("JSON 顶层不是对象，无法识别。")
 

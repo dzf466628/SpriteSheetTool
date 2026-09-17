@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 
-from PyQt6.QtCore import QElapsedTimer, QPointF, QRectF, QSize, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QElapsedTimer, QPointF, QRect, QRectF, QSize, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform,
 )
@@ -1860,19 +1860,21 @@ class ActionPreviewWidget(QWidget):
 
         # 帧缩略图
         self.thumb_list = QListWidget()
-        self.thumb_list.setFixedHeight(56)
-        # ListMode：点击区域与 item 矩形完全一致，按住 Ctrl 多选不会偏移
-        self.thumb_list.setViewMode(QListWidget.ViewMode.ListMode)
-        self.thumb_list.setIconSize(QSize(28, 28))
+        self.thumb_list.setFixedHeight(44)
+        # IconMode + 固定 gridSize + item.setSizeHint，点击区域与格子完全一致
+        self.thumb_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.thumb_list.setIconSize(QSize(30, 30))
+        self.thumb_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.thumb_list.setMovement(QListWidget.Movement.Static)
         self.thumb_list.setFlow(QListWidget.Flow.LeftToRight)
         self.thumb_list.setWrapping(False)
-        self.thumb_list.setSpacing(2)
+        self.thumb_list.setSpacing(1)
+        self.thumb_list.setGridSize(QSize(36, 36))
         self.thumb_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.thumb_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.thumb_list.setStyleSheet(
             "QListWidget { background: #1a1a1a; border: none; border-radius: 4px; padding: 2px; }"
-            "QListWidget::item { width: 44px; height: 40px; margin: 0; border: 1px solid #555555; border-radius: 3px; background: transparent; }"
+            "QListWidget::item { border: 1px solid #555555; border-radius: 3px; background: transparent; }"
             "QListWidget::item:selected { background: rgba(233,30,99,0.25); border: 1px solid #E91E63; }"
         )
         self.thumb_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -2012,24 +2014,27 @@ class ActionPreviewWidget(QWidget):
         for i in range(len(self._action.frames)):
             item = QListWidgetItem()
             pm = action_frame_pixmap(self._action, i)
-            thumb = QPixmap(28, 28)
+            thumb = QPixmap(30, 30)
             thumb.fill(Qt.GlobalColor.transparent)
             painter = QPainter(thumb)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             scaled = pm.scaled(
-                24, 24,
+                26, 26,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
             painter.drawPixmap(
-                (28 - scaled.width()) // 2,
-                (28 - scaled.height()) // 2,
+                (30 - scaled.width()) // 2,
+                (30 - scaled.height()) // 2,
                 scaled,
             )
+            # 帧编号画在右下角（角标），不用 item.setText，避免文字撑大 item 导致点击偏移
+            painter.setPen(QColor("#E0E0E0"))
+            painter.setFont(QFont("Microsoft YaHei UI", 7, QFont.Weight.Bold))
+            painter.drawText(QRect(14, 16, 15, 13), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom, str(i + 1))
             painter.end()
             item.setIcon(QIcon(thumb))
-            item.setText(str(i + 1))
-            item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom)
+            item.setSizeHint(QSize(34, 34))
             self.thumb_list.addItem(item)
         self.thumb_list.setCurrentRow(0)
 
@@ -2116,6 +2121,7 @@ class ActionPreviewWidget(QWidget):
         for _ in range(4):
             item = QListWidgetItem("")
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            item.setSizeHint(QSize(34, 34))
             self.thumb_list.addItem(item)
 
     def _selected_rows(self) -> list[int]:
@@ -2168,8 +2174,8 @@ class ActionPreviewWidget(QWidget):
     def _on_canvas_frame_dragged(self, idx: int, dx: int, dy: int) -> None:
         """参照帧模式下画布拖动当前帧后，同步右侧偏移控件与标题。"""
         self.adjust_panel._sync_offset_widgets(dx, dy)
-        self._refresh_canvas_label()
-        self.changed.emit()
+        self.adjust_panel._refresh_canvas_label()
+        self.adjust_panel.changed.emit()
 
     def _on_adjust_changed(self):
         if self._action:
