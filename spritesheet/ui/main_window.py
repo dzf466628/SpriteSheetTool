@@ -722,7 +722,7 @@ class MainWindow(QMainWindow):
         box.setText(f"「{name}」有未保存的改动。")
         box.setInformativeText("关闭前要保存吗？")
         btn_save = box.addButton("保存", QMessageBox.ButtonRole.AcceptRole)
-        btn_discard = box.addButton("不保存", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("不保存", QMessageBox.ButtonRole.DestructiveRole)
         btn_cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(btn_save)
         box.exec()
