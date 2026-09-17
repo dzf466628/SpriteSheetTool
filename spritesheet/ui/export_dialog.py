@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+﻿#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """导出弹窗：动作选择 + 预览 + 导出选项（从 main_window.py 拆出，纯搬移，逻辑未改动）。
 
@@ -804,7 +804,6 @@ class ExportDialog(QDialog):
 
     @staticmethod
     def _write_gif(path: Path, action: Action, frames: list[QPixmap]) -> None:
-        from PIL import Image
 
         if not frames:
             return
