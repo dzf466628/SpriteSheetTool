@@ -19,6 +19,11 @@ from pathlib import Path
 
 os.environ.pop("QT_QPA_PLATFORM", None)      # 别用 offscreen：那个平台没有字体
 
+# Windows 控制台默认 GBK，输出 ✕ 等特殊字符会 UnicodeEncodeError 崩溃；强制切 UTF-8
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QFont, QPainter, QPixmap
 from PyQt6.QtWidgets import QApplication
