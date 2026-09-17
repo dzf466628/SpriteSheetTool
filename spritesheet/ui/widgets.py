@@ -417,7 +417,6 @@ class ProjectTabBar(QWidget):
         painter.setPen(QPen(QColor(self.LINE)))
         painter.drawLine(0, 0, self.width(), 0)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        fm = self._fm()
         painter.setFont(QFont("Microsoft YaHei UI", -1, QFont.Weight.Normal, False))
         font = QFont("Microsoft YaHei UI")
         font.setPixelSize(12)
