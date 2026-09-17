@@ -238,6 +238,7 @@ class MainWindow(QMainWindow):
         self._transform_history_pending = None
         self._restoring_transform_history = False
         self._project_path: Path | None = None
+        self._project_json_path: str | None = None  # 当前工程关联的 JSON 文件路径
         self._project_dirty = False
         # 工程显示名（标签页上那个）与"是否被用户改过名"。改名后不再被文件名覆盖。
         self._project_name = "未命名工程"
@@ -551,6 +552,7 @@ class MainWindow(QMainWindow):
             "preview_offset": QPointF(self.preview.canvas._offset),
             "preview_fit": self.preview.canvas._fit,
             "project_path": self._project_path,
+            "project_json_path": self._project_json_path,
             "project_dirty": self._project_dirty,
             "project_name": self._project_name,
             "name_custom": self._name_custom,
@@ -579,6 +581,7 @@ class MainWindow(QMainWindow):
             "preview_offset": QPointF(0, 0),
             "preview_fit": True,
             "project_path": None,
+            "project_json_path": None,
             "project_dirty": False,
             "project_name": "未命名工程",
             "name_custom": False,
@@ -632,9 +635,12 @@ class MainWindow(QMainWindow):
         self.preview.canvas._fit = bool(doc["preview_fit"])
 
         self._project_path = doc["project_path"]
+        self._project_json_path = doc.get("project_json_path")
         self._project_dirty = bool(doc["project_dirty"])
         self._project_name = doc["project_name"]
         self._name_custom = bool(doc["name_custom"])
+        # 左上角 JSON 徽标跟着工程走
+        self.image_viewer.set_json_badge(bool(self._project_json_path), self._project_json_path or "")
 
         # 撤销栈每个文档一份；菜单里的「撤销」要跟着换到新的那份上
         stack = doc["undo_stack"]
@@ -853,6 +859,8 @@ class MainWindow(QMainWindow):
             return False
         self.tabs.set_current(index)
         self._project_path = Path(path)
+        self._project_json_path = None
+        self.image_viewer.set_json_badge(False)
         self._project_dirty = False
         self._project_name = self._tab_name_for_path(self._project_path)
         self._name_custom = False
@@ -999,6 +1007,7 @@ class MainWindow(QMainWindow):
         self.tabs.tab_close_requested.connect(self._close_tab)
         self.tabs.tab_renamed.connect(self._rename_tab)
         self.tabs.new_tab_requested.connect(lambda: self._new_tab())
+        self.tabs.tab_drop_requested.connect(self._on_tab_drop)
         main_layout.addWidget(self.tabs)
 
         # 内容区：侧边栏 | QSplitter(原图区 | 右侧预览)
@@ -1043,6 +1052,10 @@ class MainWindow(QMainWindow):
         self.image_viewer.image_loaded.connect(self._on_image_loaded)
         self.image_viewer.json_dropped.connect(self._import_project)
         self.image_viewer.project_dropped.connect(self._safe_open_project)
+        self.image_viewer.json_dropped_current.connect(
+            lambda p: self._import_project(p, target="current"))
+        self.image_viewer.image_path_dropped.connect(
+            lambda p: self._open_path_smart(p, target="current"))
         self.image_viewer.selection_changed.connect(self._on_selection_changed)
         self.image_viewer.selection_changed.connect(self._mark_project_dirty)
         self.image_viewer.frames_updated.connect(self._on_frames_updated)
@@ -1392,8 +1405,38 @@ class MainWindow(QMainWindow):
             self._remember_dialog_path(path)
             self._import_project(path)
 
-    def _import_project(self, path_str: str) -> None:
-        """导入 JSON（自动识别格式），配套图片由 JSON 引用的文件名在同目录查找。"""
+    def _ask_import_target(self, existing_actions: int, project) -> str:
+        """询问导入目标：加入当前工程 / 新建工程 / 取消。"""
+        box = QMessageBox(self)
+        box.setWindowTitle("导入工程")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(f"当前工程有 {existing_actions} 个动作。")
+        box.setInformativeText(
+            f"识别格式：{project.format_label}\n"
+            f"配套图片：{project.atlas_path.name}\n"
+            f"动作数量：{len(project.actions)} 个\n\n"
+            "要加入当前工程，还是新建一个标签页？"
+        )
+        btn_current = box.addButton("加入当前工程", QMessageBox.ButtonRole.AcceptRole)
+        btn_new = box.addButton("新建工程", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(btn_current)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_new:
+            return "new"
+        if clicked is btn_current:
+            return "current"
+        return "cancel"
+
+    def _import_project(self, path_str: str, target: str = "ask") -> None:
+        """导入 JSON（自动识别格式）。
+
+        target:
+          - "ask"：当前工程有内容时弹窗询问（加入当前 / 新建工程 / 取消）
+          - "current"：直接加入当前工程（追加动作，不清空现有）
+          - "new"：新建标签页后导入（清空式）
+        """
         from spritesheet.importer import ImportError_, load_project
 
         try:
@@ -1401,34 +1444,43 @@ class MainWindow(QMainWindow):
         except ImportError_ as exc:
             QMessageBox.warning(self, "导入失败", str(exc))
             return
-        except Exception as exc:  # noqa: BLE001 - 兜底，避免导入异常打断程序
+        except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "导入失败", f"解析 {path_str} 时出错：{exc}")
             return
-
-        if self.actions:
-            answer = QMessageBox.question(
-                self, "导入工程",
-                f"导入将<b>替换当前工程</b>（现有 {len(self.actions)} 个动作）。<br><br>"
-                f"识别格式：{project.format_label}<br>"
-                f"配套图片：{project.atlas_path.name}<br>"
-                f"动作数量：{len(project.actions)} 个<br><br>是否继续？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
 
         pm = QPixmap(str(project.atlas_path))
         if pm.isNull():
             QMessageBox.warning(self, "导入失败", f"无法读取配套图片：\n{project.atlas_path}")
             return
 
+        has_content = bool(self.actions) or self.image_viewer._pixmap is not None
+        append = False
+        if target == "ask" and has_content:
+            choice = self._ask_import_target(len(self.actions), project)
+            if choice == "cancel":
+                return
+            if choice == "new":
+                self._new_tab(switch=True)
+                append = False
+            else:
+                append = True
+        elif target == "new":
+            self._new_tab(switch=True)
+            append = False
+        else:  # current 或空工程
+            append = bool(has_content)
+
         try:
-            self._apply_imported_project(project, pm)
-        except Exception as exc:  # noqa: BLE001 - 导入失败不应导致程序退出
+            self._apply_imported_project(project, pm, append=append)
+        except Exception as exc:  # noqa: BLE001
             import traceback
             traceback.print_exc()
             QMessageBox.warning(self, "导入失败", f"应用工程时出错：{exc}")
+            return
+
+        # 左上角 JSON 徽标
+        self._project_json_path = str(path_str)
+        self.image_viewer.set_json_badge(True, str(path_str))
 
     def _end_all_renames(self) -> None:
         """结束所有卡片的编辑状态与待执行的延迟回调（销毁卡片前必须先做）。"""
@@ -1442,7 +1494,7 @@ class MainWindow(QMainWindow):
                 except (RuntimeError, AttributeError):
                     pass
 
-    def _apply_imported_project(self, project, pm: QPixmap) -> None:
+    def _apply_imported_project(self, project, pm: QPixmap, append: bool = False) -> None:
         """把解析好的工程套用到界面：图集当原图、图块当元素、动作重建。
 
         若 JSON 带 elements（本工具格式），用其中的 origin 还原每个元素的**逻辑坐标**，
@@ -1475,11 +1527,32 @@ class MainWindow(QMainWindow):
                 for p in fr.parts:
                     add_tile(p.rect)
 
-        # 3) 载入原图（其触发的异步自动检测随后会被作废）
-        viewer.set_pixmap(atlas)
+        # 3) 载入原图（append 模式：拼到当前原图下方，新 tiles 的 y 加偏移）
+        if append and viewer._pixmap is not None and not viewer._pixmap.isNull():
+            old_h = viewer._pixmap.height()
+            viewer.append_pixmap(atlas)
+            y_off = old_h + 16
+            # 已有 tiles 保留，新 tiles 的 y 加偏移
+            old_tiles = list(tiles)
+            tiles.clear()
+            tile_index.clear()
+            for r in old_tiles:
+                tile_index[r] = len(tiles)
+                tiles.append(r)
+            # 重新收集新 tiles（y 加 y_off）
+            for act in project.actions:
+                for fr in act.frames:
+                    for pp in fr.parts:
+                        r = pp.rect
+                        rr = (r[0], r[1] + y_off, r[2], r[3])
+                        if rr not in tile_index:
+                            tile_index[rr] = len(tiles)
+                            tiles.append(rr)
+        else:
+            viewer.set_pixmap(atlas)
+            y_off = 0
         viewer._detect_generation += 1
         viewer._frames = tiles
-
         # 4) 还原元素逻辑坐标（来自 JSON 的 elements；用于普通帧的对齐参考）
         logical: dict[int, tuple[int, int]] = {}
         for el in project.elements:
@@ -1517,8 +1590,13 @@ class MainWindow(QMainWindow):
             layouts: list[list[tuple[int, int, int]]] = []
             kept_frames: list = []      # 与 layouts 一一对应（丢弃无有效部件的帧）
             for fr in imported.frames:
-                layout = [(tile_index[p.rect], p.pos[0], p.pos[1])
-                          for p in fr.parts if p.rect in tile_index]
+                layout = []
+                for p in fr.parts:
+                    r = p.rect
+                    if append:
+                        r = (r[0], r[1] + y_off, r[2], r[3])
+                    if r in tile_index:
+                        layout.append((tile_index[r], p.pos[0], p.pos[1]))
                 if layout:
                     layouts.append(layout)
                     kept_frames.append(fr)
@@ -1631,22 +1709,46 @@ class MainWindow(QMainWindow):
         try:
             for url in event.mimeData().urls():
                 path = url.toLocalFile()
-                suffix = Path(path).suffix.lower()
-                if suffix == ".sstool":
-                    QTimer.singleShot(0, lambda p=path: self._safe_open_project(p))
-                    event.acceptProposedAction()
-                    return
-                if suffix == ".json":
-                    # 拖放回调期间不做重活：延迟处理，避免 OLE 拖放未结束就弹出模态框/重建界面
-                    QTimer.singleShot(0, lambda p=path: self._import_project(p))
-                    event.acceptProposedAction()
-                    return
-                if suffix in SUPPORTED_IMAGE_EXT:
-                    QTimer.singleShot(0, lambda p=path: self._on_image_loaded(QPixmap(p)))
-                    event.acceptProposedAction()
-                    return
+                # 主窗口空白处拖入：询问新建/加入当前
+                QTimer.singleShot(0, lambda p=path: self._open_path_smart(p, target="ask"))
+                event.acceptProposedAction()
+                return
         except Exception:  # noqa: BLE001
             pass
+
+    def _open_path_smart(self, path: str, target: str = "ask") -> None:
+        """智能打开拖入/菜单选择的文件：图片自动找同名 JSON，JSON 走导入。
+
+        target: "ask" = 询问新建/加入当前；"current" = 直接加入当前工程。
+        """
+        suffix = Path(path).suffix.lower()
+        if suffix == ".sstool":
+            self._safe_open_project(path)
+            return
+        if suffix == ".json":
+            self._import_project(path, target=target)
+            return
+        if suffix in SUPPORTED_IMAGE_EXT:
+            # 图片自动找同目录同名 JSON
+            json_sidecar = Path(path).with_suffix(".json")
+            if json_sidecar.is_file():
+                self._import_project(str(json_sidecar), target=target)
+                return
+            pm = QPixmap(path)
+            if not pm.isNull():
+                self._on_image_loaded(pm)
+            return
+    def _on_tab_drop(self, path: str) -> None:
+        """拖入标签栏：新建一个标签页并打开该文件（不顶掉当前工程）。"""
+        suffix = Path(path).suffix.lower()
+        if suffix == ".sstool":
+            self._new_tab(switch=True)
+            self._safe_open_project(path)
+        elif suffix == ".json":
+            self._import_project(path, target="new")
+        else:
+            self._new_tab(switch=True)
+            self._open_path_smart(path, target="current")
 
     def _on_image_loaded(self, pm: QPixmap):
         """首次载入或追加原图；追加时保留已有动作和帧排序。"""

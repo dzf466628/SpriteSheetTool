@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """原图查看器：元素检测 + 标尺画布 + 浮动工具条（从 main_window.py 拆出，纯搬移，逻辑未改动）。
 
@@ -202,6 +202,9 @@ class _Canvas(QWidget):
         toolbar = getattr(self._viewer, "_toolbar", None)
         if toolbar is not None:
             toolbar.move(self.width() - toolbar.width() - 6, 6)
+        badge = getattr(self._viewer, "_json_badge", None)
+        if badge is not None:
+            badge.move(6, 6)
         self.update()
 
     def paintEvent(self, event):
@@ -566,28 +569,19 @@ class _Canvas(QWidget):
             for url in event.mimeData().urls():
                 path = url.toLocalFile()
                 suffix = Path(path).suffix.lower()
+                viewer = self._viewer
                 if suffix == ".sstool":
-                    # Forward to MainWindow after the native drop event ends;
-                    # opening a project directly from this child widget used
-                    # to call a non-existent method and terminate Qt.
-                    viewer = self._viewer
                     QTimer.singleShot(0, lambda p=path, v=viewer: v.project_dropped.emit(p))
-                    event.acceptProposedAction()
-                    return
-                if suffix == ".json":
-                    # JSON 要交给顶层 ImageViewer 转发（_Canvas 自身没有 json_dropped 信号，
-                    # 直接访问会抛 AttributeError，而 PyQt 会让它 abort —— 也就是闪退）。
-                    viewer = self._viewer
-                    QTimer.singleShot(0, lambda p=path, v=viewer: v.json_dropped.emit(p))
-                    event.acceptProposedAction()
-                    return
-                if suffix in SUPPORTED_IMAGE_EXT:
-                    QTimer.singleShot(0, lambda p=path: self.image_loaded.emit(QPixmap(p)))
-                    event.acceptProposedAction()
-                    return
+                elif suffix == ".json":
+                    # 画布上拖入 JSON：直接加入当前工程（不问）
+                    QTimer.singleShot(0, lambda p=path, v=viewer: v.json_dropped_current.emit(p))
+                elif suffix in SUPPORTED_IMAGE_EXT:
+                    # 画布上拖入图片：走智能路径（自动找同名 JSON）
+                    QTimer.singleShot(0, lambda p=path, v=viewer: v.image_path_dropped.emit(p))
+                event.acceptProposedAction()
+                return
         except Exception:  # noqa: BLE001
             pass
-
     def _has_image(self) -> bool:
         return self._viewer._pixmap is not None and not self._viewer._pixmap.isNull()
 
@@ -703,6 +697,34 @@ class FloatingToolBar(QWidget):
         return btn
 
 
+class JsonBadge(QWidget):
+    """画布左上角浮动徽标：当前工程有关联 JSON 时显示红色 JSON ✓。
+
+    与右上角 FloatingToolBar 同高度（y=6，按钮 24px），水平对齐。
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(64, 24)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._path = ""
+
+    def set_path(self, path: str) -> None:
+        self._path = str(path or "")
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setBrush(QColor(30, 30, 30, 220))
+        p.setPen(QPen(QColor("#E91E63"), 1))
+        p.drawRoundedRect(self.rect(), 6, 6)
+        p.setPen(QPen(QColor("#E91E63")))
+        f = QFont("Microsoft YaHei UI", 8, QFont.Weight.Bold)
+        p.setFont(f)
+        p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "JSON ✓")
+        p.end()
+
+
 # 原图查看器（标尺 + 画布容器）
 class _AltNativeFilter(QAbstractNativeEventFilter):
     """Windows 平台：捕获 WM_SYSKEYDOWN/WM_SYSKEYUP（Alt 系统键）。
@@ -753,6 +775,8 @@ class ImageViewer(QWidget):
     frames_updated = pyqtSignal()
     json_dropped = pyqtSignal(str)   # 拖入 JSON 工程时转发给主窗口处理
     project_dropped = pyqtSignal(str)  # 拖入 SSTOOL 工程时转发给主窗口处理
+    json_dropped_current = pyqtSignal(str)  # 画布上拖入 JSON：直接加入当前工程
+    image_path_dropped = pyqtSignal(str)  # 画布上拖入图片路径（用于自动找同名 JSON）
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -817,6 +841,11 @@ class ImageViewer(QWidget):
         self._toolbar.bg_changed.connect(self._on_bg_changed)
         self._toolbar.compose_toggled.connect(self.set_compose_mode)
         self._toolbar.reuse_toggled.connect(self.set_reuse_mode)
+
+        # 左上角 JSON 徽标（有关联 JSON 时显示）
+        self._json_badge = JsonBadge(self.canvas)
+        self._json_badge.move(6, 6)
+        self._json_badge.hide()
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
@@ -832,6 +861,19 @@ class ImageViewer(QWidget):
     def _update_rulers(self):
         self.h_ruler.update()
         self.v_ruler.update()
+
+    def set_json_badge(self, visible: bool, path: str = "") -> None:
+        """显示/隐藏左上角 JSON 徽标（当前工程有关联 JSON 时）。"""
+        badge = getattr(self, "_json_badge", None)
+        if badge is None:
+            return
+        if visible:
+            badge.set_path(path)
+            badge.move(6, 6)
+            badge.show()
+            badge.raise_()
+        else:
+            badge.hide()
 
     # ---- 对外接口 ----
     def set_pixmap(self, pm: QPixmap):

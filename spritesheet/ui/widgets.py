@@ -286,11 +286,13 @@ class ProjectTabBar(QWidget):
     tab_close_requested = pyqtSignal(int)
     tab_renamed = pyqtSignal(int, str)
     new_tab_requested = pyqtSignal()
+    tab_drop_requested = pyqtSignal(str)  # 拖入标签栏：新建工程并打开该文件
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFixedHeight(self.HEIGHT)
         self.setMouseTracking(True)
+        self.setAcceptDrops(True)
         self.setStyleSheet("background: #1a1a1a; border-top: 1px solid #333;")
         self.setToolTip("单击切换工程 · 双击标签重命名 · 双击空白处新建工程")
         self._tabs: list[dict] = []       # {name, dirty, tooltip}
@@ -318,6 +320,32 @@ class ProjectTabBar(QWidget):
         #    - offscreen 平台**没有真实字体**，任何字符都画成同一个方框（tofu）。
         #    字形是否正常由 tools/verify_glyphs.py（跑在真实 windows 平台）验证。
         self._close_glyph = self.CLOSE_GLYPH
+
+    def dragEnterEvent(self, event):
+        try:
+            if event.mimeData().hasUrls():
+                event.acceptProposedAction()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def dragMoveEvent(self, event):
+        try:
+            if event.mimeData().hasUrls():
+                event.acceptProposedAction()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def dropEvent(self, event):
+        try:
+            for url in event.mimeData().urls():
+                path = url.toLocalFile()
+                suffix = Path(path).suffix.lower()
+                if suffix in (".json", ".sstool", ".png", ".webp", ".jpg", ".jpeg", ".bmp", ".gif"):
+                    self.tab_drop_requested.emit(path)
+                    event.acceptProposedAction()
+                    return
+        except Exception:  # noqa: BLE001
+            pass
 
     def _on_close_anim(self, value) -> None:
         self._close_progress = float(value)

@@ -1864,13 +1864,13 @@ class ActionPreviewWidget(QWidget):
         # IconMode + 固定 gridSize + item.setSizeHint，点击区域与格子完全一致
         self.thumb_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.thumb_list.setIconSize(QSize(30, 30))
-        self.thumb_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.thumb_list.setResizeMode(QListWidget.ResizeMode.Fixed)
         self.thumb_list.setMovement(QListWidget.Movement.Static)
         self.thumb_list.setFlow(QListWidget.Flow.LeftToRight)
         self.thumb_list.setWrapping(False)
         self.thumb_list.setSpacing(1)
         self.thumb_list.setGridSize(QSize(36, 36))
-        self.thumb_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.thumb_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.thumb_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.thumb_list.setStyleSheet(
             "QListWidget { background: #1a1a1a; border: none; border-radius: 4px; padding: 2px; }"
