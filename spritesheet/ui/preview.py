@@ -145,6 +145,8 @@ class PreviewCanvas(QWidget):
     # 一次鼠标拖动的边界，用于把连续 mouseMove 合并为一个撤销步骤。
     transform_edit_started = pyqtSignal()
     transform_edit_finished = pyqtSignal()
+    # 参照帧模式下鼠标拖动当前帧：发送(帧索引, dx, dy)
+    frame_offset_dragged = pyqtSignal(int, int, int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -205,6 +207,9 @@ class PreviewCanvas(QWidget):
         # 多选叠加帧（除主帧外的选中帧，半透明叠加显示）
         self._overlay_frames: list[int] = []
         self._frozen_offset: tuple[int, int] = (0, 0)
+        # 参照帧模式下鼠标拖动当前帧的状态
+        self._frame_drag_active: bool = False
+        self._frame_drag_last: QPointF | None = None
         self._toast = HintToast(self)
 
     # ---- 无动作提示 ----
@@ -819,6 +824,19 @@ class PreviewCanvas(QWidget):
         self.update()
         super().leaveEvent(event)
 
+    def _hit_current_frame(self, pos: QPointF) -> bool:
+        """判断点击位置是否在当前帧矩形内（参照帧模式下用于启动拖动）。"""
+        if not self._action or not self._action.frames:
+            return False
+        if not (0 <= self._frame_index < len(self._action.frames)):
+            return False
+        _, _, positions, _ = self._paint_layout()
+        tx, ty, fw, fh = positions[self._frame_index]
+        scale = max(0.01, self._zoom)
+        cx, cy = self._offset.x(), self._offset.y()
+        rect = QRectF(cx + tx * scale, cy + ty * scale, fw * scale, fh * scale)
+        return rect.contains(pos)
+
     def mousePressEvent(self, event):
         self.setFocus(Qt.FocusReason.MouseFocusReason)
         if self._panning and event.button() == Qt.MouseButton.LeftButton:
@@ -829,6 +847,16 @@ class PreviewCanvas(QWidget):
         if (not self._action or not self._action.frames) and event.button() == Qt.MouseButton.LeftButton:
             self.hint_no_action()
             return
+        # 参照帧模式：点击当前帧可直接拖动记录帧偏移
+        if (self._action and self._action.ref_frame >= 0
+                and not self._transform_mode and not self._panning
+                and event.button() == Qt.MouseButton.LeftButton):
+            if self._hit_current_frame(event.position()):
+                self.begin_layout_freeze()
+                self._frame_drag_active = True
+                self._frame_drag_last = event.position()
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
+                return
         if self._transform_mode and event.button() == Qt.MouseButton.LeftButton:
             kind, idx = self._hit_test(event.position())
             if kind is None:
@@ -841,6 +869,24 @@ class PreviewCanvas(QWidget):
             self._offset = event.position() - self._pan_start
             self.update()
             return
+        # 参照帧模式下拖动当前帧：屏幕增量 / 缩放 = 逻辑增量
+        if self._frame_drag_active and self._frame_drag_last is not None:
+            delta = event.position() - self._frame_drag_last
+            self._frame_drag_last = event.position()
+            scale = max(0.01, self._zoom)
+            dx = int(round(delta.x() / scale))
+            dy = int(round(delta.y() / scale))
+            if dx or dy:
+                idx = self._frame_index
+                cur = self._action.frame_offsets.get(idx, (0, 0))
+                nx, ny = cur[0] + dx, cur[1] + dy
+                if nx == 0 and ny == 0:
+                    self._action.frame_offsets.pop(idx, None)
+                else:
+                    self._action.frame_offsets[idx] = (nx, ny)
+                self.frame_offset_dragged.emit(idx, nx, ny)
+                self.update()
+            return
         if self._drag_kind and self._transform_mode:
             # 修饰键（Shift 锁轴 / 等比 / 15° 吸附）从每个移动事件里读，
             # 松手前按住或松开 Shift 会在下一次移动时生效（PS 也是这样）。
@@ -852,6 +898,11 @@ class PreviewCanvas(QWidget):
     def mouseReleaseEvent(self, event):
         if self._panning:
             self._pan_start = None
+        if self._frame_drag_active:
+            self._frame_drag_active = False
+            self._frame_drag_last = None
+            self.end_layout_freeze()
+            self.unsetCursor()
         if self._drag_kind:
             self._end_drag()
 
@@ -933,6 +984,11 @@ class PreviewCanvas(QWidget):
         frame_pm = action_frame_pixmap(self._action, self._frame_index)
         p.drawPixmap(frame_rect, frame_pm, QRectF(frame_pm.rect()))
         p.setOpacity(1.0)
+        # 参照帧模式：当前帧高亮边框（提示可拖动）
+        if self._action.ref_frame >= 0:
+            p.setPen(QPen(QColor("#E91E63"), 2.0))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(frame_rect)
 
         # 模拟地面线：默认在内容区最底部（不考虑四周扩展），向上偏移为正
         if self._action.ground_enabled:
@@ -1805,20 +1861,18 @@ class ActionPreviewWidget(QWidget):
         # 帧缩略图
         self.thumb_list = QListWidget()
         self.thumb_list.setFixedHeight(56)
-        self.thumb_list.setViewMode(QListWidget.ViewMode.IconMode)
+        # ListMode：点击区域与 item 矩形完全一致，按住 Ctrl 多选不会偏移
+        self.thumb_list.setViewMode(QListWidget.ViewMode.ListMode)
         self.thumb_list.setIconSize(QSize(28, 28))
-        self.thumb_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.thumb_list.setMovement(QListWidget.Movement.Static)
         self.thumb_list.setFlow(QListWidget.Flow.LeftToRight)
         self.thumb_list.setWrapping(False)
         self.thumb_list.setSpacing(2)
-        # IconMode 下固定格子大小，消除点击位置与视觉位置的偏移
-        self.thumb_list.setGridSize(QSize(44, 40))
         self.thumb_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.thumb_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.thumb_list.setStyleSheet(
             "QListWidget { background: #1a1a1a; border: none; border-radius: 4px; padding: 2px; }"
-            "QListWidget::item { width: 40px; height: 36px; margin: 2px; border: 1px solid #555555; border-radius: 3px; background: transparent; }"
+            "QListWidget::item { width: 44px; height: 40px; margin: 0; border: 1px solid #555555; border-radius: 3px; background: transparent; }"
             "QListWidget::item:selected { background: rgba(233,30,99,0.25); border: 1px solid #E91E63; }"
         )
         self.thumb_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -1846,6 +1900,8 @@ class ActionPreviewWidget(QWidget):
         self.canvas.transform_rotated.connect(self.adjust_panel._apply_rotation)
         self.canvas.transform_quadded.connect(self.adjust_panel._apply_quad)
         self.canvas.transform_pivot_moved.connect(self.adjust_panel._apply_pivot)
+        # 参照帧模式下鼠标拖动当前帧：同步右侧偏移控件显示
+        self.canvas.frame_offset_dragged.connect(self._on_canvas_frame_dragged)
         self.adjust_panel.changed.connect(self._on_adjust_changed)
         scroll.setWidget(self.adjust_panel)
         lower_layout.addWidget(scroll, 1)
@@ -2108,6 +2164,12 @@ class ActionPreviewWidget(QWidget):
         if self._action:
             self._action.bg_mode = mode
             self.canvas.update()
+
+    def _on_canvas_frame_dragged(self, idx: int, dx: int, dy: int) -> None:
+        """参照帧模式下画布拖动当前帧后，同步右侧偏移控件与标题。"""
+        self.adjust_panel._sync_offset_widgets(dx, dy)
+        self._refresh_canvas_label()
+        self.changed.emit()
 
     def _on_adjust_changed(self):
         if self._action:

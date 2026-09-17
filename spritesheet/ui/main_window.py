@@ -1373,8 +1373,11 @@ class MainWindow(QMainWindow):
             # 导入图片时自动检索同目录同名 JSON，有则优先导入工程（JSON 会连带加载配套图片）
             json_candidate = Path(path).with_suffix(".json")
             if json_candidate.is_file():
-                self._import_project(str(json_candidate))
-                continue
+                try:
+                    self._import_project(str(json_candidate))
+                    continue
+                except Exception:  # noqa: BLE001 - JSON 导入失败时回退为只导入图片
+                    pass
             pm = QPixmap(path)
             if not pm.isNull():
                 self._on_image_loaded(pm)
