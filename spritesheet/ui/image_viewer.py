@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+﻿#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """原图查看器：元素检测 + 标尺画布 + 浮动工具条（从 main_window.py 拆出，纯搬移，逻辑未改动）。
 
@@ -271,9 +271,6 @@ class _Canvas(QWidget):
                                 _fns.setdefault(_source_idx, []).append(_frame_no)
                             _frame_no += 1
                     _act_info[_act] = (_fn, _cr, _fns)
-                frame_numbers = _act_info.get(current_action, ({}, {}, {}))[0] if current_action else {}
-                composite_representatives = _act_info.get(current_action, ({}, {}, {}))[1] if current_action else {}
-                reuse_counts = _act_info.get(current_action, ({}, {}, {}))[2] if current_action else {}
                 for i, (fx, fy, fw, fh) in enumerate(self._viewer._frames):
                     rect = QRectF(offset.x() + fx * zoom, offset.y() + fy * zoom,
                                   fw * zoom, fh * zoom)
