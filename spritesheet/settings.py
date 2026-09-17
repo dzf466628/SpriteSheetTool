@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QSettings
@@ -30,7 +31,8 @@ def show_project_thumbnail() -> bool:
     """工程文件是否内嵌缩略图。默认 True。"""
     try:
         value = _settings().value(KEY_SHOW_THUMBNAIL, True)
-    except Exception:  # noqa: BLE001 - 读不到就按默认值走，绝不因为设置崩保存
+    except Exception as e:  # noqa: BLE001 - 读不到就按默认值走，绝不因为设置崩保存
+        print(f"[settings] 读取 {KEY_SHOW_THUMBNAIL} 失败: {e}", file=sys.stderr)
         return True
     if isinstance(value, str):
         return value.strip().lower() not in ("0", "false", "no", "")
@@ -40,8 +42,8 @@ def show_project_thumbnail() -> bool:
 def set_show_project_thumbnail(enabled: bool) -> None:
     try:
         _settings().setValue(KEY_SHOW_THUMBNAIL, bool(enabled))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        print(f"[settings] 写入 {KEY_SHOW_THUMBNAIL} 失败: {e}", file=sys.stderr)
 
 
 def desktop_directory() -> str:
@@ -57,7 +59,8 @@ def last_directory() -> str:
     """上次用过的目录。没记录过、目录已被删/改名时都回退到桌面。"""
     try:
         value = str(_settings().value(KEY_LAST_DIR, "") or "")
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        print(f"[settings] 读取 {KEY_LAST_DIR} 失败: {e}", file=sys.stderr)
         value = ""
     if value and os.path.isdir(value):
         return value
@@ -73,6 +76,5 @@ def set_last_directory(path: str | os.PathLike | None) -> None:
         target = candidate if candidate.is_dir() else candidate.parent
         if target.is_dir():
             _settings().setValue(KEY_LAST_DIR, str(target))
-    except Exception:  # noqa: BLE001
-        pass
-
+    except Exception as e:  # noqa: BLE001
+        print(f"[settings] 写入 {KEY_LAST_DIR} 失败: {e}", file=sys.stderr)
