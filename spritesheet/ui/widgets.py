@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+﻿#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """通用小部件与图标/像素工具（从 main_window.py 拆出，纯搬移，逻辑未改动）。
 
@@ -185,13 +185,6 @@ class AppNameLabel(QWidget):
         base_y = self.height() / 2.0 - (top + bottom) / 2.0
         return base_y, base_y + delta
 
-    def head_rect(self) -> QRect:
-        """首字母的墨迹矩形（回归用：断言它与其余文字上下居中）。"""
-        return self._head_ink_rect().toAlignedRect()
-
-    def body_rect(self) -> QRect:
-        """其余文字的墨迹矩形（回归用）。"""
-        return self._body_ink_rect().toAlignedRect()
 
     def _head_ink_rect(self) -> QRectF:
         _base_y, head_y = self._baselines()
