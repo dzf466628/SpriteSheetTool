@@ -22,7 +22,7 @@ from PyQt6.QtGui import (
     QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform,
 )
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+    QAbstractItemView, QApplication, QButtonGroup, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QPushButton, QScrollArea, QSizePolicy, QSlider,
     QSplitter, QVBoxLayout, QWidget,
 )
@@ -1860,16 +1860,16 @@ class ActionPreviewWidget(QWidget):
 
         # 帧缩略图
         self.thumb_list = QListWidget()
-        self.thumb_list.setFixedHeight(60)
+        self.thumb_list.setFixedHeight(76)
         # IconMode + 固定 gridSize + item.setSizeHint，点击区域与格子完全一致
         self.thumb_list.setViewMode(QListWidget.ViewMode.IconMode)
-        self.thumb_list.setIconSize(QSize(30, 30))
+        self.thumb_list.setIconSize(QSize(40, 40))
         self.thumb_list.setResizeMode(QListWidget.ResizeMode.Fixed)
         self.thumb_list.setMovement(QListWidget.Movement.Static)
         self.thumb_list.setFlow(QListWidget.Flow.LeftToRight)
         self.thumb_list.setWrapping(False)
-        self.thumb_list.setSpacing(1)
-        self.thumb_list.setGridSize(QSize(36, 36))
+        self.thumb_list.setSpacing(0)
+        self.thumb_list.setGridSize(QSize(48, 48))
         self.thumb_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.thumb_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.thumb_list.setStyleSheet(
@@ -2014,7 +2014,7 @@ class ActionPreviewWidget(QWidget):
         for i in range(len(self._action.frames)):
             item = QListWidgetItem()
             pm = action_frame_pixmap(self._action, i)
-            thumb = QPixmap(30, 30)
+            thumb = QPixmap(40, 40)
             thumb.fill(Qt.GlobalColor.transparent)
             painter = QPainter(thumb)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
@@ -2031,10 +2031,10 @@ class ActionPreviewWidget(QWidget):
             # 帧编号画在右下角（角标），不用 item.setText，避免文字撑大 item 导致点击偏移
             painter.setPen(QColor("#E0E0E0"))
             painter.setFont(QFont("Microsoft YaHei UI", 7, QFont.Weight.Bold))
-            painter.drawText(QRect(14, 16, 15, 13), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom, str(i + 1))
+            painter.drawText(QRect(20, 22, 18, 14), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom, str(i + 1))
             painter.end()
             item.setIcon(QIcon(thumb))
-            item.setSizeHint(QSize(34, 34))
+            item.setSizeHint(QSize(48, 48))
             self.thumb_list.addItem(item)
         self.thumb_list.setCurrentRow(0)
 
@@ -2121,7 +2121,7 @@ class ActionPreviewWidget(QWidget):
         for _ in range(4):
             item = QListWidgetItem("")
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-            item.setSizeHint(QSize(34, 34))
+            item.setSizeHint(QSize(48, 48))
             self.thumb_list.addItem(item)
 
     def _selected_rows(self) -> list[int]:
@@ -2161,9 +2161,14 @@ class ActionPreviewWidget(QWidget):
     def _on_thumb_changed(self, row: int):
         if not self._action or not self._action.frames:
             return
-        if row >= 0:
-            self._frame_index = row
-            self._sync_frame()
+        if row < 0:
+            return
+        # Ctrl+点击：只切换选中状态，不切换主帧（主帧保持原帧，新帧作为叠加）
+        modifiers = QApplication.keyboardModifiers()
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            return
+        self._frame_index = row
+        self._sync_frame()
 
     # ---- 浮动工具条槽 ----
     def _on_bg_changed(self, mode: str):
