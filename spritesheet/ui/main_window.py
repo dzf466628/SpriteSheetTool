@@ -1504,75 +1504,58 @@ class MainWindow(QMainWindow):
         viewer = self.image_viewer
         atlas = pm
 
-        tiles: list[tuple[int, int, int, int]] = []
-        tile_index: dict[tuple[int, int, int, int], int] = {}
-
-        def add_tile(rect) -> int:
-            if rect not in tile_index:
-                tile_index[rect] = len(tiles)
-                tiles.append(rect)
-            return tile_index[rect]
-
-        # 1) 单部件帧的图块（直接来自图集）
-        for act in project.actions:
-            for fr in act.frames:
-                if len(fr.parts) == 1:
-                    add_tile(fr.parts[0].rect)
-
-        # 2) 收集所有帧用到的图块（含合成帧的各个部件）——
-        #    合成帧不再拼成整块，而是保留「每帧由哪些图块、贴在什么位置」的布局，
-        #    这样既不会丢帧（同一元素可为多个帧服务），导出时也能复用元素图块。
-        for act in project.actions:
-            for fr in act.frames:
-                for p in fr.parts:
-                    add_tile(p.rect)
-
         # 3) 载入原图（append 模式：拼到当前原图下方，新 tiles 的 y 加偏移）
         if append and viewer._pixmap is not None and not viewer._pixmap.isNull():
             old_h = viewer._pixmap.height()
+            old_frames = list(viewer._frames)         # 保留旧 tiles
+            old_logical = dict(viewer._frame_logical)  # 保留旧 logical
             viewer.append_pixmap(atlas)
             y_off = old_h + 16
-            # 已有 tiles 保留，新 tiles 的 y 加偏移
-            old_tiles = list(tiles)
-            tiles.clear()
-            tile_index.clear()
-            for r in old_tiles:
-                tile_index[r] = len(tiles)
-                tiles.append(r)
-            # 重新收集新 tiles（y 加 y_off）
-            for act in project.actions:
-                for fr in act.frames:
-                    for pp in fr.parts:
-                        r = pp.rect
-                        rr = (r[0], r[1] + y_off, r[2], r[3])
-                        if rr not in tile_index:
-                            tile_index[rr] = len(tiles)
-                            tiles.append(rr)
         else:
+            old_frames = []
+            old_logical = {}
             viewer.set_pixmap(atlas)
             y_off = 0
-        viewer._detect_generation += 1
+
+        # 收集图块：旧 tiles 保留在前，新 tiles 加 y_off 追加在后
+        tiles: list[tuple[int, int, int, int]] = []
+        tile_index: dict[tuple[int, int, int, int], int] = {}
+        for r in old_frames:
+            if r not in tile_index:
+                tile_index[r] = len(tiles)
+                tiles.append(r)
+        for act in project.actions:
+            for fr in act.frames:
+                for pp in fr.parts:
+                    r = pp.rect
+                    rr = (r[0], r[1] + y_off, r[2], r[3]) if append else r
+                    if rr not in tile_index:
+                        tile_index[rr] = len(tiles)
+                        tiles.append(rr)
+        viewer._detect_generation += 1  # 作废自动侦测，用精确 tiles
         viewer._frames = tiles
-        # 4) 还原元素逻辑坐标（来自 JSON 的 elements；用于普通帧的对齐参考）
-        logical: dict[int, tuple[int, int]] = {}
+
+        # 4) 还原元素逻辑坐标：旧 logical 保留，新 elements 的 rect 加 y_off
+        logical = dict(old_logical)
         for el in project.elements:
             rect = _rect_from_dict(el.get("rect") or {})
             o = el.get("origin") or {}
-            if rect in tile_index:
-                logical[tile_index[rect]] = (int(o.get("x", 0)), int(o.get("y", 0)))
+            rr = (rect[0], rect[1] + y_off, rect[2], rect[3]) if append else rect
+            if rr in tile_index:
+                logical[tile_index[rr]] = (int(o.get("x", 0)), int(o.get("y", 0)))
         viewer._frame_logical = logical
 
         viewer.canvas.update()
         viewer._update_rulers()
 
         # 5) 重建动作
-        # 先结束所有卡片的编辑并取消其待执行回调，再清空列表，
-        # 否则卡片销毁后仍有 0ms 定时器回调 -> 访问已释放对象导致崩溃。
-        self._end_all_renames()
-        self.actions.clear()
-        self.action_list.clear()
-        viewer.set_current_action(None)
-        self.preview.set_action(None)
+        # append 模式不清空现有动作，只追加；非 append 才清空重建
+        if not append:
+            self._end_all_renames()
+            self.actions.clear()
+            self.action_list.clear()
+            viewer.set_current_action(None)
+            self.preview.set_action(None)
 
         total_frames = 0
         for ai, imported in enumerate(project.actions):

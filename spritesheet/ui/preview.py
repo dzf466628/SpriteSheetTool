@@ -1860,7 +1860,7 @@ class ActionPreviewWidget(QWidget):
 
         # 帧缩略图
         self.thumb_list = QListWidget()
-        self.thumb_list.setFixedHeight(44)
+        self.thumb_list.setFixedHeight(60)
         # IconMode + 固定 gridSize + item.setSizeHint，点击区域与格子完全一致
         self.thumb_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.thumb_list.setIconSize(QSize(30, 30))
