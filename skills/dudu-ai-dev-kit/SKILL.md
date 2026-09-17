@@ -35,6 +35,7 @@ description: "嘟嘟专属的桌面应用开发框架，封装了 PyQt6 桌面�
 | 做 UI、改界面 | `references/ui-guidelines.md` |
 | Git 提交、推送、协作 | `references/git-collab.md` |
 | 遇到报错、卡壳、不知道为什么 | `references/pitfalls.md` |
+| 新开聊天、说"全面检查"/"体检一下" | `references/project-checkup.md` |
 
 ---
 
