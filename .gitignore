@@ -51,3 +51,6 @@ packaged.err
 /crash.txt
 /eq.txt
 /prof.txt
+
+# 本机电脑编号标识（1号/2号），每台电脑各自创建，不进 Git
+.machine
