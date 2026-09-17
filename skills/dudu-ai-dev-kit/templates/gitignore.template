@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 虚拟环境
+venv/
+env/
+.venv/
+
+# 构建产物
+build/
+dist/
+*.egg-info/
+release/
+installer/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 导出产物
+out_*.png
+out_*.json
+
+# 临时文件 / 缓存 / 备份
+*.bak
+backup/
+.build/
+.tmp/
+build_log.txt
+packaged.err
+
+# 调试输出
+/crash.txt
+/eq.txt
+/prof.txt
+
+# 本机电脑编号标识（1号/2号），每台电脑各自创建，不进 Git
+.machine

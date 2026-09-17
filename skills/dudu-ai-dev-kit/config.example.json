@@ -1,0 +1,36 @@
+{
+  "project_name": "你的项目名",
+  "package_name": "your_package",
+  "version": "0.1.0",
+
+  "git": {
+    "user_name": "duduadudu",
+    "user_email": "3140992714@qq.com",
+    "remote_origin": "http://内网地址:3003/用户名/项目名.git",
+    "remote_github": "https://github.com/用户名/项目名.git"
+  },
+
+  "proxy": {
+    "address": "127.0.0.1:11304",
+    "note": "推 GitHub 前必须开代理"
+  },
+
+  "paths": {
+    "venv": ".venv",
+    "smoke_test": "smoke_test.py",
+    "tools_dir": "tools"
+  },
+
+  "ui": {
+    "font": "Microsoft YaHei UI",
+    "accent_color": "#E91E63",
+    "scrollbar_width": 6,
+    "button_radius": 4
+  },
+
+  "build": {
+    "script": "build_windows.ps1",
+    "installer_config": "installer.iss",
+    "output_dir": "installer"
+  }
+}
