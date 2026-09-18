@@ -552,15 +552,19 @@ class _Canvas(QWidget):
             self.update()
 
     def contextMenuEvent(self, event):
-        """框选后右键：合并 / 合并为一整块。"""
+        """右键菜单：根据选中数量启用/禁用项。"""
         action = self._viewer.current_action
-        if action is None or len(action.selected_indices) < 2:
-            return
         menu = QMenu(self)
         menu.setStyleSheet(
             "QMenu { background: #2b2b2b; color: #e8e8e8; border: 1px solid #555; }"
             "QMenu::item:selected { background: #E91E63; }"
+            "QMenu::item:disabled { color: #666; }"
         )
+        n_sel = len(action.selected_indices) if action else 0
+        n_frames = len(action.frames) if action else 0
+
+        act_actual = menu.addAction("实际像素 (100%)")
+        menu.addSeparator()
         act_merge = menu.addAction("合并为一帧（拼成同一帧）")
         act_merge_one = menu.addAction("合并为一整块（碎块捏成一个元素）")
         menu.addSeparator()
@@ -573,8 +577,20 @@ class _Canvas(QWidget):
         act_remove = menu.addAction("忽略选中元素")
         menu.addSeparator()
         act_export = menu.addAction("导出选中为单独 PNG…")
+
+        # 禁用不适用的项
+        act_merge.setEnabled(n_sel >= 2)
+        act_merge_one.setEnabled(n_sel >= 2)
+        act_rotate.setEnabled(n_frames >= 1)
+        act_mirror.setEnabled(n_frames >= 1)
+        act_clear.setEnabled(n_sel >= 1)
+        act_remove.setEnabled(n_sel >= 1)
+        act_export.setEnabled(n_frames >= 1)
+
         chosen = menu.exec(event.globalPos())
-        if chosen is act_merge:
+        if chosen is act_actual:
+            self._viewer.zoom_actual_pixel()
+        elif chosen is act_merge:
             self._viewer.menu_merge_composite()
         elif chosen is act_merge_one:
             self._viewer.menu_merge_single_block()
@@ -1669,6 +1685,12 @@ class ImageViewer(QWidget):
 
     def zoom_out(self):
         self._zoom = max(MIN_ZOOM, self._zoom / 1.2)
+        self.canvas.update()
+        self._update_rulers()
+
+    def zoom_actual_pixel(self):
+        """实际像素 100%。"""
+        self._zoom = 1.0
         self.canvas.update()
         self._update_rulers()
 
