@@ -1332,6 +1332,7 @@ class MainWindow(QMainWindow):
         self.preview.canvas.transform_mode_changed.connect(self.anim_bar.set_mode)
         # 当前帧切换 → 底部横条「微调（全部帧）」以当前帧偏移为起点
         self.preview.frame_changed.connect(self.anim_bar.set_current_frame)
+        self.preview.frame_changed.connect(self._on_frame_changed)
         self.image_viewer._toolbar.bg_changed.connect(lambda _mode: self._mark_project_dirty())
         self.image_viewer._toolbar.compose_toggled.connect(lambda _checked: self._mark_project_dirty())
         # 程序退出（含未走 close 的路径）也要收尾原图区与更新检查线程，
@@ -2185,6 +2186,19 @@ class MainWindow(QMainWindow):
             name = f"「{cur.name}」" if cur else ""
             self._push_snapshot(f"修改动画参数{name}")
         self._anim_snap_timer.start(400)
+
+    def _on_frame_changed(self, idx: int):
+        """预览区切换帧序号：debounce 后记录。"""
+        if not hasattr(self, "_frame_snap_timer"):
+            from PyQt6.QtCore import QTimer
+            self._frame_snap_timer = QTimer(self)
+            self._frame_snap_timer.setSingleShot(True)
+            self._frame_snap_timer.timeout.connect(self._push_snapshot_done)
+        if not getattr(self, "_snapshot_before", None):
+            cur = self.image_viewer.current_action
+            name = f"「{cur.name}」" if cur else ""
+            self._push_snapshot(f"切换帧{name} → 帧{idx+1}")
+        self._frame_snap_timer.start(300)
 
     def _on_frames_updated(self):
         """后台检测完成后刷新动作帧和界面摘要。"""
