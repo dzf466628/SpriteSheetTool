@@ -589,25 +589,39 @@ class PreviewCanvas(QWidget):
                  QPointF(quad[4] * w, quad[5] * h), QPointF(quad[6] * w, quad[7] * h)], w, h)
 
     def _rotation_pivot_output(self) -> QPointF:
-        """旋转中心在旋转后基础图像中的坐标（未应用 quad）。"""
+        """旋转中心在旋转后基础图像中的坐标（未应用 quad）。
+
+        坐标系必须与 ``frame_base_size`` 完全一致：``transform_frame_pixmap`` 在
+        无旋转/无镜像时 ``transformed=False``，**不会**裁剪透明边，直接返回原图；
+        只有发生实际旋转/镜像时才会裁剪。此前这里无论有无变换都额外做一次
+        ``_alpha_bounds`` 裁剪，导致无变换时 pivot 比真实中心偏出一圈透明边的
+        距离（典型 2px），表现为"手柄锚点偏、旋转/缩放松手闪跳"。
+        """
         if not self._action or not self._action.frames:
             return QPointF(0, 0)
         src = self._action.frames[self._frame_index]
-        # Mirroring keeps the raster size; the pivot is defined in that space.
         src_w, src_h = src.width(), src.height()
         pivot = self._action.frame_rotation_pivots.get(
             self._frame_index, DEFAULT_ROTATION_PIVOT
         )
+        angle = self._action.frame_rotations.get(self._frame_index, 0)
+        has_mirror = (self._frame_index in self._action.frame_mirror_h
+                      or self._frame_index in self._action.frame_mirror_v)
+        # 与 frame_base_size 同口径：无旋转无镜像时不裁剪，pivot 直接在原图坐标系。
+        if angle % 360 == 0 and not has_mirror:
+            return QPointF(pivot[0] * src_w, pivot[1] * src_h)
+        # Mirroring keeps the raster size; the pivot is defined in that space.
         matrix, pivot_px, min_pt = _rotation_transform(
-            src_w, src_h, self._action.frame_rotations.get(self._frame_index, 0), pivot
+            src_w, src_h, angle, pivot
         )
         mapped = matrix.map(pivot_px)
         rotated = src
-        if self._frame_index in self._action.frame_mirror_h:
-            rotated = rotated.transformed(QTransform().scale(-1.0, 1.0), Qt.TransformationMode.FastTransformation)
-        if self._frame_index in self._action.frame_mirror_v:
-            rotated = rotated.transformed(QTransform().scale(1.0, -1.0), Qt.TransformationMode.FastTransformation)
-        if self._action.frame_rotations.get(self._frame_index, 0) % 360:
+        if has_mirror:
+            if self._frame_index in self._action.frame_mirror_h:
+                rotated = rotated.transformed(QTransform().scale(-1.0, 1.0), Qt.TransformationMode.FastTransformation)
+            if self._frame_index in self._action.frame_mirror_v:
+                rotated = rotated.transformed(QTransform().scale(1.0, -1.0), Qt.TransformationMode.FastTransformation)
+        if angle % 360:
             rotated = rotated.transformed(matrix, Qt.TransformationMode.FastTransformation)
         content = _alpha_bounds(rotated)
         trim_x = content.x() if content else 0
@@ -721,11 +735,15 @@ class PreviewCanvas(QWidget):
             return None, -1
         screens = [self._logical_to_screen(p) for p in pts]
         mode = self._transform_mode
-        if mode == "rotate":
+        # 旋转中心（红色十字）：非整体模式下所有变换模式都可拖动，
+        # 不只限于 rotate。整体(GIF级)变换 pivot 固定在共同中心、不可调。
+        if not self._whole_active():
             pivot = self._rotation_pivot_canvas(layout, mo)
             pivot_s = self._logical_to_screen(pivot)
-            if not self._whole_active() and (pivot_s - screen_pos).manhattanLength() < 15:
+            if (pivot_s - screen_pos).manhattanLength() < 15:
                 return "pivot", -1
+        if mode == "rotate":
+            pivot = self._rotation_pivot_canvas(layout, mo)
             rot = self._rotate_handle_screen(pts, pivot)
             if rot is not None and (rot - screen_pos).manhattanLength() < 15:
                 return "rotate", -1
@@ -1298,6 +1316,26 @@ class PreviewCanvas(QWidget):
                 mid = (screens[i] + screens[(i + 1) % 4]) / 2.0
                 draw_square(mid, edge_control, "edge", i, 8.0)
 
+        # 旋转中心（红色十字）：非整体模式下所有变换模式都显示，可拖动。
+        if not self._whole_active():
+            pivot_canvas = self._rotation_pivot_canvas(
+                self._drag_layout if self._drag_kind else None,
+                self._drag_mo if self._drag_kind else None,
+            )
+            if self._drag_kind == "pivot":
+                pivot_canvas = self._drag_pivot_canvas
+            pivot_hover = self._hover_kind == "pivot"
+            pulse = 1.0 + (0.18 * (0.5 + 0.5 * math.sin(self._hover_phase)) if pivot_hover else 0.0)
+            center_s = self._logical_to_screen(pivot_canvas)
+            # 红色十字 + 中心圆：醒目、区别于四角粉色手柄
+            red = "#FF1744"
+            red_hover = "#FF5252"
+            p.setPen(QPen(QColor(red_hover if pivot_hover else red), 1.6))
+            p.setBrush(QColor(red_hover if pivot_hover else red))
+            p.drawEllipse(center_s, 5.0 * pulse, 5.0 * pulse)
+            p.setPen(QPen(QColor(255, 90, 90, 200) if pivot_hover else QColor(255, 60, 60, 170), 1.2))
+            p.drawLine(center_s + QPointF(-10, 0), center_s + QPointF(10, 0))
+            p.drawLine(center_s + QPointF(0, -10), center_s + QPointF(0, 10))
         if mode == "rotate":
             pivot_canvas = self._rotation_pivot_canvas(
                 self._drag_layout if self._drag_kind else None,
@@ -1313,15 +1351,6 @@ class PreviewCanvas(QWidget):
                 p.drawEllipse(center_s, radius, radius)
                 p.setPen(QPen(QColor(233, 30, 99, 155), 1.0, Qt.PenStyle.DashLine))
                 p.drawLine(center_s, rot)
-                # 独立旋转中心：圆形十字，和动作锚点使用不同颜色。
-                pivot_hover = self._hover_kind == "pivot"
-                pulse = 1.0 + (0.18 * (0.5 + 0.5 * math.sin(self._hover_phase)) if pivot_hover else 0.0)
-                p.setPen(QPen(QColor("#FF80AB" if pivot_hover else "#E91E63"), 1.6))
-                p.setBrush(QColor("#FF4081" if pivot_hover else "#E91E63"))
-                p.drawEllipse(center_s, 5.0 * pulse, 5.0 * pulse)
-                p.setPen(QPen(QColor("#FFB0C8" if pivot_hover else "#F06292"), 1.2))
-                p.drawLine(center_s + QPointF(-9, 0), center_s + QPointF(9, 0))
-                p.drawLine(center_s + QPointF(0, -9), center_s + QPointF(0, 9))
                 handle_hover = self._hover_kind == "rotate"
                 handle_r = 6.0 * (1.16 if handle_hover else 1.0)
                 p.setBrush(QColor("#FF4081" if handle_hover else "#E91E63"))
