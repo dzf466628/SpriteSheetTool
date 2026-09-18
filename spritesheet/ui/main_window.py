@@ -399,9 +399,7 @@ class MainWindow(QMainWindow):
                 t.stop()
         self._snapshot_before = None
         self._offset_snap_before = None
-        self.preview.blockSignals(True)
-        self.image_viewer.blockSignals(True)
-        self.action_list.blockSignals(True)
+        self._last_selection_state = None
         try:
             restored_ids = set()
             for _, action, rotations, mirror_h, mirror_v, pivots, quads, modes in state:
@@ -415,8 +413,6 @@ class MainWindow(QMainWindow):
                 action.frame_quads = dict(quads)
                 action.frame_transform_modes = {k: set(v) for k, v in modes}
                 action.invalidate_transforms()
-            # A snapshot may predate a newly created action. Undoing to it
-            # must also clear transforms on actions absent from that snapshot.
             for action in self.actions:
                 if id(action) in restored_ids:
                     continue
@@ -428,27 +424,18 @@ class MainWindow(QMainWindow):
                 action.frame_transform_modes.clear()
                 action.invalidate_transforms()
             self._transform_history_state = self._capture_transform_state()
-            if getattr(self, "preview", None) is not None:
-                self.preview.adjust_panel._sync_transform_widgets()
-                self.preview.adjust_panel._refresh_canvas_label()
-                self.preview.canvas.update()
-                self.preview._refresh_thumbs()
-                self.preview.adjust_panel._transform_changed = False
-        finally:
-            self._restoring_transform_history = False
-            self.preview.blockSignals(False)
-            self.image_viewer.blockSignals(False)
-            self.action_list.blockSignals(False)
-            self._suppress_selection_snapshot = False
-            self._last_selection_state = None
-            self._offset_snap_before = None
-            self._snapshot_before = None
-            # unblock 后重建帧图并刷新预览
             cur = self.image_viewer.current_action
             if cur in self.actions:
                 self.image_viewer.crop_frames_for_action(cur)
-                self.preview.set_action(cur)
+            if getattr(self, "preview", None) is not None:
+                self.preview.adjust_panel._sync_transform_widgets()
+                self.preview.adjust_panel._refresh_canvas_label()
+                self.preview._refresh_thumbs()
                 self.preview.canvas.update()
+                self.preview.adjust_panel._transform_changed = False
+        finally:
+            self._restoring_transform_history = False
+            self._suppress_selection_snapshot = False
 
     def _begin_transform_history(self) -> None:
         self._suppress_selection_snapshot = True
@@ -556,10 +543,7 @@ class MainWindow(QMainWindow):
                 t.stop()
         self._snapshot_before = None
         self._offset_snap_before = None
-        # 彻底屏蔽 restore 期间所有信号，避免任何自动记录
-        self.preview.blockSignals(True)
-        self.image_viewer.blockSignals(True)
-        self.action_list.blockSignals(True)
+        self._last_selection_state = None
         try:
             viewer = self.image_viewer
             viewer._detect_generation += 1
@@ -623,11 +607,7 @@ class MainWindow(QMainWindow):
         except Exception as e:  # noqa: BLE001
             print(f"[undo] 恢复快照失败: {e}", file=sys.stderr)
         finally:
-            self.preview.blockSignals(False)
-            self.image_viewer.blockSignals(False)
-            self.action_list.blockSignals(False)
             self._suppress_selection_snapshot = False
-            # 重置选择快照缓存，避免 undo 后下次选择用错 before
             self._last_selection_state = None
             self._offset_snap_before = None
             self._snapshot_before = None
@@ -643,6 +623,10 @@ class MainWindow(QMainWindow):
 
     def _push_snapshot_done(self) -> None:
         """结构性操作完成后调用：push snapshot command。"""
+        if getattr(self, "_suppress_selection_snapshot", False):
+            self._snapshot_before = None
+            self._snapshot_text = ""
+            return
         before = getattr(self, "_snapshot_before", None)
         if before is None:
             return
@@ -2306,6 +2290,9 @@ class MainWindow(QMainWindow):
         self._offset_snap_timer.start(400)
 
     def _finish_offset_snapshot(self):
+        if getattr(self, "_suppress_selection_snapshot", False):
+            self._offset_snap_before = None
+            return
         before = getattr(self, "_offset_snap_before", None)
         if before is None:
             return
