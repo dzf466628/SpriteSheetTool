@@ -57,3 +57,4 @@ packaged.err
 
 # 技能包备份（dudu-ai-dev-kit 等），不进仓库
 skills/*.rar
+crash.log
