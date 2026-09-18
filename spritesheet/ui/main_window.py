@@ -1605,6 +1605,7 @@ class MainWindow(QMainWindow):
             lambda p: self._open_path_smart(p, target="current"))
         self.image_viewer.selection_changed.connect(self._on_selection_changed)
         self.image_viewer.selection_changed.connect(self._mark_project_dirty)
+        self.image_viewer.action_performed.connect(self._on_action_performed)
         self.image_viewer.frames_updated.connect(self._on_frames_updated)
 
         # 左列：原图区 + 下方「动画设置」横条（整段动画参数）
@@ -2535,6 +2536,16 @@ class MainWindow(QMainWindow):
             n = len(cur.selected_indices) if cur else 0
             # 选择图块改变帧组成：debounce 后统一记录
             self._schedule_per_action_snapshot(f"选择图块{name}({n}个)")
+
+    def _on_action_performed(self, text: str):
+        """右键菜单操作：用具体文字记录到当前动作栈。"""
+        if self.image_viewer.current_action:
+            self.image_viewer.crop_frames_for_action(self.image_viewer.current_action)
+            self.preview.set_action(self.image_viewer.current_action)
+            self._transform_history_state = self._capture_transform_state()
+            cur = self.image_viewer.current_action
+            name = f"「{cur.name}」" if cur else ""
+            self._schedule_per_action_snapshot(f"{text}{name}")
 
     # ------------------------------------------------------------- 动作内统一记录
     def _schedule_per_action_snapshot(self, text: str) -> None:

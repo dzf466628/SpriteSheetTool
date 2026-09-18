@@ -830,6 +830,7 @@ class ImageViewer(QWidget):
     image_loaded = pyqtSignal(QPixmap)
     selection_changed = pyqtSignal()
     frames_updated = pyqtSignal()
+    action_performed = pyqtSignal(str)  # 右键菜单操作完成，带记录文字
     json_dropped = pyqtSignal(str)   # 拖入 JSON 工程时转发给主窗口处理
     project_dropped = pyqtSignal(str)  # 拖入 SSTOOL 工程时转发给主窗口处理
     json_dropped_current = pyqtSignal(str)  # 画布上拖入 JSON：直接加入当前工程
@@ -1126,7 +1127,7 @@ class ImageViewer(QWidget):
         self._normalize_composite_groups()
         self.crop_frames_for_action(action)
         self.frames_updated.emit()
-        self.selection_changed.emit()
+        self.action_performed.emit("合并为一帧")
 
     def menu_merge_single_block(self) -> None:
         """合并为一整块：把选中的多个碎块按整体包围盒捏成一个新元素，原碎块删除。"""
@@ -1198,7 +1199,7 @@ class ImageViewer(QWidget):
             action.frame_rotations[i] = (action.frame_rotations.get(i, 0) + angle) % 360
         action.invalidate_transforms()
         self.frames_updated.emit()
-        self.selection_changed.emit()
+        self.action_performed.emit("全部帧旋转90°")
 
     def menu_mirror_all_frames(self) -> None:
         """把当前动作所有帧水平镜像切换。"""
@@ -1212,7 +1213,7 @@ class ImageViewer(QWidget):
                 action.frame_mirror_h.add(i)
         action.invalidate_transforms()
         self.frames_updated.emit()
-        self.selection_changed.emit()
+        self.action_performed.emit("全部帧水平镜像")
 
     def menu_invert_selection(self) -> None:
         """反选：选中当前没选的元素。"""
@@ -1224,7 +1225,7 @@ class ImageViewer(QWidget):
         action.composite_groups = []
         self.crop_frames_for_action(action)
         self.frames_updated.emit()
-        self.selection_changed.emit()
+        self.action_performed.emit("反选")
 
     def menu_select_all(self) -> None:
         """全选所有元素。"""
@@ -1235,7 +1236,7 @@ class ImageViewer(QWidget):
         action.composite_groups = []
         self.crop_frames_for_action(action)
         self.frames_updated.emit()
-        self.selection_changed.emit()
+        self.action_performed.emit("全选")
 
     def menu_clear_selection(self) -> None:
         """清空当前动作选择。"""
@@ -1248,7 +1249,7 @@ class ImageViewer(QWidget):
         action.frame_layouts_base = 0
         self.crop_frames_for_action(action)
         self.frames_updated.emit()
-        self.selection_changed.emit()
+        self.action_performed.emit("清空选择")
 
     def menu_remove_selected_elements(self) -> None:
         """忽略选中元素：从当前动作移除（不从工程删除，以后还能选回）。"""
@@ -1263,7 +1264,7 @@ class ImageViewer(QWidget):
         action.composite_groups = [g for g in action.composite_groups if g]
         self.crop_frames_for_action(action)
         self.frames_updated.emit()
-        self.selection_changed.emit()
+        self.action_performed.emit("忽略选中元素")
 
     def menu_export_selected_png(self) -> None:
         """把当前动作每帧导出为单独 PNG。"""
