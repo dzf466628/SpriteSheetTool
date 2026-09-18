@@ -525,7 +525,7 @@ class _Canvas(QWidget):
                         self._viewer._normalize_composite_groups()
                     self.selection_changed.emit()
             else:
-                # 框选：默认替换，Ctrl 框选追加并合成为一帧；结果按阅读顺序排列。
+                # 框选：默认替换，Ctrl 框选追加并合成为一帧；Alt 框选追加复用。
                 indices = self._viewer._frames_in_view_rect(rect)
                 if self._viewer.current_action:
                     if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -533,6 +533,16 @@ class _Canvas(QWidget):
                         self._viewer.begin_ctrl_composition()
                         for idx in indices:
                             self._viewer.add_to_composite(idx)
+                    elif event.modifiers() & Qt.KeyboardModifier.AltModifier or self._viewer.reuse_mode:
+                        # Alt+框选：已选元素追加复用帧，未选元素正常加入选择，不清空已有
+                        action = self._viewer.current_action
+                        for idx in indices:
+                            if idx in action.selected_indices:
+                                self._viewer.reuse_frame_at(idx)
+                            else:
+                                action.selected_indices.append(idx)
+                        self._viewer._normalize_composite_groups()
+                        self._viewer.crop_frames_for_action(action)
                     elif indices:
                         self._viewer.current_action.selected_indices = indices
                         self._viewer.current_action.composite_groups = []

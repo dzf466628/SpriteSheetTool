@@ -79,6 +79,8 @@ class Action:
         self.action_type: str = "static"  # static / move
         self.move_direction: str = "right"  # up/down/left/right
         self.move_speed: int = 10  # 1-100
+        # 每个动作独立的 undo 栈（懒创建，由 MainWindow 赋值 QUndoStack）
+        self.undo_stack = None
 
     def frame_duration_ms(self, idx: int) -> int:
         """该帧显示时长（毫秒）：逐帧覆盖优先，缺省由 fps 推导。"""

@@ -272,8 +272,21 @@ class HistoryPanel(QWidget):
         self.tree.itemClicked.connect(self._jump_to)
         layout.addWidget(self.tree)
 
+        self._stack = stack
         self._refresh()
         stack.indexChanged.connect(self._refresh)
+
+    def set_stack(self, stack: QUndoStack) -> None:
+        """切换到另一个动作的 undo stack。"""
+        if stack is self._stack:
+            return
+        try:
+            self._stack.indexChanged.disconnect(self._refresh)
+        except Exception:
+            pass
+        self._stack = stack
+        stack.indexChanged.connect(self._refresh)
+        self._refresh()
 
     def _parse_action(self, text: str) -> str:
         """从'变换帧3「动作1」(rotate)'提取动作名'动作1'。"""
@@ -450,7 +463,7 @@ class MainWindow(QMainWindow):
         self._transform_history_pending = None
         after = self._capture_transform_state()
         if before != after and not self._restoring_transform_history:
-            self._undo_stack.push(_TransformHistoryCommand(self, before, after, self._transform_text()))
+            self._active_stack().push(_TransformHistoryCommand(self, before, after, self._transform_text()))
         self._transform_history_state = after
 
     def _on_transform_history_changed(self) -> None:
@@ -461,13 +474,29 @@ class MainWindow(QMainWindow):
             return
         before = self._transform_history_state
         if before is not None and before != current:
-            self._undo_stack.push(_TransformHistoryCommand(self, before, current, self._transform_text()))
+            self._active_stack().push(_TransformHistoryCommand(self, before, current, self._transform_text()))
         self._transform_history_state = current
 
     def _reset_transform_history(self) -> None:
         self._undo_stack.clear()
+        for a in self.actions:
+            if a.undo_stack is not None:
+                a.undo_stack.clear()
         self._transform_history_pending = None
         self._transform_history_state = self._capture_transform_state()
+
+    def _active_stack(self) -> QUndoStack:
+        """当前动作的 undo stack（动作内操作），没有则用全局 stack。"""
+        cur = self.image_viewer.current_action
+        if cur is not None and cur.undo_stack is not None:
+            return cur.undo_stack
+        return self._undo_stack
+
+    def _do_undo(self) -> None:
+        self._active_stack().undo()
+
+    def _do_redo(self) -> None:
+        self._active_stack().redo()
 
     def _capture_snapshot(self, current_only: bool = True) -> dict:
         """纯数据快照：不编码任何 PNG。
@@ -603,6 +632,9 @@ class MainWindow(QMainWindow):
                 self.action_list.clear()
                 for raw in raw_list:
                     action = Action(str(raw.get("name", "未命名动作")), str(raw.get("color", "#E91E63")))
+                    action.undo_stack = QUndoStack(self)
+                    from spritesheet.settings import undo_limit
+                    action.undo_stack.setUndoLimit(undo_limit())
                     for attr in ("fps", "loop_mode", "padding", "ground_enabled", "ground_offset",
                                  "reuse_frame_settings", "show_anchor", "ref_frame", "ref_opacity",
                                  "frame_opacity", "bg_mode", "action_type", "move_direction", "move_speed"):
@@ -674,9 +706,11 @@ class MainWindow(QMainWindow):
         before = getattr(self, "_snapshot_before", None)
         if before is None:
             return
-        after = self._capture_snapshot()
+        current_only = getattr(self, "_snapshot_current_only", True)
+        after = self._capture_snapshot(current_only)
         if before != after:
-            self._undo_stack.push(_SnapshotCommand(self, before, after, self._snapshot_text))
+            stack = self._active_stack() if current_only else self._undo_stack
+            stack.push(_SnapshotCommand(self, before, after, self._snapshot_text))
         self._snapshot_before = None
         self._snapshot_text = ""
 
@@ -988,13 +1022,13 @@ class MainWindow(QMainWindow):
                 self._act_undo.triggered.disconnect()
             except TypeError:
                 pass
-            self._act_undo.triggered.connect(self._undo_stack.undo)
+            self._act_undo.triggered.connect(self._do_undo)
         if getattr(self, "_act_redo", None) is not None:
             try:
                 self._act_redo.triggered.disconnect()
             except TypeError:
                 pass
-            self._act_redo.triggered.connect(self._undo_stack.redo)
+            self._act_redo.triggered.connect(self._do_redo)
         if self._transform_history_state is None:
             self._transform_history_state = self._capture_transform_state()
 
@@ -1262,6 +1296,9 @@ class MainWindow(QMainWindow):
         self.action_list.clear()
         for raw in manifest.get("actions", []):
             action = Action(str(raw.get("name", "未命名动作")), str(raw.get("color", "#E91E63")))
+            action.undo_stack = QUndoStack(self)
+            from spritesheet.settings import undo_limit
+            action.undo_stack.setUndoLimit(undo_limit())
             for attr in ("fps", "loop_mode", "padding", "ground_enabled", "ground_offset",
                          "reuse_frame_settings", "show_anchor", "ref_frame", "ref_opacity",
                          "frame_opacity", "bg_mode", "action_type", "move_direction", "move_speed"):
@@ -1514,7 +1551,7 @@ class MainWindow(QMainWindow):
         act_undo = QAction("撤销", self)
         act_undo.setShortcut(QKeySequence.StandardKey.Undo)
         act_undo.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
-        act_undo.triggered.connect(self._undo_stack.undo)
+        act_undo.triggered.connect(self._do_undo)
         edit_menu.addAction(act_undo)
         # 撤销栈是「每个文档一份」，切标签时要把它接到当前文档的那份上
         self._act_undo = act_undo
@@ -1522,7 +1559,7 @@ class MainWindow(QMainWindow):
         act_redo = QAction("重做", self)
         act_redo.setShortcut(QKeySequence.StandardKey.Redo)
         act_redo.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
-        act_redo.triggered.connect(self._undo_stack.redo)
+        act_redo.triggered.connect(self._do_redo)
         edit_menu.addAction(act_redo)
         self._act_redo = act_redo
 
@@ -2180,6 +2217,9 @@ class MainWindow(QMainWindow):
                 break
         name = f"动作{len(self.actions) + 1}"
         action = Action(name, color)
+        action.undo_stack = QUndoStack(self)
+        from spritesheet.settings import undo_limit
+        action.undo_stack.setUndoLimit(undo_limit())
         self._push_snapshot(f"添加动作「{name}」", current_only=False)
         self.actions.append(action)
         self._transform_history_state = self._capture_transform_state()
@@ -2266,6 +2306,10 @@ class MainWindow(QMainWindow):
         # 裁剪帧
         self.image_viewer.crop_frames_for_action(action)
         self.preview.set_action(action)
+        # 历史面板切换到该动作的独立 undo 栈
+        if hasattr(self, "_history_panel") and self._history_panel is not None:
+            if action.undo_stack is not None:
+                self._history_panel.set_stack(action.undo_stack)
         self.lbl_status.setText(f"当前动作：{action.name}，{len(action.frames)} 帧")
         self._mark_project_dirty()
 
@@ -2299,8 +2343,14 @@ class MainWindow(QMainWindow):
         ai = self.actions.index(cur) if cur in self.actions else -1
         n = len(after["actions"][ai].get("selected_indices", [])) if ai >= 0 else 0
         text = f"选择图块{name}({n}个)"
+        if before is None and cur is not None:
+            # 第一次选择：before 用空选择状态
+            before = self._capture_snapshot()
+            if ai >= 0:
+                before["actions"][ai]["selected_indices"] = []
+                before["actions"][ai]["composite_groups"] = []
         if before is not None and before != after:
-            self._undo_stack.push(_SnapshotCommand(self, before, after, text))
+            self._active_stack().push(_SnapshotCommand(self, before, after, text))
         self._last_selection_state = after
 
     def _on_anim_bar_changed(self):
@@ -2368,7 +2418,7 @@ class MainWindow(QMainWindow):
         cur = self.image_viewer.current_action
         name = f"「{cur.name}」" if cur else ""
         if before != after:
-            self._undo_stack.push(_SnapshotCommand(self, before, after, f"微调帧偏移{name}"))
+            self._active_stack().push(_SnapshotCommand(self, before, after, f"微调帧偏移{name}"))
         self._offset_snap_before = None
 
     def _on_frames_updated(self):
