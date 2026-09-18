@@ -568,8 +568,6 @@ class _Canvas(QWidget):
         act_merge = menu.addAction("合并为一帧（拼成同一帧）")
         act_merge_one = menu.addAction("合并为一整块（碎块捏成一个元素）")
         menu.addSeparator()
-        act_rotate = menu.addAction("全部帧旋转 90°")
-        menu.addSeparator()
         act_invert = menu.addAction("反选")
         act_select_all = menu.addAction("全选")
         act_clear = menu.addAction("清空选择")
@@ -580,7 +578,6 @@ class _Canvas(QWidget):
         # 禁用不适用的项
         act_merge.setEnabled(n_sel >= 2)
         act_merge_one.setEnabled(n_sel >= 2)
-        act_rotate.setEnabled(n_frames >= 1)
         act_clear.setEnabled(n_sel >= 1)
         act_remove.setEnabled(n_sel >= 1)
         act_export.setEnabled(n_frames >= 1)
@@ -592,8 +589,6 @@ class _Canvas(QWidget):
             self._viewer.menu_merge_composite()
         elif chosen is act_merge_one:
             self._viewer.menu_merge_single_block()
-        elif chosen is act_rotate:
-            self._viewer.menu_rotate_all_frames(90)
         elif chosen is act_invert:
             self._viewer.menu_invert_selection()
         elif chosen is act_select_all:
