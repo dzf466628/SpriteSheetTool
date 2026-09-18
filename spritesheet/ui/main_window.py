@@ -256,12 +256,8 @@ class HistoryPanel(QWidget):
         self.setMaximumWidth(240)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
-
-        title = QLabel("历史记录")
-        title.setStyleSheet("color: #F06292; font-weight: bold; font-size: 12px;")
-        layout.addWidget(title)
 
         self.list = QListWidget()
         self.list.setStyleSheet(
@@ -342,6 +338,10 @@ class MainWindow(QMainWindow):
             | QDockWidget.DockWidgetFeature.DockWidgetMovable
         )
         self._history_dock.setFloating(True)
+        self._history_dock.setStyleSheet(
+            "QDockWidget { color: #e0e0e0; }"
+            "QDockWidget::title { background: #2a2a2a; padding: 4px 8px; border-bottom: 1px solid #3d3d3d; }"
+        )
         self._history_dock.setMinimumWidth(180)
         self._history_dock.setMaximumWidth(240)
         self._history_dock.setMinimumHeight(300)
@@ -1325,6 +1325,7 @@ class MainWindow(QMainWindow):
         self.preview.action_changed.connect(self.anim_bar.set_action)
         self.anim_bar.changed.connect(self.preview._on_adjust_changed)
         self.anim_bar.changed.connect(self._mark_project_dirty)
+        self.anim_bar.changed.connect(self._on_anim_bar_changed)
         # 底部横条「变换（全部帧）」模式 → 预览画布（作用于全部帧）
         self.anim_bar.mode_requested.connect(self.preview.adjust_panel.enter_transform_mode_all)
         # 画布变换模式变化（进入/退出/点空白）→ 同步底部横条按钮
@@ -2060,7 +2061,7 @@ class MainWindow(QMainWindow):
                 break
         name = f"动作{len(self.actions) + 1}"
         action = Action(name, color)
-        self._push_snapshot("添加动作")
+        self._push_snapshot(f"添加动作「{name}」")
         self.actions.append(action)
         self._transform_history_state = self._capture_transform_state()
         self._mark_project_dirty()
@@ -2081,21 +2082,25 @@ class MainWindow(QMainWindow):
         self._push_snapshot_done()
 
     def _on_action_color_changed(self, action: Action, color: str):
+        self._push_snapshot(f"改动作颜色「{action.name}」→ {color}")
         action.color = color
         if self.image_viewer.current_action is action:
             self.image_viewer.action_color = color
         self.image_viewer.refresh()
         self._mark_project_dirty()
+        self._push_snapshot_done()
 
     def _on_action_name_changed(self, action: Action, name: str):
+        self._push_snapshot(f"改动作名「{action.name}」→「{name}」")
         action.name = name
         self._mark_project_dirty()
+        self._push_snapshot_done()
 
     def _delete_action(self, action: Action):
         """删除动作卡片并将选择切换到相邻动作。"""
         if action not in self.actions:
             return
-        self._push_snapshot("删除动作")
+        self._push_snapshot(f"删除动作「{action.name}」")
         row = next((i for i in range(self.action_list.count())
                     if self.action_list.item(i).data(Qt.ItemDataRole.UserRole) is action), -1)
         if row < 0:
@@ -2162,11 +2167,24 @@ class MainWindow(QMainWindow):
             self._selection_snap_timer.setSingleShot(True)
             self._selection_snap_timer.timeout.connect(self._finish_selection_snapshot)
         if not getattr(self, "_snapshot_before", None):
-            self._push_snapshot("选择图块")
+            self._push_snapshot(f"选择图块({len(self.image_viewer._frames)}个元素)")
         self._selection_snap_timer.start(200)
 
     def _finish_selection_snapshot(self):
         self._push_snapshot_done()
+
+    def _on_anim_bar_changed(self):
+        """动画参数(fps/时长/锚点等)改动后 debounce 记录。"""
+        if not hasattr(self, "_anim_snap_timer"):
+            from PyQt6.QtCore import QTimer
+            self._anim_snap_timer = QTimer(self)
+            self._anim_snap_timer.setSingleShot(True)
+            self._anim_snap_timer.timeout.connect(self._push_snapshot_done)
+        if not getattr(self, "_snapshot_before", None):
+            cur = self.image_viewer.current_action
+            name = f"「{cur.name}」" if cur else ""
+            self._push_snapshot(f"修改动画参数{name}")
+        self._anim_snap_timer.start(400)
 
     def _on_frames_updated(self):
         """后台检测完成后刷新动作帧和界面摘要。"""
