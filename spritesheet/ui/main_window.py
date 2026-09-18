@@ -399,6 +399,8 @@ class HistoryPanel(QWidget):
         if not payload:
             return
         key, idx = payload
+        if key == "global":
+            return  # 全局历史只展示，不可点击撤回
         main = self._main
         if isinstance(key, Action):
             # 该记录属于某个动作：先把它切成当前动作（不动其他动作的数据），再跳转
@@ -611,19 +613,15 @@ class MainWindow(QMainWindow):
         return self._undo_stack
 
     def _do_undo(self) -> None:
+        # 全局历史只展示不撤回，避免破坏多动作结构
         stack = self._active_stack()
         if stack.canUndo():
             stack.undo()
-        elif self._undo_stack.canUndo():
-            # 当前动作栈到底后再接全局栈：让"添加动作"这类全局操作也能 Ctrl+Z 撤销
-            self._undo_stack.undo()
 
     def _do_redo(self) -> None:
         stack = self._active_stack()
         if stack.canRedo():
             stack.redo()
-        elif self._undo_stack.canRedo():
-            self._undo_stack.redo()
 
     def _capture_snapshot(self, current_only: bool = True, focus_action: Action | None = None) -> dict:
         """纯数据快照：不编码任何 PNG。
