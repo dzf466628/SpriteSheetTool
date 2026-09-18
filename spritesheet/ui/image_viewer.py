@@ -149,7 +149,7 @@ def _detect_frames_image(img: QImage, alpha_threshold: int = 10,
     found.sort(key=lambda f: (f[0], f[1]))   # 与逐像素扫描的发现顺序一致
     result = [(left, top, width, height) for _, _, left, top, width, height in found]
     if min_area > 0:
-        result = [r for r in result if r[2] * r[3] >= min_area]
+        result = [r for r in result if max(r[2], r[3]) > min_area]
     return result
 
 

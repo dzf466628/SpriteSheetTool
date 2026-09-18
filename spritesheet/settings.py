@@ -82,12 +82,12 @@ def set_last_directory(path: str | os.PathLike | None) -> None:
 
 
 def detect_min_area() -> int:
-    """自动识别时忽略的最小碎片面积（像素）。默认 4。"""
+    """自动识别时忽略的最大碎片边长（像素）。默认 2。"""
     try:
-        value = int(_settings().value(KEY_DETECT_MIN_AREA, 4))
+        value = int(_settings().value(KEY_DETECT_MIN_AREA, 2))
     except Exception as e:  # noqa: BLE001
         print(f"[settings] 读取 {KEY_DETECT_MIN_AREA} 失败: {e}", file=sys.stderr)
-        return 4
+        return 2
     return max(0, value)
 
 

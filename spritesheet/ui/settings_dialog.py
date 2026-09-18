@@ -67,21 +67,22 @@ class SettingsDialog(QDialog):
         layout.addWidget(title2)
 
         row_min = QHBoxLayout()
-        row_min.addWidget(QLabel("忽略小于"))
+        row_min.addWidget(QLabel("去除最长边不超过"))
         self.spin_min_area = QSpinBox()
-        self.spin_min_area.setRange(0, 10000)
+        self.spin_min_area.setRange(0, 256)
         self.spin_min_area.setSingleStep(1)
         self.spin_min_area.setValue(detect_min_area())
         self.spin_min_area.setFixedWidth(80)
         self.spin_min_area.valueChanged.connect(self._on_min_area_changed)
         row_min.addWidget(self.spin_min_area)
-        row_min.addWidget(QLabel("像素²的碎片"))
+        row_min.addWidget(QLabel("像素的碎片"))
         row_min.addStretch()
         layout.addLayout(row_min)
 
         hint_min = QLabel(
-            "自动识别图块时，面积小于此值的连通区域会被当作噪点忽略。\n"
-            "0 = 不过滤。改完对下次打开图片/重新识别生效。"
+            "自动识别图块时，最长边不超过此值的连通区域会被当作噪点忽略。\n"
+            "比如设 8：8×8 及以下的小碎片直接去掉。0 = 不过滤。\n"
+            "改完对下次打开图片/重新识别生效。"
         )
         hint_min.setWordWrap(True)
         hint_min.setStyleSheet("color: #9a9a9a; font-size: 11px;")

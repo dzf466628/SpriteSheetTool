@@ -221,6 +221,77 @@ class AboutDialog(QDialog):
         layout.addLayout(btn_row)
 
 
+class HistoryDialog(QDialog):
+    """撤销历史弹窗：列出所有操作，点击跳转到任意一步。"""
+
+    def __init__(self, stack: QUndoStack, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("历史记录")
+        self.setModal(True)
+        self.setMinimumWidth(360)
+        self.setMinimumHeight(400)
+        self._stack = stack
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        title = QLabel("操作历史")
+        title.setStyleSheet("color: #F06292; font-weight: bold; font-size: 13px;")
+        layout.addWidget(title)
+
+        self.list = QListWidget()
+        self.list.setStyleSheet(
+            "QListWidget { background: #1a1a1a; color: #e0e0e0; border: 1px solid #3d3d3d; border-radius: 4px; }"
+            "QListWidget::item { padding: 6px 10px; }"
+            "QListWidget::item:selected { background: rgba(233,30,99,0.3); }"
+        )
+        self.list.itemDoubleClicked.connect(self._jump_to)
+        layout.addWidget(self.list)
+
+        hint = QLabel("点击任意一步跳转到该状态（双击跳转）。当前位置高亮显示。")
+        hint.setStyleSheet("color: #9a9a9a; font-size: 11px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_close = QPushButton("关闭")
+        btn_close.setFixedSize(80, 30)
+        btn_close.setStyleSheet(
+            "QPushButton { background: #E91E63; color: white; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background: #F06292; }"
+        )
+        btn_close.clicked.connect(self.accept)
+        btn_row.addWidget(btn_close)
+        layout.addLayout(btn_row)
+
+        self._refresh()
+        stack.indexChanged.connect(self._refresh)
+
+    def _refresh(self, *_):
+        self.list.clear()
+        idx = self._stack.index()
+        # index 0 = 初始状态
+        self.list.addItem("● 初始状态")
+        for i in range(self._stack.count()):
+            cmd = self._stack.command(i)
+            text = cmd.text() or f"操作 {i+1}"
+            self.list.addItem(f"  {i+1}. {text}")
+        # 高亮当前位置
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            if i == idx:
+                item.setSelected(True)
+                item.setBackground(QColor(233, 30, 99, 60))
+            else:
+                item.setBackground(QColor(0, 0, 0, 0))
+
+    def _jump_to(self, item):
+        row = self.list.row(item)
+        self._stack.setIndex(row)
+
+
 class MainWindow(QMainWindow):
     """主窗口：系统标题栏 + 菜单栏 + Logo名称栏 + 左侧边栏 + 原图区 + 右侧预览 + 状态栏。"""
 
@@ -653,6 +724,12 @@ class MainWindow(QMainWindow):
             except TypeError:
                 pass
             self._act_undo.triggered.connect(self._undo_stack.undo)
+        if getattr(self, "_act_redo", None) is not None:
+            try:
+                self._act_redo.triggered.disconnect()
+            except TypeError:
+                pass
+            self._act_redo.triggered.connect(self._undo_stack.redo)
         if self._transform_history_state is None:
             self._transform_history_state = self._capture_transform_state()
 
@@ -1162,6 +1239,20 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(act_undo)
         # 撤销栈是「每个文档一份」，切标签时要把它接到当前文档的那份上
         self._act_undo = act_undo
+
+        act_redo = QAction("重做", self)
+        act_redo.setShortcut(QKeySequence.StandardKey.Redo)
+        act_redo.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        act_redo.triggered.connect(self._undo_stack.redo)
+        edit_menu.addAction(act_redo)
+        self._act_redo = act_redo
+
+        act_history = QAction("历史记录…", self)
+        act_history.setShortcut(QKeySequence("Ctrl+H"))
+        act_history.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        act_history.triggered.connect(self._open_history)
+        edit_menu.addAction(act_history)
+
         edit_menu.addSeparator()
         act_settings = QAction("软件设置…", self)
         act_settings.triggered.connect(self._open_settings)
@@ -1190,6 +1281,11 @@ class MainWindow(QMainWindow):
     def _open_settings(self) -> None:
         """编辑 → 软件设置…：工程缩略图开关 + 检查更新。"""
         dialog = SettingsDialog(self, check_update=self._check_update_manual)
+        dialog.exec()
+
+    def _open_history(self) -> None:
+        """编辑 → 历史记录…：查看操作历史并跳转到任意一步。"""
+        dialog = HistoryDialog(self._undo_stack, self)
         dialog.exec()
 
     def _open_about(self) -> None:
