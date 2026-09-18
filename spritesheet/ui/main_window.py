@@ -393,7 +393,7 @@ class MainWindow(QMainWindow):
         self._restoring_transform_history = True
         self._suppress_selection_snapshot = True
         # 停掉所有 pending debounce timer
-        for tname in ("_selection_snap_timer", "_frame_snap_timer", "_anim_snap_timer", "_offset_snap_timer"):
+        for tname in ("_selection_snap_timer", "_frame_snap_timer", "_anim_snap_timer", "_offset_snap_timer", "_adjust_snap_timer"):
             t = getattr(self, tname, None)
             if t is not None:
                 t.stop()
@@ -536,7 +536,7 @@ class MainWindow(QMainWindow):
         """从轻量快照恢复工程：恢复 actions 数据，帧图从 atlas 重建。"""
         self._suppress_selection_snapshot = True
         # 停掉所有 pending debounce timer，避免 restore 后误触发 push
-        for tname in ("_selection_snap_timer", "_frame_snap_timer", "_anim_snap_timer", "_offset_snap_timer"):
+        for tname in ("_selection_snap_timer", "_frame_snap_timer", "_anim_snap_timer", "_offset_snap_timer", "_adjust_snap_timer"):
             t = getattr(self, tname, None)
             if t is not None:
                 t.stop()
@@ -589,6 +589,13 @@ class MainWindow(QMainWindow):
                     action.frame_transform_modes = {int(k): set(v) for k, v in (raw.get("frame_transform_modes") or {}).items()}
                     action.invalidate_transforms()
                     viewer.crop_frames_for_action(action)
+                    # 刷新左侧动作卡片（名字/颜色）
+                    for ci in range(self.action_list.count()):
+                        card = self.action_list.itemWidget(self.action_list.item(ci))
+                        if card is not None and getattr(card, "_name", None) is not None:
+                            if card.lbl_name.text() != action.name:
+                                card.lbl_name.setText(action.name)
+                                card._name = action.name
                     self.preview.set_action(action)
             else:
                 # 全量恢复（添加/删除动作）
@@ -996,7 +1003,7 @@ class MainWindow(QMainWindow):
         self._snapshot_text = ""
         self._offset_snap_before = None
         self._last_selection_state = None
-        for tname in ("_selection_snap_timer", "_frame_snap_timer", "_anim_snap_timer", "_offset_snap_timer"):
+        for tname in ("_selection_snap_timer", "_frame_snap_timer", "_anim_snap_timer", "_offset_snap_timer", "_adjust_snap_timer"):
             t = getattr(self, tname, None)
             if t is not None:
                 t.stop()
@@ -1427,6 +1434,7 @@ class MainWindow(QMainWindow):
         self.preview._project_name_provider = lambda: self._project_name
         self.preview.adjust_panel.changed.connect(self._on_transform_history_changed)
         self.preview.adjust_panel.changed.connect(self._mark_project_dirty)
+        self.preview.adjust_panel.changed.connect(self._on_adjust_panel_changed)
         self.preview.canvas.transform_edit_started.connect(self._begin_transform_history)
         self.preview.canvas.transform_edit_finished.connect(self._finish_transform_history)
         self.preview.toolbar.bg_changed.connect(lambda _mode: self._mark_project_dirty())
@@ -2335,6 +2343,19 @@ class MainWindow(QMainWindow):
         if not getattr(self, "_offset_snap_before", None):
             self._offset_snap_before = self._capture_snapshot()
         self._offset_snap_timer.start(400)
+
+    def _on_adjust_panel_changed(self):
+        """adjust_panel 改动（帧偏移微调按钮/滑块/重置）：debounce 后记录。"""
+        if getattr(self, "_suppress_selection_snapshot", False):
+            return
+        if not hasattr(self, "_adjust_snap_timer"):
+            from PyQt6.QtCore import QTimer
+            self._adjust_snap_timer = QTimer(self)
+            self._adjust_snap_timer.setSingleShot(True)
+            self._adjust_snap_timer.timeout.connect(self._finish_offset_snapshot)
+        if not getattr(self, "_offset_snap_before", None):
+            self._offset_snap_before = self._capture_snapshot()
+        self._adjust_snap_timer.start(400)
 
     def _finish_offset_snapshot(self):
         if getattr(self, "_suppress_selection_snapshot", False):
