@@ -493,6 +493,7 @@ class MainWindow(QMainWindow):
 
     def _restore_snapshot(self, snap: dict) -> None:
         """从轻量快照恢复工程：恢复 actions 数据，帧图从 atlas 重建。"""
+        self._suppress_selection_snapshot = True
         try:
             viewer = self.image_viewer
             viewer._detect_generation += 1
@@ -555,6 +556,8 @@ class MainWindow(QMainWindow):
             viewer.canvas.update()
         except Exception as e:  # noqa: BLE001
             print(f"[undo] 恢复快照失败: {e}", file=sys.stderr)
+        finally:
+            self._suppress_selection_snapshot = False
 
     def _push_snapshot(self, text: str) -> None:
         """在结构性操作（增删动作/帧等）前调用：记录操作前快照，操作后自动补 after。
