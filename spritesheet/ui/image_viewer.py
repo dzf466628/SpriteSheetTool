@@ -1143,24 +1143,20 @@ class ImageViewer(QWidget):
         # 被删除的旧元素索引
         removed = set(sel)
         # 索引重映射：旧索引 -> 新索引
-        new_index = len(self._frames)
+        old_logical = self._frame_logical
+        new_frames = []
+        self._frame_logical = {}
         mapping = {}
         ni = 0
         for old_i in range(len(self._frames)):
             if old_i in removed:
                 continue
             mapping[old_i] = ni
-            ni += 1
-        # 重建 _frames 和 _frame_logical
-        old_logical = self._frame_logical
-        new_frames = []
-        self._frame_logical = {}
-        for old_i in range(len(self._frames)):
-            if old_i in removed:
-                continue
             new_frames.append(self._frames[old_i])
             if old_i in old_logical:
-                self._frame_logical[mapping[old_i]] = old_logical[old_i]
+                self._frame_logical[ni] = old_logical[old_i]
+            ni += 1
+        new_index = ni  # 新元素在重建后的索引
         new_frames.append(new_rect)
         self._frames = new_frames
         # 所有动作：重映射 selected_indices / composite_groups / frame_layouts
