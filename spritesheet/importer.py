@@ -104,6 +104,7 @@ def detect_format(data: dict) -> str:
         for alt in ("Textures", "textures", "sprites", "regions"):
             if isinstance(data.get(alt), (list, dict)):
                 frames = data[alt]
+                data["frames"] = frames  # 写回，让后续 parser 读到
                 break
     if frames is None:
         raise ImportError_("JSON 里没有 frames / animations 字段，无法识别格式。")
