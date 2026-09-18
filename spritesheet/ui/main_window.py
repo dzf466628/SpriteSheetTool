@@ -501,6 +501,10 @@ class MainWindow(QMainWindow):
                 t.stop()
         self._snapshot_before = None
         self._offset_snap_before = None
+        # 彻底屏蔽 restore 期间所有信号，避免任何自动记录
+        self.preview.blockSignals(True)
+        self.image_viewer.blockSignals(True)
+        self.action_list.blockSignals(True)
         try:
             viewer = self.image_viewer
             viewer._detect_generation += 1
@@ -564,6 +568,9 @@ class MainWindow(QMainWindow):
         except Exception as e:  # noqa: BLE001
             print(f"[undo] 恢复快照失败: {e}", file=sys.stderr)
         finally:
+            self.preview.blockSignals(False)
+            self.image_viewer.blockSignals(False)
+            self.action_list.blockSignals(False)
             self._suppress_selection_snapshot = False
 
     def _push_snapshot(self, text: str) -> None:
