@@ -1606,6 +1606,8 @@ class MainWindow(QMainWindow):
         self.image_viewer.selection_changed.connect(self._on_selection_changed)
         self.image_viewer.selection_changed.connect(self._mark_project_dirty)
         self.image_viewer.action_performed.connect(self._on_action_performed)
+        self.image_viewer.action_performed_full.connect(self._on_action_performed_full)
+        self.image_viewer.about_to_perform_full.connect(self._on_before_full_action)
         self.image_viewer.frames_updated.connect(self._on_frames_updated)
 
         # 左列：原图区 + 下方「动画设置」横条（整段动画参数）
@@ -2556,6 +2558,30 @@ class MainWindow(QMainWindow):
         if before is not None and before != after:
             self._active_stack().push(_SnapshotCommand(self, before, after, f"{text}{name}"))
         self._last_snapshot_state = after
+
+    def _on_before_full_action(self):
+        """全量操作前调用：抓一份全量 before（数据还没改），存起来等 _on_action_performed_full 配对。"""
+        self._pending_full_before = self._capture_snapshot(current_only=False)
+
+    def _on_action_performed_full(self, text: str):
+        """影响所有动作的右键操作（如合并为一整块重映射了全部动作的元素索引）：
+        用全量快照记录，undo 才能把所有动作的索引和 viewer._frames 一起还原。"""
+        if self.image_viewer.current_action is None:
+            return
+        before = getattr(self, "_pending_full_before", None)
+        after = self._capture_snapshot(current_only=False)
+        for action in self.actions:
+            self.image_viewer.crop_frames_for_action(action)
+        self.preview.set_action(self.image_viewer.current_action)
+        self._transform_history_state = self._capture_transform_state()
+        self.image_viewer.canvas.update()
+        cur = self.image_viewer.current_action
+        name = f"「{cur.name}」" if cur else ""
+        if before is not None and before != after:
+            self._active_stack().push(_SnapshotCommand(self, before, after, f"{text}{name}"))
+        self._last_snapshot_state = after
+        self._pending_full_before = None
+        self._mark_project_dirty()
 
     # ------------------------------------------------------------- 动作内统一记录
     def _schedule_per_action_snapshot(self, text: str) -> None:

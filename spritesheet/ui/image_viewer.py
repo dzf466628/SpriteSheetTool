@@ -838,6 +838,11 @@ class ImageViewer(QWidget):
     selection_changed = pyqtSignal()
     frames_updated = pyqtSignal()
     action_performed = pyqtSignal(str)  # 右键菜单操作完成，带记录文字
+    # 影响所有动作的右键操作（如合并为一整块会重映射全部动作的元素索引），
+    # 需要全量快照才能正确 undo。
+    action_performed_full = pyqtSignal(str)
+    # 全量操作前先发这个信号：main_window 在此时抓全量 before（数据还没改）。
+    about_to_perform_full = pyqtSignal()
     json_dropped = pyqtSignal(str)   # 拖入 JSON 工程时转发给主窗口处理
     project_dropped = pyqtSignal(str)  # 拖入 SSTOOL 工程时转发给主窗口处理
     json_dropped_current = pyqtSignal(str)  # 画布上拖入 JSON：直接加入当前工程
@@ -1133,14 +1138,18 @@ class ImageViewer(QWidget):
             action.composite_groups.append(group)
         self._normalize_composite_groups()
         self.crop_frames_for_action(action)
-        self.frames_updated.emit()
+        # 先记录历史（action_performed 抓 before/after），再刷 frames_updated ——
+        # frames_updated 会刷新快照基线，放后面才能让 _on_action_performed 抓到正确的 before。
         self.action_performed.emit("合并为一帧")
+        self.frames_updated.emit()
 
     def menu_merge_single_block(self) -> None:
         """合并为一整块：把选中的多个碎块按整体包围盒捏成一个新元素，原碎块删除。"""
         action = self.current_action
         if action is None or len(action.selected_indices) < 2:
             return
+        # 数据改动前先发信号，让 main_window 抓全量 before
+        self.about_to_perform_full.emit()
         sel = sorted(action.selected_indices)
         # 计算整体包围盒
         x0 = min(self._frames[i][0] for i in sel)
@@ -1187,8 +1196,10 @@ class ImageViewer(QWidget):
         action.frame_layouts = None
         action.frame_layouts_base = 0
         self.crop_frames_for_action(action)
-        self.frames_updated.emit()
-        self.selection_changed.emit()
+        # 这个操作重映射了所有动作的元素索引，必须全量快照；
+        # 用 action_performed_full 走全量记录槽（不再单独 emit frames_updated / selection_changed，
+        # 避免它们的 debounce/基线刷新副作用干扰本次落账）。
+        self.action_performed_full.emit("合并为一整块")
 
     def _all_actions(self) -> list:
         """返回所有动作（当前 viewer 所属的工程动作列表）。"""
