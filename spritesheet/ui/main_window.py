@@ -481,18 +481,24 @@ class MainWindow(QMainWindow):
         self._transform_history_pending = None
         self._transform_history_state = self._capture_transform_state()
 
-    def _capture_snapshot(self) -> dict:
-        """纯数据快照：不编码任何 PNG，只存 actions 的数据字段，帧图从 atlas 重建。"""
+    def _capture_snapshot(self, current_only: bool = True) -> dict:
+        """纯数据快照：不编码任何 PNG。
+
+        current_only=True（默认）：只存当前动作，undo 不影响其他动作。
+        current_only=False：存全部动作（用于添加/删除动作）。
+        """
         viewer = self.image_viewer
-        actions = []
-        for action in self.actions:
+        cur = viewer.current_action
+        cur_idx = self.actions.index(cur) if cur in self.actions else -1
+
+        def _action_data(action):
             parts = []
             for frame_parts in action.frame_parts:
                 parts.append([
                     [list(rect), int(rx), int(ry), int(ox), int(oy)]
                     for rect, rx, ry, ox, oy in frame_parts
                 ])
-            actions.append({
+            return {
                 "name": action.name, "color": action.color,
                 "selected_indices": list(action.selected_indices),
                 "composite_groups": [list(g) for g in action.composite_groups],
@@ -521,12 +527,17 @@ class MainWindow(QMainWindow):
                 "frame_opacity": action.frame_opacity, "bg_mode": action.bg_mode,
                 "action_type": action.action_type, "move_direction": action.move_direction,
                 "move_speed": action.move_speed,
-            })
-        cur_idx = self.actions.index(viewer.current_action) if viewer.current_action in self.actions else -1
+            }
+
+        if current_only and cur_idx >= 0:
+            actions = [_action_data(a) if i == cur_idx else None for i, a in enumerate(self.actions)]
+        else:
+            actions = [_action_data(a) for a in self.actions]
+
         return {
-            "format": "spritesheet-tool-project",
+            "current_only": current_only,
+            "current_index": cur_idx,
             "actions": actions,
-            "preview": {"action_index": cur_idx},
             "viewer": {
                 "frames": [list(r) for r in viewer._frames],
                 "frame_logical": {str(k): list(v) for k, v in viewer._frame_logical.items()},
@@ -548,60 +559,102 @@ class MainWindow(QMainWindow):
             viewer = self.image_viewer
             viewer._detect_generation += 1
             self._end_all_renames()
-            self.actions.clear()
-            self.action_list.clear()
-            for raw in snap.get("actions", []):
-                action = Action(str(raw.get("name", "未命名动作")), str(raw.get("color", "#E91E63")))
-                for attr in ("fps", "loop_mode", "padding", "ground_enabled", "ground_offset",
-                             "reuse_frame_settings", "show_anchor", "ref_frame", "ref_opacity",
-                             "frame_opacity", "bg_mode", "action_type", "move_direction", "move_speed"):
-                    if attr in raw:
-                        setattr(action, attr, raw[attr])
-                action.selected_indices = [int(x) for x in raw.get("selected_indices", [])]
-                action.composite_groups = [[int(x) for x in g] for g in raw.get("composite_groups", [])]
-                layouts = raw.get("frame_layouts")
-                action.frame_layouts = None if layouts is None else [
-                    [(int(i), int(x), int(y)) for i, x, y in layout] for layout in layouts
-                ]
-                action.frame_layouts_base = int(raw.get("frame_layouts_base", 0))
-                action.frame_rects = [tuple(map(int, x)) for x in raw.get("frame_rects", [])]
-                action.frame_parts = []
-                for frame_parts in raw.get("frame_parts", []):
-                    parsed = []
-                    for part in frame_parts:
-                        if len(part) >= 5:
-                            parsed.append((tuple(map(int, part[0])), int(part[1]), int(part[2]), int(part[3]), int(part[4])))
-                    action.frame_parts.append(parsed)
-                action.anchor = tuple(float(x) for x in self._tuple2(raw.get("anchor"), (0.5, 0.5)))
-                action.frame_offsets = {int(k): tuple(map(int, v)) for k, v in (raw.get("frame_offsets") or {}).items()}
-                action.frame_durations = {int(k): max(1, int(v)) for k, v in (raw.get("frame_durations") or {}).items()}
-                action.frame_rotations = {int(k): int(v) for k, v in (raw.get("frame_rotations") or {}).items()}
-                action.frame_mirror_h = set(map(int, raw.get("frame_mirror_h", [])))
-                action.frame_mirror_v = set(map(int, raw.get("frame_mirror_v", [])))
-                action.frame_rotation_pivots = {int(k): tuple(map(float, v)) for k, v in (raw.get("frame_rotation_pivots") or {}).items()}
-                action.frame_quads = {int(k): tuple(map(float, v)) for k, v in (raw.get("frame_quads") or {}).items()}
-                action.frame_transform_modes = {int(k): set(v) for k, v in (raw.get("frame_transform_modes") or {}).items()}
-                action.invalidate_transforms()
-                self.actions.append(action)
-                self._append_action_card(action)
-            viewer.set_actions(self.actions)
-            viewer.set_current_action(None)
-            # 恢复 viewer frames/logical
-            vstate = snap.get("viewer") or {}
-            if vstate.get("frames"):
-                viewer._frames = [tuple(map(int, r)) for r in vstate["frames"]]
-            if vstate.get("frame_logical"):
-                viewer._frame_logical = {int(k): tuple(map(int, v)) for k, v in vstate["frame_logical"].items()}
-            # 从 atlas 重建帧图
-            for action in self.actions:
-                viewer.crop_frames_for_action(action)
-            preview_state = snap.get("preview") or {}
-            ai = int(preview_state.get("action_index", -1))
-            action = self.actions[ai] if 0 <= ai < len(self.actions) else None
-            if action is not None:
-                viewer.set_current_action(action)
-                self.action_list.setCurrentRow(ai)
-                self.preview.set_action(action)
+            current_only = snap.get("current_only", False)
+            cur_idx = snap.get("current_index", -1)
+            raw_list = snap.get("actions", [])
+
+            if current_only and cur_idx >= 0 and cur_idx < len(self.actions):
+                # 只恢复当前动作，不动其他动作
+                raw = raw_list[cur_idx] if cur_idx < len(raw_list) else None
+                if raw:
+                    action = self.actions[cur_idx]
+                    for attr in ("fps", "loop_mode", "padding", "ground_enabled", "ground_offset",
+                                 "reuse_frame_settings", "show_anchor", "ref_frame", "ref_opacity",
+                                 "frame_opacity", "bg_mode", "action_type", "move_direction", "move_speed"):
+                        if attr in raw:
+                            setattr(action, attr, raw[attr])
+                    action.name = str(raw.get("name", action.name))
+                    action.color = str(raw.get("color", action.color))
+                    action.selected_indices = [int(x) for x in raw.get("selected_indices", [])]
+                    action.composite_groups = [[int(x) for x in g] for g in raw.get("composite_groups", [])]
+                    layouts = raw.get("frame_layouts")
+                    action.frame_layouts = None if layouts is None else [
+                        [(int(i), int(x), int(y)) for i, x, y in layout] for layout in layouts
+                    ]
+                    action.frame_layouts_base = int(raw.get("frame_layouts_base", 0))
+                    action.frame_rects = [tuple(map(int, x)) for x in raw.get("frame_rects", [])]
+                    action.frame_parts = []
+                    for frame_parts in raw.get("frame_parts", []):
+                        parsed = []
+                        for part in frame_parts:
+                            if len(part) >= 5:
+                                parsed.append((tuple(map(int, part[0])), int(part[1]), int(part[2]), int(part[3]), int(part[4])))
+                        action.frame_parts.append(parsed)
+                    action.anchor = tuple(float(x) for x in self._tuple2(raw.get("anchor"), (0.5, 0.5)))
+                    action.frame_offsets = {int(k): tuple(map(int, v)) for k, v in (raw.get("frame_offsets") or {}).items()}
+                    action.frame_durations = {int(k): max(1, int(v)) for k, v in (raw.get("frame_durations") or {}).items()}
+                    action.frame_rotations = {int(k): int(v) for k, v in (raw.get("frame_rotations") or {}).items()}
+                    action.frame_mirror_h = set(map(int, raw.get("frame_mirror_h", [])))
+                    action.frame_mirror_v = set(map(int, raw.get("frame_mirror_v", [])))
+                    action.frame_rotation_pivots = {int(k): tuple(map(float, v)) for k, v in (raw.get("frame_rotation_pivots") or {}).items()}
+                    action.frame_quads = {int(k): tuple(map(float, v)) for k, v in (raw.get("frame_quads") or {}).items()}
+                    action.frame_transform_modes = {int(k): set(v) for k, v in (raw.get("frame_transform_modes") or {}).items()}
+                    action.invalidate_transforms()
+                    viewer.crop_frames_for_action(action)
+                    self.preview.set_action(action)
+            else:
+                # 全量恢复（添加/删除动作）
+                self.actions.clear()
+                self.action_list.clear()
+                for raw in raw_list:
+                    action = Action(str(raw.get("name", "未命名动作")), str(raw.get("color", "#E91E63")))
+                    for attr in ("fps", "loop_mode", "padding", "ground_enabled", "ground_offset",
+                                 "reuse_frame_settings", "show_anchor", "ref_frame", "ref_opacity",
+                                 "frame_opacity", "bg_mode", "action_type", "move_direction", "move_speed"):
+                        if attr in raw:
+                            setattr(action, attr, raw[attr])
+                    action.selected_indices = [int(x) for x in raw.get("selected_indices", [])]
+                    action.composite_groups = [[int(x) for x in g] for g in raw.get("composite_groups", [])]
+                    layouts = raw.get("frame_layouts")
+                    action.frame_layouts = None if layouts is None else [
+                        [(int(i), int(x), int(y)) for i, x, y in layout] for layout in layouts
+                    ]
+                    action.frame_layouts_base = int(raw.get("frame_layouts_base", 0))
+                    action.frame_rects = [tuple(map(int, x)) for x in raw.get("frame_rects", [])]
+                    action.frame_parts = []
+                    for frame_parts in raw.get("frame_parts", []):
+                        parsed = []
+                        for part in frame_parts:
+                            if len(part) >= 5:
+                                parsed.append((tuple(map(int, part[0])), int(part[1]), int(part[2]), int(part[3]), int(part[4])))
+                        action.frame_parts.append(parsed)
+                    action.anchor = tuple(float(x) for x in self._tuple2(raw.get("anchor"), (0.5, 0.5)))
+                    action.frame_offsets = {int(k): tuple(map(int, v)) for k, v in (raw.get("frame_offsets") or {}).items()}
+                    action.frame_durations = {int(k): max(1, int(v)) for k, v in (raw.get("frame_durations") or {}).items()}
+                    action.frame_rotations = {int(k): int(v) for k, v in (raw.get("frame_rotations") or {}).items()}
+                    action.frame_mirror_h = set(map(int, raw.get("frame_mirror_h", [])))
+                    action.frame_mirror_v = set(map(int, raw.get("frame_mirror_v", [])))
+                    action.frame_rotation_pivots = {int(k): tuple(map(float, v)) for k, v in (raw.get("frame_rotation_pivots") or {}).items()}
+                    action.frame_quads = {int(k): tuple(map(float, v)) for k, v in (raw.get("frame_quads") or {}).items()}
+                    action.frame_transform_modes = {int(k): set(v) for k, v in (raw.get("frame_transform_modes") or {}).items()}
+                    action.invalidate_transforms()
+                    self.actions.append(action)
+                    self._append_action_card(action)
+                viewer.set_actions(self.actions)
+                viewer.set_current_action(None)
+                vstate = snap.get("viewer") or {}
+                if vstate.get("frames"):
+                    viewer._frames = [tuple(map(int, r)) for r in vstate["frames"]]
+                if vstate.get("frame_logical"):
+                    viewer._frame_logical = {int(k): tuple(map(int, v)) for k, v in vstate["frame_logical"].items()}
+                for action in self.actions:
+                    viewer.crop_frames_for_action(action)
+                ai = snap.get("current_index", -1)
+                action = self.actions[ai] if 0 <= ai < len(self.actions) else None
+                if action is not None:
+                    viewer.set_current_action(action)
+                    self.action_list.setCurrentRow(ai)
+                    self.preview.set_action(action)
             self._transform_history_state = self._capture_transform_state()
             viewer.canvas.update()
         except Exception as e:  # noqa: BLE001
@@ -612,14 +665,10 @@ class MainWindow(QMainWindow):
             self._offset_snap_before = None
             self._snapshot_before = None
 
-    def _push_snapshot(self, text: str) -> None:
-        """在结构性操作（增删动作/帧等）前调用：记录操作前快照，操作后自动补 after。
-
-        用法：操作前调一次 before = self._capture_snapshot()，操作完后调
-        self._push_snapshot_done(before, "操作名")。本方法只记 before。
-        """
-        self._snapshot_before = self._capture_snapshot()
+    def _push_snapshot(self, text: str, current_only: bool = True) -> None:
+        self._snapshot_before = self._capture_snapshot(current_only)
         self._snapshot_text = text
+        self._snapshot_current_only = current_only
 
     def _push_snapshot_done(self) -> None:
         """结构性操作完成后调用：push snapshot command。"""
@@ -2135,7 +2184,7 @@ class MainWindow(QMainWindow):
                 break
         name = f"动作{len(self.actions) + 1}"
         action = Action(name, color)
-        self._push_snapshot(f"添加动作「{name}」")
+        self._push_snapshot(f"添加动作「{name}」", current_only=False)
         self.actions.append(action)
         self._transform_history_state = self._capture_transform_state()
         self._mark_project_dirty()
@@ -2174,7 +2223,7 @@ class MainWindow(QMainWindow):
         """删除动作卡片并将选择切换到相邻动作。"""
         if action not in self.actions:
             return
-        self._push_snapshot(f"删除动作「{action.name}」")
+        self._push_snapshot(f"删除动作「{action.name}」", current_only=False)
         row = next((i for i in range(self.action_list.count())
                     if self.action_list.item(i).data(Qt.ItemDataRole.UserRole) is action), -1)
         if row < 0:
