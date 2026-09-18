@@ -494,6 +494,13 @@ class MainWindow(QMainWindow):
     def _restore_snapshot(self, snap: dict) -> None:
         """从轻量快照恢复工程：恢复 actions 数据，帧图从 atlas 重建。"""
         self._suppress_selection_snapshot = True
+        # 停掉所有 pending debounce timer，避免 restore 后误触发 push
+        for tname in ("_selection_snap_timer", "_frame_snap_timer", "_anim_snap_timer", "_offset_snap_timer"):
+            t = getattr(self, tname, None)
+            if t is not None:
+                t.stop()
+        self._snapshot_before = None
+        self._offset_snap_before = None
         try:
             viewer = self.image_viewer
             viewer._detect_generation += 1
