@@ -20,7 +20,7 @@ from PyQt6.QtGui import (
     QAction, QColor, QKeySequence, QPainter, QPen, QPixmap, QUndoCommand, QUndoStack,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QApplication, QDialog, QDockWidget, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QMainWindow, QMessageBox, QProgressBar, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
@@ -333,10 +333,21 @@ class MainWindow(QMainWindow):
         self._refresh_tab_label()
         self._set_project_title()
 
-        # 右侧浮层：历史记录（不参与布局，不挤压主窗口）
+        # 右侧浮动窗口：历史记录（独立窗口，有关闭按钮，不挤压主窗口）
         self._history_panel = HistoryPanel(self._undo_stack, self)
-        self._history_panel.setVisible(True)
-        self._history_panel.raise_()
+        self._history_dock = QDockWidget("历史记录", self)
+        self._history_dock.setWidget(self._history_panel)
+        self._history_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetClosable
+            | QDockWidget.DockWidgetFeature.DockWidgetMovable
+        )
+        self._history_dock.setFloating(True)
+        self._history_dock.setMinimumWidth(180)
+        self._history_dock.setMaximumWidth(240)
+        self._history_dock.setMinimumHeight(300)
+        # 放在主窗口右侧
+        self._history_dock.move(self.x() + self.width() + 10, self.y() + 80)
+        self._history_dock.show()
 
     def _capture_transform_state(self):
         """Capture only frame transform fields, keeping undo focused and cheap."""
@@ -1434,11 +1445,10 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _open_history(self) -> None:
-        """编辑 → 历史记录面板：显示/隐藏右侧浮层。"""
-        self._history_panel.setVisible(not self._history_panel.isVisible())
-        if self._history_panel.isVisible():
-            self._history_panel.raise_()
-            self._position_history_panel()
+        """编辑 → 历史记录面板：显示/隐藏右侧浮动窗口。"""
+        self._history_dock.setVisible(not self._history_dock.isVisible())
+        if self._history_dock.isVisible():
+            self._history_dock.raise_()
 
     def _open_about(self) -> None:
         """帮助 → 关于 SpriteSheetTool：GPL 声明 + 第三方组件清单。"""
@@ -1607,17 +1617,9 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self._position_history_panel()
-
-    def _position_history_panel(self) -> None:
-        """历史面板浮在主窗口右侧（不参与布局，不挤压主窗口）。"""
-        if not hasattr(self, "_history_panel"):
-            return
-        w = 200
-        margin = 4
-        top = self.menuBar().height() + margin
-        h = self.height() - top - margin
-        self._history_panel.setGeometry(self.width() - w - margin, top, w, h)
+        # 浮动历史窗口跟随主窗口右侧
+        if hasattr(self, "_history_dock") and self._history_dock.isFloating():
+            self._history_dock.move(self.x() + self.width() + 10, self.y() + 80)
 
     def closeEvent(self, event) -> None:
         """关闭窗口前：先处理未保存的标签，再收尾原图区。
@@ -2153,7 +2155,7 @@ class MainWindow(QMainWindow):
             self._schedule_selection_snapshot()
 
     def _schedule_selection_snapshot(self):
-        """选择图块后延迟 push 快照（避免拖选过程中频繁 push）。"""
+        """选择图块后延迟 push 快照（框选结束后才记录）。"""
         if not hasattr(self, "_selection_snap_timer"):
             from PyQt6.QtCore import QTimer
             self._selection_snap_timer = QTimer(self)
@@ -2161,7 +2163,7 @@ class MainWindow(QMainWindow):
             self._selection_snap_timer.timeout.connect(self._finish_selection_snapshot)
         if not getattr(self, "_snapshot_before", None):
             self._push_snapshot("选择图块")
-        self._selection_snap_timer.start(600)
+        self._selection_snap_timer.start(200)
 
     def _finish_selection_snapshot(self):
         self._push_snapshot_done()
