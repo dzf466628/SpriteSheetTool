@@ -207,6 +207,9 @@ class PreviewCanvas(QWidget):
         # 多选叠加帧（除主帧外的选中帧，半透明叠加显示）
         self._overlay_frames: list[int] = []
         self._frozen_offset: tuple[int, int] = (0, 0)
+        # 当前变换模式的发起方：'frame'（右侧帧编辑）/ 'all'（底部动作编辑横条）。
+        # 两套变换工具按钮独立：谁发起谁点亮，切换/退出时只有发起方弹回。
+        self._transform_owner = ""
         # 参照帧模式下鼠标拖动当前帧的状态
         self._frame_drag_active: bool = False
         self._frame_drag_last: QPointF | None = None
@@ -310,6 +313,9 @@ class PreviewCanvas(QWidget):
             self._frozen_layout = None
             self._frame_index = idx
             self._hover_kind, self._hover_index = None, -1
+            # 切帧 = 切换到别的编辑目标：自动退出变换模式（发起方按钮弹回）
+            if self._transform_mode:
+                self.set_transform_mode(None)
             self.update()
 
     def set_playing(self, playing: bool) -> None:
@@ -452,9 +458,15 @@ class PreviewCanvas(QWidget):
 
     # ==================== 自由变换交互 ====================
 
-    def set_transform_mode(self, mode: str | None) -> None:
-        """进入/退出变换模式（'rotate'/'scale'/'skew'/'perspective'/'distort'/''/None）。"""
+    def set_transform_mode(self, mode: str | None, owner: str | None = None) -> None:
+        """进入/退出变换模式（'rotate'/'scale'/'skew'/'perspective'/'distort'/''/None）。
+
+        owner 标记模式来源：'frame' = 右侧帧编辑面板，'all' = 底部动作编辑横条。
+        两套按钮各自独立，退出（mode=None）时保持原 owner，用于让发起方弹回。
+        """
         mode = mode or None
+        if owner is not None:
+            self._transform_owner = owner
         if mode is not None and mode == self._transform_mode:
             mode = None  # 再点同按钮 = 退出
         self._transform_mode = mode
@@ -1623,12 +1635,20 @@ class AnimAdjustPanel(QWidget):
         if on:
             # 右侧按钮进入的变换模式只作用于当前帧
             self._transform_scope = "frame"
-            canvas.set_transform_mode(mode)
+            canvas.set_transform_mode(mode, "frame")
         elif canvas.transform_mode() == mode:
             canvas.set_transform_mode(None)
 
     def _on_canvas_mode_changed(self, mode: str) -> None:
-        """预览画布侧的退出（点空白/Esc/再点同按钮）→ 同步按钮选中态。"""
+        """预览画布侧的退出（点空白/Esc/再点同按钮）→ 同步按钮选中态。
+
+        只有「右侧帧编辑面板」发起的变换才点亮这里的按钮；
+        底部动作编辑横条发起的（owner=='all'）一律弹回，两套工具互不联动。
+        """
+        canvas = getattr(self, "canvas", None)
+        owner = getattr(canvas, "_transform_owner", "") if canvas is not None else ""
+        if owner == "all":
+            mode = ""
         if not mode:
             # 画布退出变换模式：作用域回到单帧
             self._transform_scope = "frame"
@@ -1655,10 +1675,10 @@ class AnimAdjustPanel(QWidget):
             if self._hint_no_action():
                 return
             self._transform_scope = "all"
-            canvas.set_transform_mode(mode)
+            canvas.set_transform_mode(mode, "all")
         elif canvas.transform_mode():
             self._transform_scope = "frame"
-            canvas.set_transform_mode(None)
+            canvas.set_transform_mode(None, "all")
 
     def _apply_rotation(self, angle: int) -> None:
         """旋转角度变更（仅来自预览圆形手柄）→ 传播到目标帧。"""

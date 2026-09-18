@@ -141,7 +141,7 @@ class AnimSettingsBar(QWidget):
         outer.setSpacing(4)
 
         # 顶部标题栏：20px 高、与工具框等宽；红字左对齐
-        self._bar_title = QLabel("动画编辑·全部帧")
+        self._bar_title = QLabel("动作编辑")
         self._bar_title.setFixedHeight(20)
         self._bar_title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self._bar_title.setStyleSheet(
@@ -575,8 +575,14 @@ class AnimSettingsBar(QWidget):
             self._action.frame_durations.clear()
             self.changed.emit()
 
-    def set_mode(self, mode: str) -> None:
-        """画布变换模式变化（主窗口从预览画布收到）→ 同步本横条按钮。"""
+    def set_mode(self, mode: str, owner: str = "") -> None:
+        """画布变换模式变化（主窗口从预览画布收到）→ 同步本横条按钮。
+
+        owner=="frame" 表示是右侧帧编辑面板发起的变换：本横条按钮全部弹回，
+        与帧编辑工具保持独立，不联动点亮。
+        """
+        if owner == "frame":
+            mode = ""
         self._all_mode_group.setExclusive(False)
         for key, btn in self._all_mode_buttons.items():
             btn.blockSignals(True)
