@@ -190,6 +190,19 @@ class PreviewCanvas(QWidget):
         self._drag_rot_start = 0                 # 拖动开始时旋转角度
         self._drag_rot_mouse_start = 0.0
         self._drag_pivot_canvas = QPointF(0, 0)
+        self._drag_pivot_screen = QPointF(0, 0)
+        # ---- 视图锚定：变换拖动期间把「不动点」钉死在屏幕上 ----
+        # 布局 compute_preview_layout 只按"变换后的内容包围盒"给每帧定位，帧的
+        # 绝对落点信息会被丢掉。于是旋转时被钉住的是内容包围盒的左上角、不是旋转
+        # 中心 —— 画面看起来是"图像在爬"而不是"绕红点转"；四边形的位移量(mo)在
+        # 松手重排布局后也会被丢掉，表现为松手回弹几十像素。
+        # 这里不改数据/导出布局，只在绘制期给画布加一个平移，把本次交互的"不动点"
+        # （旋转中心 / 拖动锚点角）钉在它拖动开始时的屏幕位置：目标不动、灰色画布框
+        # 自己动。松手后锚点继续保持，直到换帧/换动作/退出变换/缩放平移。
+        self._view_shift = QPointF(0.0, 0.0)
+        self._anchor_spec: tuple | None = None   # ('pivot',) | ('frac', fx, fy)
+        self._anchor_screen: QPointF | None = None
+        self._last_resize: QSize | None = None
         # Hover feedback deliberately uses a tiny pulse rather than a layout
         # animation, so the control frame never changes size while painting.
         self._hover_kind: str | None = None
@@ -243,6 +256,8 @@ class PreviewCanvas(QWidget):
             return
         if not (0 <= self._frame_index < len(self._action.frames)):
             return
+        # 拖偏移是要让帧跟着手走，不能被视图锚定抵消掉
+        self.clear_view_anchor()
         self._frozen_layout = compute_preview_layout(self._action, self._frame_index)
         self._frozen_index = self._frame_index
         self._frozen_offset = self._action.frame_offsets.get(self._frame_index, (0, 0))
@@ -300,8 +315,15 @@ class PreviewCanvas(QWidget):
         self._reposition_toolbar()
 
     def resizeEvent(self, event):
-        if self._fit:
-            self._apply_fit()
+        # 只有尺寸真的变了才重置视图锚定/自适应：Qt 在离屏渲染(render)等场景
+        # 会补发一次同尺寸 resize，不能因此把正在进行的变换锚定清掉。
+        size = event.size()
+        changed = self._last_resize is not None and size != self._last_resize
+        self._last_resize = QSize(size)
+        if changed:
+            self.clear_view_anchor()
+            if self._fit:
+                self._apply_fit()
         self._reposition_toolbar()
 
     def _reposition_toolbar(self):
@@ -312,6 +334,7 @@ class PreviewCanvas(QWidget):
         self._action = action
         self._frame_index = 0
         self._frozen_layout = None
+        self.clear_view_anchor()
         self._hover_kind, self._hover_index = None, -1
         self._direction = 1
         self._bg_scroll = 0.0
@@ -346,6 +369,7 @@ class PreviewCanvas(QWidget):
         if self._action and 0 <= idx < len(self._action.frames):
             # 换帧时丢弃冻结布局：冻结里的"当前帧偏移增量"只对冻结时的帧有意义
             self._frozen_layout = None
+            self.clear_view_anchor()      # 锚点绑定在原来那一帧上
             self._frame_index = idx
             self._hover_kind, self._hover_index = None, -1
             self.update()
@@ -450,6 +474,7 @@ class PreviewCanvas(QWidget):
         self._zoom_to(self._zoom / 1.2)
 
     def _zoom_to(self, new_zoom):
+        self.clear_view_anchor()      # 视图缩放语义变了，锚定没有意义
         self._zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM, new_zoom))
         self._fit = False
         self.update()
@@ -462,6 +487,7 @@ class PreviewCanvas(QWidget):
         new_zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM, self._zoom * factor))
         mouse_pos = event.position()
         old_zoom = self._zoom
+        self.clear_view_anchor()
         self._offset = QPointF(
             mouse_pos.x() - (mouse_pos.x() - self._offset.x()) * (new_zoom / old_zoom),
             mouse_pos.y() - (mouse_pos.y() - self._offset.y()) * (new_zoom / old_zoom),
@@ -472,6 +498,7 @@ class PreviewCanvas(QWidget):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Space:
+            self.clear_view_anchor()
             self._panning = True
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
         elif (event.key() == Qt.Key.Key_T
@@ -501,6 +528,9 @@ class PreviewCanvas(QWidget):
             self._transform_owner = owner
         if mode is not None and mode == self._transform_mode:
             mode = None  # 再点同按钮 = 退出
+        if mode is None:
+            # 退出变换：锚点解除（平移已并进视图偏移，画面不会跳）
+            self.clear_view_anchor()
         self._transform_mode = mode
         self._drag_kind = None
         self._drag_layout = None
@@ -612,6 +642,14 @@ class PreviewCanvas(QWidget):
         mh = idx in self._action.frame_mirror_h
         mv = idx in self._action.frame_mirror_v
         transformed = bool(mh or mv or angle)
+        # 交互路径每次重绘/命中判定都要用（视图锚定让调用次数翻倍），
+        # 按与 action_frame_pixmap 同源的键缓存，invalidate_transforms 一起失效。
+        cache = getattr(self._action, "_pivot_out_cache", None)
+        ckey = (idx, angle, mh, mv, tuple(pivot))
+        if cache is not None:
+            hit = cache.get(ckey)
+            if hit is not None:
+                return QPointF(hit[0], hit[1])
 
         pm = src
         if mh:
@@ -636,6 +674,8 @@ class PreviewCanvas(QWidget):
             bounds = _alpha_bounds(pm)
             if bounds is not None:
                 pin = QPointF(pin.x() - bounds.x(), pin.y() - bounds.y())
+        if cache is not None:
+            cache[ckey] = (pin.x(), pin.y())
         return pin
 
     def _rotation_pivot_canvas(self, layout=None, mo=None) -> QPointF:
@@ -689,13 +729,100 @@ class PreviewCanvas(QWidget):
             points = [QPointF(p.x() + dx, p.y() + dy) for p in points]
         return points
 
-    def _logical_to_screen(self, pt: QPointF) -> QPointF:
+    # ---- 逻辑坐标 ↔ 屏幕坐标（含视图锚定平移）----
+    def _to_screen_raw(self, pt: QPointF) -> QPointF:
+        """不含视图锚定平移的屏幕坐标（锚点计算用，避免自我引用）。"""
         return QPointF(self._offset.x() + pt.x() * self._zoom,
                        self._offset.y() + pt.y() * self._zoom)
 
+    def _logical_to_screen(self, pt: QPointF) -> QPointF:
+        return QPointF(self._to_screen_raw(pt).x() + self._view_shift.x(),
+                       self._to_screen_raw(pt).y() + self._view_shift.y())
+
     def _screen_to_logical(self, pt: QPointF) -> QPointF:
-        return QPointF((pt.x() - self._offset.x()) / self._zoom,
-                       (pt.y() - self._offset.y()) / self._zoom)
+        return QPointF((pt.x() - self._offset.x() - self._view_shift.x()) / self._zoom,
+                       (pt.y() - self._offset.y() - self._view_shift.y()) / self._zoom)
+
+    # ---- 视图锚定：本次变换的「不动点」 ----
+    def _anchor_spec_for_drag(self, kind: str, index: int):
+        """拖动期间应该钉住不动的那个点。
+
+        · 旋转/整体变换：旋转中心（整体=共同中心）；
+        · 拖角（缩放/透视/扭曲）：对角那个角是几何不动的，钉它；
+        · 斜切（拖边）：对边中点在居中剪切时……非居中时对边不动，钉对边中点；
+        · 拖红点本身：钉内容包围盒中心 —— 只有红点动，图像和手柄框都不动。
+        """
+        if kind == "pivot" or self._whole_active():
+            return ("frac", 0.5, 0.5)
+        if kind == "rotate":
+            return ("pivot",)
+        k = int(index) if int(index) >= 0 else 0
+        if kind == "corner":
+            a = (k + 2) % 4
+            return ("frac", 1.0 if a in (1, 2) else 0.0, 1.0 if a in (2, 3) else 0.0)
+        if kind == "edge":
+            fx, fy = {(0,): (0.5, 1.0), (1,): (0.0, 0.5),
+                      (2,): (0.5, 0.0), (3,): (1.0, 0.5)}.get((k,), (0.5, 0.5))
+            return ("frac", fx, fy)
+        return ("frac", 0.5, 0.5)
+
+    def _anchor_raw_canvas(self, spec=None) -> QPointF | None:
+        """锚点在没有视图平移时的画布逻辑坐标（拖动中与绘制几何同源）。"""
+        spec = self._anchor_spec if spec is None else spec
+        if spec is None or not self._action:
+            return None
+        layout = self._drag_layout if self._drag_kind else None
+        mo = self._drag_mo if self._drag_kind else self._current_mo()
+        if spec[0] == "pivot":
+            return self._rotation_pivot_canvas(layout, mo)
+        pts = self._handles_canvas(mo, layout=layout)
+        if not pts:
+            return None
+        xs = [p.x() for p in pts]
+        ys = [p.y() for p in pts]
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        return QPointF(x0 + (x1 - x0) * spec[1], y0 + (y1 - y0) * spec[2])
+
+    def _sync_view_shift(self) -> None:
+        """重算视图平移，让锚点落回它被钉住的屏幕位置。"""
+        if self._anchor_spec is None or self._anchor_screen is None:
+            self._view_shift = QPointF(0.0, 0.0)
+            return
+        raw = self._anchor_raw_canvas()
+        if raw is None:
+            self._view_shift = QPointF(0.0, 0.0)
+            return
+        self._view_shift = QPointF(
+            self._anchor_screen.x() - self._to_screen_raw(raw).x(),
+            self._anchor_screen.y() - self._to_screen_raw(raw).y(),
+        )
+
+    def _set_view_anchor(self, spec) -> None:
+        """开始一次变换交互：记住不动点当前的屏幕位置。"""
+        self.clear_view_anchor()
+        if spec is None:
+            return
+        raw = self._anchor_raw_canvas(spec)
+        if raw is None:
+            return
+        self._anchor_spec = tuple(spec)
+        self._anchor_screen = self._to_screen_raw(raw)
+
+    def _bake_view_shift(self) -> None:
+        """把当前平移并进视图偏移：之后即使解除锚定也不会跳。"""
+        if self._view_shift.x() or self._view_shift.y():
+            self._offset = QPointF(self._offset.x() + self._view_shift.x(),
+                                   self._offset.y() + self._view_shift.y())
+        self._view_shift = QPointF(0.0, 0.0)
+
+    def clear_view_anchor(self) -> None:
+        """解除视图锚定（换帧/换动作/退出变换/缩放平移时调用）。"""
+        self._bake_view_shift()
+        self._anchor_spec = None
+        self._anchor_screen = None
+
+    def view_anchored(self) -> bool:
+        return self._anchor_spec is not None
 
     def _rotate_handle_screen(self, canvas_pts, pivot_canvas=None) -> QPointF | None:
         """旋转手柄屏幕坐标，位于以旋转中心为圆心的圆环顶部。"""
@@ -737,6 +864,7 @@ class PreviewCanvas(QWidget):
         """返回 (kind, index)，只让当前模式的玫红控件可命中。"""
         if not self._transform_mode or not self._action or not self._action.frames:
             return None, -1
+        self._sync_view_shift()      # 命中判定必须和上一帧画出来的位置一致
         layout = self._drag_layout if self._drag_kind else None
         mo = self._drag_mo if self._drag_kind else self._current_mo()
         pts = self._handles_canvas(mo, layout=layout)
@@ -774,6 +902,8 @@ class PreviewCanvas(QWidget):
         self._drag_index = index
         self._drag_layout = self._current_layout()
         self._axis_lock = None          # Shift 锁轴的状态，每次拖拽重新判定
+        # 本次交互的不动点：拖动期间钉死在屏幕上，动的只有灰色画布框。
+        self._set_view_anchor(self._anchor_spec_for_drag(kind, index))
         if self._whole_active():
             # 整体(GIF 级)变换：手柄/基准全部围绕目标帧整体参考框
             fr = self._whole_frame(self._drag_layout)
@@ -787,31 +917,30 @@ class PreviewCanvas(QWidget):
             _W, _H, wentry = self._whole_master_entry()
             master = wentry[0]
             self._drag_orig = tuple(self._action.frame_quads.get(master, DEFAULT_QUAD))
-            if kind == "rotate":
-                self._drag_rot_mouse_start = math.degrees(math.atan2(
-                    screen_pos.y() - cy, screen_pos.x() - cx))
-                self._drag_rot_start = self._action.frame_rotations.get(master, 0)
-            return
-        quad = self._action.frame_quads.get(self._frame_index, DEFAULT_QUAD)
-        self._drag_orig = tuple(quad)
-        dst, w, h = self._quad_dst(quad)
-        self._drag_wrot, self._drag_hrot = w, h
-        mo = QPointF(min(p.x() for p in dst), min(p.y() for p in dst))
-        self._drag_mo = mo
-        _, _, positions, _ = self._drag_layout
-        tx, ty, _, _ = positions[self._frame_index]
-        self._drag_orig_c = [QPointF(tx + p.x() - mo.x(), ty + p.y() - mo.y()) for p in dst]
-        self._drag_center = QPointF(
-            sum(p.x() for p in self._drag_orig_c) / 4.0,
-            sum(p.y() for p in self._drag_orig_c) / 4.0,
-        )
-        self._drag_rot_start = self._action.frame_rotations.get(self._frame_index, 0)
-        self._drag_pivot_canvas = self._rotation_pivot_canvas(self._drag_layout, self._drag_mo)
+            self._drag_rot_start = self._action.frame_rotations.get(master, 0)
+        else:
+            quad = self._action.frame_quads.get(self._frame_index, DEFAULT_QUAD)
+            self._drag_orig = tuple(quad)
+            dst, w, h = self._quad_dst(quad)
+            self._drag_wrot, self._drag_hrot = w, h
+            mo = QPointF(min(p.x() for p in dst), min(p.y() for p in dst))
+            self._drag_mo = mo
+            _, _, positions, _ = self._drag_layout
+            tx, ty, _, _ = positions[self._frame_index]
+            self._drag_orig_c = [QPointF(tx + p.x() - mo.x(), ty + p.y() - mo.y()) for p in dst]
+            self._drag_center = QPointF(
+                sum(p.x() for p in self._drag_orig_c) / 4.0,
+                sum(p.y() for p in self._drag_orig_c) / 4.0,
+            )
+            self._drag_rot_start = self._action.frame_rotations.get(self._frame_index, 0)
+            self._drag_pivot_canvas = self._rotation_pivot_canvas(self._drag_layout, self._drag_mo)
         if kind == "rotate":
-            start = self._screen_to_logical(screen_pos)
+            # 角度一律在**屏幕坐标**里量：锚定把旋转中心钉在固定屏幕点，
+            # 用逻辑坐标会因为视图平移而变化，形成正反馈。
+            self._drag_pivot_screen = self._logical_to_screen(self._drag_pivot_canvas)
             self._drag_rot_mouse_start = math.degrees(math.atan2(
-                start.y() - self._drag_pivot_canvas.y(),
-                start.x() - self._drag_pivot_canvas.x(),
+                screen_pos.y() - self._drag_pivot_screen.y(),
+                screen_pos.x() - self._drag_pivot_screen.x(),
             ))
 
     def _emit_pivot_from_canvas(self, canvas_point: QPointF) -> None:
@@ -917,16 +1046,19 @@ class PreviewCanvas(QWidget):
         shift = bool((modifiers or Qt.KeyboardModifier.NoModifier)
                      & Qt.KeyboardModifier.ShiftModifier)
         mode = self._transform_mode
-        if mode == "rotate":
-            cur = self._screen_to_logical(screen_pos)
-            if self._drag_kind == "pivot":
-                self._drag_pivot_canvas = cur
-                self._emit_pivot_from_canvas(cur)
+        # 红点（旋转中心）在任何变换模式下都能拖：整体(GIF 级)变换的中心固定不可调。
+        if self._drag_kind == "pivot":
+            if self._whole_active():
                 return
-            dx = cur.x() - self._drag_pivot_canvas.x()
-            dy = cur.y() - self._drag_pivot_canvas.y()
-            if dx or dy:
-                current_mouse_angle = math.degrees(math.atan2(dy, dx))
+            cur = self._screen_to_logical(screen_pos)
+            self._drag_pivot_canvas = cur
+            self._emit_pivot_from_canvas(cur)
+            return
+        if mode == "rotate":
+            if self._drag_kind == "rotate":
+                piv = self._drag_pivot_screen
+                current_mouse_angle = math.degrees(math.atan2(
+                    screen_pos.y() - piv.y(), screen_pos.x() - piv.x()))
                 delta = (current_mouse_angle - self._drag_rot_mouse_start + 180.0) % 360.0 - 180.0
                 angle = (self._drag_rot_start + int(round(delta))) % 360
                 if shift:
@@ -1220,10 +1352,13 @@ class PreviewCanvas(QWidget):
 
         # 冻结期间（拖偏移）用冻结布局：画布区域不动，帧真的跟着偏移走
         canvas_w, canvas_h, positions, (pad, max_w, max_h) = self._paint_layout()
+        # 视图锚定：把本次变换的不动点钉回它原来的屏幕位置 —— 目标不动、
+        # 灰色画布框自己在动（而不是让图像在屏幕上乱跑/松手回弹）。
+        self._sync_view_shift()
         # 缩放居中（支持用户缩放和拖动）
         scale = self._zoom
-        cx = self._offset.x()
-        cy = self._offset.y()
+        cx = self._offset.x() + self._view_shift.x()
+        cy = self._offset.y() + self._view_shift.y()
         canvas_rect = QRectF(cx, cy, canvas_w * scale, canvas_h * scale)
 
         # 背景填满整个播放窗口，内部画布只负责边框、帧和辅助线。
@@ -2591,8 +2726,9 @@ class ActionPreviewWidget(QWidget):
             # 单帧编辑不再隐式联动其它动作。
             self._timer.setInterval(self._action.frame_duration_ms(self._frame_index))
             self.canvas._update_scroll_timer()
-            if self.canvas._fit and not self.canvas._drag_kind:
-                # 拖动变换手柄期间保持视图缩放稳定，避免每帧重新自适应导致跳动
+            if self.canvas._fit and not self.canvas._drag_kind and not self.canvas.view_anchored():
+                # 拖动变换手柄期间保持视图缩放稳定，避免每帧重新自适应导致跳动；
+                # 视图锚定生效时（拖动中及松手后）同样不重算，否则整屏会重新缩放。
                 self.canvas._apply_fit()
             self.canvas.update()
             if self.canvas._drag_kind is not None:

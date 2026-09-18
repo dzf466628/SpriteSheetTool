@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -46,6 +46,9 @@ dsh-usage/
 # 调试时随手重定向出来的日志
 build_log.txt
 packaged.err
+
+# 排查变换/锚点问题时生成的诊断截图（人眼核对用，不是产物）
+_shots/
 
 # 早期调试输出（等价性/性能/崩溃排查的临时转储），不入库
 /crash.txt

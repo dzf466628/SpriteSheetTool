@@ -1,136 +1,402 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""回归：变换拖动中 -> 松手后几何一致（不闪跳），红色锚点拖动精确且不带动手柄框。"""
+"""变换交互回归（像素级 + 真控件端到端）。
+
+为什么这么写：上一版回归只比较代码内部记账（_dragging_frame_rect vs 布局），
+两边同源，所以"拖动中"和"松手后"一起错的时候照样全绿，实际拖起来还在跳。
+这一版一律**真渲染 + 数像素**：把 PreviewCanvas / ActionPreviewWidget 画到
+QImage 上，找内容包围盒和红色锚点十字，用它们的屏幕位置做断言。
+
+覆盖：
+  1. 锚点显示精度：红十字符号位置 == 源图旋转中心像素在画面上的位置
+  2. 旋转拖动：红点在屏幕上钉死不动（图像绕它转，不再"爬"），松手不跳
+  3. 缩放拖动：四个角都拖，拖动中 == 松手后（此前 3/4 的角会瞬移 25px）
+  4. 红点在**所有**变换模式下都能拖，且只动红点（图像/手柄框不动）
+  5. 整体(多帧)变换：共同中心钉住、松手不跳
+  6. 参照帧偏移拖动仍然跟手（视图锚定不能把它抵消）
+  7. 真控件端到端：点右侧"旋转"按钮 → 真鼠标事件拖动 → 像素级断言
+"""
 from __future__ import annotations
-import os, sys, math
+
+import os
+import sys
+import math
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
+
+from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt
+from PyQt6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPixmap
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QPixmap, QColor, QPainter
-from PyQt6.QtCore import QRectF, QPointF
 
 from spritesheet.ui.models import Action
-from spritesheet.ui.preview import PreviewCanvas
+from spritesheet.ui.preview import ActionPreviewWidget, PreviewCanvas
 from spritesheet.ui.transform import DEFAULT_QUAD, DEFAULT_ROTATION_PIVOT
 
 app = QApplication([])
-PASS = 0; FAIL = 0
+
+PASS = 0
+FAIL = 0
+W, H = 120, 90
+
 
 def check(name, cond, detail=""):
     global PASS, FAIL
-    if cond: PASS += 1; print(f"  [OK]   {name} {detail}")
-    else: FAIL += 1; print(f"  [FAIL] {name} {detail}")
+    if cond:
+        PASS += 1
+        print(f"  [OK]   {name} {detail}")
+    else:
+        FAIL += 1
+        print(f"  [FAIL] {name} {detail}")
 
-def make_pm(w, h, inset=4):
-    pm = QPixmap(w, h); pm.fill(QColor(0, 0, 0, 0))
+
+# ---------------- 素材与接线 ----------------
+
+def make_pm(w=W, h=H, inset=0, marks=()):
+    """蓝块 + 品红标记；标记像素就是"源图里的旋转中心"。"""
+    pm = QPixmap(w, h)
+    pm.fill(QColor(0, 0, 0, 0))
     qp = QPainter(pm)
-    qp.fillRect(QRectF(inset, inset, w-2*inset, h-2*inset), QColor(90, 160, 255, 255))
-    qp.fillRect(QRectF(inset, inset, 18, 18), QColor(255, 220, 60, 255))
-    qp.end(); return pm
+    qp.fillRect(QRectF(inset, inset, w - 2 * inset, h - 2 * inset), QColor(60, 120, 220, 255))
+    for mx, my in marks:
+        qp.fillRect(QRectF(mx - 2, my - 2, 5, 5), QColor(255, 0, 255, 255))
+    qp.end()
+    return pm
+
 
 def wire(c, a):
+    """按真实主窗口的接线（数据落回 Action + changed 重排视图）。"""
     def on_rot(ang):
-        i = c._frame_index; ang = int(ang) % 360
+        i = c._frame_index
+        ang = int(ang) % 360
         (a.frame_rotations.__setitem__(i, ang) if ang else a.frame_rotations.pop(i, None))
         a.invalidate_transforms()
+        on_changed()
+
     def on_quad(q):
         i = c._frame_index
         (a.frame_quads.__setitem__(i, tuple(q)) if tuple(q) != DEFAULT_QUAD
          else a.frame_quads.pop(i, None))
         a.invalidate_transforms()
+        on_changed()
+
     def on_pivot(pv):
         i = c._frame_index
         (a.frame_rotation_pivots.__setitem__(i, tuple(pv)) if tuple(pv) != DEFAULT_ROTATION_PIVOT
          else a.frame_rotation_pivots.pop(i, None))
         a.invalidate_transforms()
+        on_changed()
+
+    def on_changed():
+        # ActionPreviewWidget._on_adjust_changed 的关键副作用：_fit 时重排视图
+        if c._fit and not c._drag_kind and not c.view_anchored():
+            c._apply_fit()
+
     c.transform_rotated.connect(on_rot)
     c.transform_quadded.connect(on_quad)
     c.transform_pivot_moved.connect(on_pivot)
+    c.transform_edit_finished.connect(on_changed)
 
-def new_canvas(frames=1, mode="rotate"):
-    a = Action("t"); a.frames = [make_pm(120, 90) for _ in range(frames)]; a.padding = 14
-    c = PreviewCanvas(); c.resize(440, 440); c.set_action(a); c.set_frame(0)
-    c.set_transform_mode(mode, owner="test"); c.set_transform_targets(list(range(frames)))
-    wire(c, a); c._apply_fit()
+
+def new_canvas(frames=1, mode="rotate", pm=None, fit=False):
+    a = Action("t")
+    a.frames = [pm or make_pm() for _ in range(frames)]
+    a.padding = 14
+    a.bg_mode = "white"
+    c = PreviewCanvas()
+    c.resize(460, 460)
+    c.set_action(a)
+    c.set_frame(0)
+    if not fit:
+        c._fit = False
+        c._zoom = 1.0
+        c._offset = QPointF(40, 40)
+    c.set_transform_mode(mode, owner="test")
+    c.set_transform_targets(list(range(frames)))
+    wire(c, a)
     return a, c
 
-def released_rect(c):
-    _, _, positions, _ = c._current_layout()
-    tx, ty, fw, fh = positions[c._frame_index]
-    return QRectF(tx, ty, fw, fh)
 
-def center(r): return QPointF(r.x()+r.width()/2, r.y()+r.height()/2)
+# ---------------- 数像素 ----------------
 
-def jump(a, b):
-    ca, cb = center(a), center(b)
-    return max(abs(ca.x()-cb.x()), abs(ca.y()-cb.y()),
-               abs(a.width()-b.width()), abs(a.height()-b.height()))
+_handles_state = {"hidden": False}
+_orig_draw_handles = PreviewCanvas._draw_transform_handles
 
-# ---- 1. 单帧旋转：多角度拖动中 == 松手 ----
-print("单帧旋转拖动/松手一致性：")
-for target in (30, 45, 90, 137, 210, 300):
-    a, c = new_canvas(1, "rotate")
-    pv = c._rotation_pivot_canvas()
-    h = c._handles_canvas(c._current_mo())
-    _, radius, handle = c._rotation_circle(h, pv)
-    c._begin_drag("rotate", -1, c._logical_to_screen(handle))
-    r = math.radians(target)
-    tgt = QPointF(pv.x()+radius*math.sin(r), pv.y()-radius*math.cos(r))
-    c._update_drag(c._logical_to_screen(tgt))
-    drag = c._dragging_frame_rect(0, 0, 1.0)
+
+def _draw_handles_maybe_hidden(self, p):
+    if _handles_state["hidden"]:
+        return
+    return _orig_draw_handles(self, p)
+
+
+PreviewCanvas._draw_transform_handles = _draw_handles_maybe_hidden
+
+
+def mask_bbox(img, pred):
+    w, h = img.width(), img.height()
+    xs, ys, sx, sy = [], [], 0.0, 0.0
+    for y in range(h):
+        for x in range(w):
+            px = img.pixel(x, y)
+            r, g, b = (px >> 16) & 255, (px >> 8) & 255, px & 255
+            if pred(r, g, b):
+                sx += x
+                sy += y
+                xs.append(x)
+                ys.append(y)
+    if not xs:
+        return None
+    # cx/cy = 质心（实心大块稳）；bx/by = 包围盒中心（十字这种带半透明描边的控件稳）
+    return {"n": len(xs), "x0": min(xs), "x1": max(xs), "y0": min(ys), "y1": max(ys),
+            "cx": sx / len(xs), "cy": sy / len(ys),
+            "bx": (min(xs) + max(xs)) / 2.0, "by": (min(ys) + max(ys)) / 2.0}
+
+
+is_content = lambda r, g, b: abs(r - 60) < 60 and abs(g - 120) < 60 and b > 150
+is_marker = lambda r, g, b: r > 200 and g < 60 and b > 200
+# 红点必须只取"实心圆内部"的纯色像素：半透明十字线在不同底色上混出的像素
+# 时多时少，会把包围盒中心带偏 1~3px（那是量测噪声，不是锚点在动）。
+is_cross = lambda r, g, b: r >= 254 and 18 <= g <= 30 and 62 <= b <= 75
+
+
+def render(c):
+    img = QImage(c.size(), QImage.Format.Format_RGB32)
+    img.fill(QColor("#141414"))
+    c.render(img)
+    return img
+
+
+def measure(c, hide_handles=False):
+    _handles_state["hidden"] = hide_handles
+    img = render(c)
+    _handles_state["hidden"] = False
+    return mask_bbox(img, is_content), mask_bbox(img, is_marker), mask_bbox(img, is_cross)
+
+
+def fmt(b):
+    return "None" if b is None else f"({b['cx']:.1f},{b['cy']:.1f})"
+
+
+def diff(a, b):
+    """两个包围盒的"位置+尺寸"最大偏差（像素）。"""
+    if a is None or b is None:
+        return 99.0
+    return max(abs(a["cx"] - b["cx"]), abs(a["cy"] - b["cy"]),
+               abs((a["x1"] - a["x0"]) - (b["x1"] - b["x0"])),
+               abs((a["y1"] - a["y0"]) - (b["y1"] - b["y0"])))
+
+
+def rotate_ref(c):
+    """(旋转中心屏幕点, 手柄屏幕半径)：单帧=红点，整体模式=目标帧共同中心。"""
+    if c._whole_active():
+        fr = c._whole_frame()
+        cc = QPointF(fr[4], fr[5])
+        pts = c._whole_handles()
+    else:
+        cc = c._rotation_pivot_canvas()
+        pts = c._handles_canvas(c._current_mo())
+    r = max(math.hypot(p.x() - cc.x(), p.y() - cc.y()) for p in pts) + 28.0 / c._zoom
+    return c._logical_to_screen(cc), r * c._zoom
+
+
+def rotate_drag_begin(c):
+    """按真鼠标来模拟：起点/终点都在**屏幕坐标**里算（角度按屏幕量）。"""
+    centre_s, r_s = rotate_ref(c)
+    c._begin_drag("rotate", -1, QPointF(centre_s.x(), centre_s.y() - r_s))
+    c._rp = (centre_s, r_s)
+
+
+def rotate_drag_to(c, deg):
+    centre_s, r_s = c._rp
+    c._update_drag(QPointF(centre_s.x() + r_s * math.sin(math.radians(deg)),
+                           centre_s.y() - r_s * math.cos(math.radians(deg))))
+
+
+# ================= 1. 锚点显示精度 =================
+print("1. 红十字符号位置 vs 源图旋转中心像素在画面上的位置：")
+for name, (mx, my), pivot in (
+    ("中心锚点", (60, 45), (0.5, 0.5)),
+    ("偏心锚点(脚底)", (60, 85), (0.5, 85 / H)),
+    ("偏心锚点(左手)", (12, 45), (12 / W, 0.5)),
+):
+    worst = 0.0
+    for ang in (0, 30, 67, 155, 250):
+        a, c = new_canvas(1, "rotate", pm=make_pm(marks=[(mx, my)]))
+        a.frame_rotation_pivots[0] = pivot
+        if ang:
+            a.frame_rotations[0] = ang
+        a.invalidate_transforms()
+        _, marker, _ = measure(c, hide_handles=True)   # 十字会盖住标记，先只画帧
+        _, _, cross = measure(c)                       # 再单独量十字真正画在哪
+        if marker is None or cross is None:
+            worst = 99.0
+            break
+        worst = max(worst, math.hypot(marker["bx"] - cross["bx"], marker["by"] - cross["by"]))
+    check(f"{name} 全角度偏差<1.5px", worst < 1.5, f"worst={worst:.2f}px")
+
+
+# ================= 2. 旋转拖动：目标钉住、松手不跳 =================
+print("2. 旋转拖动：红点钉在屏幕上、图像绕它转、松手不跳：")
+for frames in (1, 3):
+    a, c = new_canvas(frames, "rotate")
+    rotate_drag_begin(c)
+    seen = []
+    for deg in (0, 12, 25, 45, 70, 90):
+        if deg:
+            rotate_drag_to(c, deg)
+        m = measure(c)
+        # 单帧有红点十字可量；整体模式没有红点，改量内容包围盒中心
+        seen.append((m[0], m[2] if m[2] is not None else m[0]))
+    during = measure(c)
     c._end_drag()
-    rel = released_rect(c)
-    j = jump(drag, rel)
-    check(f"旋转~{a.frame_rotations.get(0):3d} 跳变<2px", j < 2.0, f"jump={j:.2f}px")
+    after = measure(c)
+    pivot_drift = max(max(abs(x[1]["bx"] - seen[0][1]["bx"]), abs(x[1]["by"] - seen[0][1]["by"]))
+                      for x in seen)
+    check(f"{frames}帧 拖动中不动点不移动(<1.5px)", pivot_drift < 1.5, f"drift={pivot_drift:.2f}px")
+    check(f"{frames}帧 松手不跳(<1.5px)", diff(during[0], after[0]) < 1.5,
+          f"{fmt(during[0])} -> {fmt(after[0])}")
+    check(f"{frames}帧 旋转确实生效(包围盒变了)",
+          abs((seen[0][0]["x1"] - seen[0][0]["x0"]) - (seen[-1][0]["x1"] - seen[-1][0]["x0"])) > 10,
+          f"w {seen[0][0]['x1']-seen[0][0]['x0']} -> {seen[-1][0]['x1']-seen[-1][0]['x0']}")
 
-# ---- 2. 单帧缩放：拖动中 == 松手 ----
-print("单帧缩放拖动/松手一致性：")
-a, c = new_canvas(1, "scale")
-h = c._handles_canvas(c._current_mo())
-c._begin_drag("corner", 2, c._logical_to_screen(h[2]))
-c._update_drag(c._logical_to_screen(QPointF(h[2].x()+30, h[2].y()+30)))
-drag = c._dragging_frame_rect(0, 0, 1.0)
-c._end_drag()
-rel = released_rect(c)
-j = jump(drag, rel)
-check("缩放 跳变<2px", j < 2.0,
-      f"drag={drag.width():.0f}x{drag.height():.0f} rel={rel.width():.0f}x{rel.height():.0f} jump={j:.2f}px")
 
-# ---- 3. pivot 拖动精确，且手柄框/图像不跟随移动 ----
-print("红色锚点拖动：")
+# ================= 3. 缩放拖动：四个角都不能跳 =================
+print("3. 缩放拖动：四个角分别拖，拖动中 == 松手后：")
+for k in range(4):
+    a, c = new_canvas(1, "scale")
+    h = c._handles_canvas(c._current_mo())
+    c._begin_drag("corner", k, c._logical_to_screen(h[k]))
+    c._update_drag(c._logical_to_screen(QPointF(h[k].x() + 25, h[k].y() + 25)))
+    during = measure(c)[0]
+    c._end_drag()
+    after = measure(c)[0]
+    check(f"corner{k} 松手不跳(<1.5px)", diff(during, after) < 1.5,
+          f"{fmt(during)} -> {fmt(after)}")
+
+
+# ================= 4. 红点在各模式下可拖且只动红点 =================
+print("4. 红点（旋转中心）在所有变换模式下都能拖、且只动红点：")
+for mode in ("rotate", "scale", "skew", "perspective", "distort"):
+    a, c = new_canvas(1, mode)
+    if mode == "rotate":
+        a.frame_rotations[0] = 25       # 有角度时 pivot 才真的影响画面
+        a.invalidate_transforms()
+    before_img = measure(c)[0]
+    before_box = [(p.x(), p.y()) for p in c._handles_canvas(c._current_mo())]
+    s0 = c._logical_to_screen(c._rotation_pivot_canvas())
+    kind, _ = c._hit_test(s0)
+    check(f"{mode:12s} 点得到红点", kind == "pivot", f"kind={kind}")
+    c._begin_drag("pivot", -1, s0)
+    c._update_drag(s0 + QPointF(22, 10))
+    moved = measure(c)[2]
+    c._end_drag()
+    after_img = measure(c)[0]
+    after_box = [(p.x(), p.y()) for p in c._handles_canvas(c._current_mo())]
+    follow = math.hypot(moved["bx"] - s0.x() - 22, moved["by"] - s0.y() - 10) if moved else 99
+    img_shift = math.hypot(after_img["cx"] - before_img["cx"], after_img["cy"] - before_img["cy"])
+    box_shift = max(math.hypot(x - u, y - v) for (x, y), (u, v) in zip(after_box, before_box))
+    check(f"{mode:12s} 红点跟手(<2px)", follow < 2.0, f"err={follow:.2f}px")
+    check(f"{mode:12s} 只动红点：图像/框不动(<2px)", img_shift < 2.0 and box_shift < 2.0,
+          f"img={img_shift:.2f} box={box_shift:.2f}")
+
+
+# ================= 5. 参照帧偏移拖动仍然跟手 =================
+print("5. 参照帧偏移拖动：帧跟着手走（视图锚定不能抵消）：")
 a, c = new_canvas(1, "rotate")
-before = [(p.x(), p.y()) for p in c._handles_canvas(c._current_mo())]
-pv0 = c._rotation_pivot_canvas()
-c._begin_drag("pivot", -1, c._logical_to_screen(pv0))
-c._update_drag(c._logical_to_screen(pv0 + QPointF(15, 0)))
-pv1 = c._rotation_pivot_canvas(c._drag_layout, c._drag_mo)
-moved = abs((pv1.x()-pv0.x()) - 15) < 1.0
-check("锚点跟手（拖15px）", moved, f"实际={pv1.x()-pv0.x():.2f}px")
-# 拖动中手柄框四角必须原地不动
-during = [(p.x(), p.y()) for p in c._handles_canvas(c._drag_mo, layout=c._drag_layout)]
-maxd = max(math.hypot(d[0]-b[0], d[1]-b[1]) for d, b in zip(during, before))
-check("拖锚点时手柄框不移动", maxd < 0.5, f"max_shift={maxd:.2f}px")
-c._end_drag()
+a.ref_frame = 0
+a.frame_rotations[0] = 40
+a.invalidate_transforms()
+c.set_transform_mode(None)
+before = measure(c)[0]
+c.begin_layout_freeze()
+c._frame_drag_active = True
+c._frame_drag_last = QPointF(100, 100)
 
-# ---- 4. 旋转拖动中：手柄框中心 与 帧中心 对齐（锚点不歪）----
-print("旋转中手柄框与帧中心对齐：")
-for target in (45, 120):
-    a, c = new_canvas(1, "rotate")
-    pv = c._rotation_pivot_canvas()
-    h = c._handles_canvas(c._current_mo())
-    _, radius, handle = c._rotation_circle(h, pv)
-    c._begin_drag("rotate", -1, c._logical_to_screen(handle))
-    r = math.radians(target)
-    tgt = QPointF(pv.x()+radius*math.sin(r), pv.y()-radius*math.cos(r))
-    c._update_drag(c._logical_to_screen(tgt))
-    drag = c._dragging_frame_rect(0, 0, 1.0)
-    hh = c._handles_canvas(c._drag_mo, layout=c._drag_layout)
-    hc = QPointF(sum(p.x() for p in hh)/4, sum(p.y() for p in hh)/4)
-    fc = center(drag)
-    err = math.hypot(hc.x()-fc.x(), hc.y()-fc.y())
-    check(f"旋转~{a.frame_rotations.get(0):3d} 框心=帧心", err < 2.0, f"err={err:.2f}px")
-    c._end_drag()
+
+class _Ev:
+    def position(self):
+        return QPointF(140, 130)
+
+
+c.mouseMoveEvent(_Ev())
+c.end_layout_freeze()
+after = measure(c)[0]
+check("偏移拖动 40px 生效", abs(after["cx"] - before["cx"] - 40) < 2.0,
+      f"dx={after['cx'] - before['cx']:.2f}")
+
+
+# ================= 6. 真控件端到端（按钮 + 真鼠标事件） =================
+print("6. 真控件端到端：点「旋转」按钮 → 真鼠标拖动 → 松手：")
+wd = ActionPreviewWidget()
+wd.resize(1100, 900)
+act = Action("e2e")
+act.frames = [make_pm(marks=[(60, 45)])]
+act.padding = 14
+act.bg_mode = "white"
+wd.set_actions([act])
+wd.set_action(act)
+canvas = wd.canvas
+canvas.setMinimumHeight(560)
+canvas.setMaximumHeight(560)
+canvas.setMinimumWidth(640)
+app.processEvents()
+canvas._apply_fit()            # 画布拿到真实尺寸后重新自适应（真窗口里由 resizeEvent 触发）
+wd.adjust_panel.btn_mode_rotate.setChecked(True)
+check("按钮进入旋转模式", canvas.transform_mode() == "rotate", f"mode={canvas.transform_mode()}")
+
+centre_s, r_s = rotate_ref(canvas)
+
+
+def send(kind, pos, buttons=Qt.MouseButton.LeftButton):
+    ev = QMouseEvent(kind, pos, canvas.mapToGlobal(pos.toPoint()).toPointF(),
+                     Qt.MouseButton.LeftButton, buttons, Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(canvas, ev)
+
+
+send(QEvent.Type.MouseButtonPress, QPointF(centre_s.x(), centre_s.y() - r_s))
+check("真鼠标按在旋转手柄上进入拖动", canvas._drag_kind == "rotate", f"kind={canvas._drag_kind}")
+shots = []
+expected = []
+for deg in (0, 20, 45, 75):
+    tgt = QPointF(centre_s.x() + r_s * math.sin(math.radians(deg)),
+                  centre_s.y() - r_s * math.cos(math.radians(deg)))
+    send(QEvent.Type.MouseMove, tgt)
+    shots.append(measure(canvas))
+    # 红点的量测说明：高缩放下红点是固定 10px、且带半透明十字线，边缘像素会跟
+    # 底下旋转中的图像混色，像素质心会飘 1~3px（是量测噪声）。所以这里用更硬的
+    # 判据：① 内容不许动（用户看到的"目标不动"）；② 红点该在的位置必须恒定。
+    expected.append(canvas._logical_to_screen(canvas._rotation_pivot_canvas()))
+during = shots[-1]
+content_drift = max(max(abs(s[0]["cx"] - shots[0][0]["cx"]), abs(s[0]["cy"] - shots[0][0]["cy"]))
+                    for s in shots)
+exp_drift = max(max(abs(p.x() - expected[0].x()), abs(p.y() - expected[0].y()))
+                for p in expected)
+send(QEvent.Type.MouseButtonRelease, tgt, Qt.MouseButton.NoButton)
+after = measure(canvas)
+check("端到端：拖动中图像不动(<1.5px)", content_drift < 1.5, f"drift={content_drift:.2f}px")
+check("端到端：红点位置恒定(<0.6px)", exp_drift < 0.6, f"drift={exp_drift:.2f}px")
+check("端到端：松手不跳(<2px)", diff(during[0], after[0]) < 2.0,
+      f"{fmt(during[0])} -> {fmt(after[0])}")
+check("端到端：图像确实转了", abs((during[0]["x1"] - during[0]["x0"])
+                              - (shots[0][0]["x1"] - shots[0][0]["x0"])) > 5,
+      f"w {shots[0][0]['x1']-shots[0][0]['x0']} -> {during[0]['x1']-during[0]['x0']}")
+check("端到端：旋转角写回数据", int(act.frame_rotations.get(0, 0)) > 0,
+      f"angle={act.frame_rotations.get(0)}")
+
+# 端到端：缩放四角
+wd.adjust_panel.btn_mode_scale.setChecked(True)
+check("按钮切到缩放模式", canvas.transform_mode() == "scale", f"mode={canvas.transform_mode()}")
+for k in range(4):
+    ht = canvas._handles_canvas(canvas._current_mo())
+    start = canvas._logical_to_screen(ht[k])
+    send(QEvent.Type.MouseButtonPress, start)
+    send(QEvent.Type.MouseMove, start + QPointF(20, 20))
+    mid = measure(canvas)
+    send(QEvent.Type.MouseButtonRelease, start + QPointF(20, 20), Qt.MouseButton.NoButton)
+    rel = measure(canvas)
+    check(f"端到端 corner{k} 松手不跳(<2px)", diff(mid[0], rel[0]) < 2.0,
+          f"{fmt(mid[0])} -> {fmt(rel[0])}")
 
 print(f"\n结果: {PASS} passed, {FAIL} failed")
 sys.exit(0 if FAIL == 0 else 1)

@@ -71,6 +71,8 @@ class Action:
         self._transform_cache: dict = {}           # (idx,rot,mh,mv,pivot,quad) -> 变换后的 QPixmap
         # (idx,rot,mh,mv,pivot) -> 未加 quad 的帧尺寸缓存（交互路径高频调用）
         self._base_size_cache: dict = {}
+        # (idx,rot,mh,mv,pivot) -> 旋转中心在基础图像里的坐标（交互路径高频调用）
+        self._pivot_out_cache: dict = {}
         self.ref_frame: int = -1  # 参照帧索引（洋葱皮）
         self.ref_opacity: float = 1.0  # 参照帧透明度（固定，不透明）
         self.frame_opacity: float = 1.0  # 当前帧透明度
@@ -93,6 +95,7 @@ class Action:
         """旋转中心/旋转/镜像或帧内容变化后清空变换缓存。"""
         self._transform_cache.clear()
         self._base_size_cache.clear()
+        self._pivot_out_cache.clear()
 
 
 # 24 色深色系：色相均匀覆盖 360°（每 15° 一个），S=0.78 / L=0.50，
