@@ -1,4 +1,4 @@
-﻿"""主窗口：系统标题栏 + 菜单栏 + Logo 名称栏 + 左侧边栏 + 原图区(带标尺) + 右侧预览 + 状态栏。
+"""主窗口：系统标题栏 + 菜单栏 + Logo 名称栏 + 左侧边栏 + 原图区(带标尺) + 右侧预览 + 状态栏。
 
 本模块经 SPLIT_GUIDE 步骤 3-7 拆分后只保留：
 - ``UpdateDownloadDialog``：自动更新下载弹窗（主窗口专用）；
@@ -11,8 +11,10 @@
 """
 from __future__ import annotations
 
+import atexit
 import os
 import sys
+import weakref
 from pathlib import Path
 
 from PyQt6.QtCore import QPointF, QRectF, QSize, QTimer, Qt, pyqtSignal
@@ -245,17 +247,33 @@ class AboutDialog(QDialog):
 
 
 class HistoryPanel(QWidget):
-    """树状操作历史：按动作分組，双击跳转。"""
+    """树状操作历史：全局历史 + 每个动作的历史，全部分组显示在同一棵树里。
 
-    def __init__(self, stack: QUndoStack, parent=None) -> None:
+    记录归属与撤销隔离：
+    - 全局操作（添加/删除动作等）落在全局 QUndoStack；
+    - 动作内操作（选择/变换/偏移/动画参数）落在该动作自己的 QUndoStack；
+    - 点击哪条记录就只跳转那一条所在的栈，互不影响。
+    """
+
+    def __init__(self, main: "MainWindow", parent=None) -> None:
         super().__init__(parent)
-        self._stack = stack
+        # 用弱引用持有主窗口：面板是主窗口的子控件，生命周期由 Qt 父子树管理。
+        # 若再强引用回主窗口就形成 Python 循环引用，解释器退出时 GC 顺序
+        # 会让挂着的信号连接在 Qt 析构中崩溃（0xC0000409）。
+        self._main_ref = weakref.ref(main)
+        self._stacks: list[tuple[object, QUndoStack]] = []   # (key, stack)；key 为 Action 或 "global"
+        self._conns: list = []                                # [(signal, connection)]
+        self._synced_keys: list = []
+        # 解释器退出兜底：offscreen 回归脚本不走 app.exec()/close()，
+        # aboutToQuit/closeEvent 都不触发；用 atexit 保证 Python 收尾前先断开，
+        # 否则挂着到 QUndoStack 的连接会在 Qt 析构时 fail-fast（0xC0000409）。
+        atexit.register(self.disconnect_all)
         self.setObjectName("historyPanel")
         self.setStyleSheet(
             "#historyPanel { background: #1e1e1e; border: 1px solid #3d3d3d; border-radius: 6px; }"
         )
-        self.setMinimumWidth(200)
-        self.setMaximumWidth(280)
+        self.setMinimumWidth(220)
+        self.setMaximumWidth(360)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -272,57 +290,123 @@ class HistoryPanel(QWidget):
         self.tree.itemClicked.connect(self._jump_to)
         layout.addWidget(self.tree)
 
-        self._stack = stack
         self._refresh()
-        stack.indexChanged.connect(self._refresh)
 
-    def set_stack(self, stack: QUndoStack) -> None:
-        """切换到另一个动作的 undo stack。"""
-        if stack is self._stack:
+    # ------------------------------------------------------------- 栈管理
+    def rebuild(self) -> None:
+        """动作列表增删后调用：重连各栈的信号。"""
+        self._sync_stacks()
+        self._refresh()
+
+    def disconnect_all(self) -> None:
+        """关窗/退出前断开所有栈连接并清空引用。
+
+        关键收尾：面板持有到各 QUndoStack 的活动信号连接与包装引用，
+        若拖到解释器退出时再析构，会在 Qt 侧触发 fail-fast 崩溃
+        （0xC0000409）。断开后这些对象就能安全回收。
+        """
+        for sig, conn in self._conns:
+            try:
+                sig.disconnect(conn)
+            except Exception:  # noqa: BLE001 - 栈可能已被销毁
+                pass
+        self._conns = []
+        self._stacks = []
+        self._synced_keys = []
+
+    @property
+    def _main(self) -> "MainWindow | None":
+        """弱引用解析：主窗口已被回收时返回 None。"""
+        return self._main_ref()
+
+    def _wanted_stacks(self) -> list[tuple[object, QUndoStack]]:
+        """当前应展示的栈：全局 + 每个动作的独立栈。"""
+        main = self._main
+        if main is None:
+            return []
+        stacks: list[tuple[object, QUndoStack]] = [("global", main._undo_stack)]
+        for action in main.actions:
+            if action.undo_stack is not None:
+                stacks.append((action, action.undo_stack))
+        return stacks
+
+    def _sync_stacks(self) -> None:
+        """把 _stacks 同步到当前动作列表；只有栈集合变化时才重连信号。"""
+        wanted = self._wanted_stacks()
+        sig = [(key, id(stack)) for key, stack in wanted]
+        if sig == self._synced_keys:
             return
-        try:
-            self._stack.indexChanged.disconnect(self._refresh)
-        except Exception:
-            pass
-        self._stack = stack
-        stack.indexChanged.connect(self._refresh)
-        self._refresh()
+        for old_sig, conn in self._conns:
+            try:
+                old_sig.disconnect(conn)
+            except Exception:  # noqa: BLE001 - 栈可能已被销毁
+                pass
+        self._conns = []
+        self._synced_keys = sig
+        self._stacks = []
+        for key, stack in wanted:
+            signal = stack.indexChanged
+            self._conns.append((signal, signal.connect(self._refresh)))
+            self._stacks.append((key, stack))
 
-    def _parse_action(self, text: str) -> str:
-        """从'变换帧3「动作1」(rotate)'提取动作名'动作1'。"""
-        if "「" in text and "」" in text:
-            return text.split("「", 1)[1].split("」", 1)[0]
-        return "全局"
+    # ------------------------------------------------------------- 刷新
+    def _active_key(self) -> object:
+        """当前 undo 作用在哪个栈上（决定哪条记录高亮）。"""
+        main = self._main
+        if main is None:
+            return "global"
+        active = main._active_stack()
+        if active is main._undo_stack:
+            return "global"
+        return main.image_viewer.current_action
 
     def _refresh(self, *_):
+        self._sync_stacks()
         self.tree.clear()
-        idx = self._stack.index()
-        groups: dict[str, list[tuple[int, str]]] = {}
-        # 初始状态
-        groups.setdefault("全局", []).append((0, "● 初始状态"))
-        for i in range(self._stack.count()):
-            cmd = self._stack.command(i)
-            text = cmd.text() or f"操作 {i+1}"
-            action = self._parse_action(text)
-            groups.setdefault(action, []).append((i + 1, text))
-        # 建树
-        for action, items in groups.items():
-            parent = QTreeWidgetItem(self.tree, [f"▸ {action} ({len(items)})"])
+        active_key = self._active_key()
+        for key, stack in self._stacks:
+            label = "全局历史" if key == "global" else f"动作：{key.name}"
+            parent = QTreeWidgetItem(self.tree, [f"{label}（{stack.count() + 1}）"])
             parent.setForeground(0, QColor("#F06292"))
-            for undo_idx, text in items:
+            is_active = key is active_key
+            idx = stack.index()
+            # 初始状态
+            root_item = QTreeWidgetItem(parent, ["● 初始状态"])
+            root_item.setData(0, Qt.ItemDataRole.UserRole, (key, 0))
+            if is_active and idx == 0:
+                self._highlight(root_item)
+            for i in range(stack.count()):
+                cmd = stack.command(i)
+                text = cmd.text() or f"操作 {i + 1}"
                 child = QTreeWidgetItem(parent, [text])
-                child.setData(0, Qt.ItemDataRole.UserRole, undo_idx)
-                if undo_idx == idx:
-                    child.setBackground(0, QColor(233, 30, 99, 60))
-                    child.setForeground(0, QColor("#ffffff"))
-            parent.setExpanded(True)
+                child.setData(0, Qt.ItemDataRole.UserRole, (key, i + 1))
+                if is_active and i + 1 == idx:
+                    self._highlight(child)
+            parent.setExpanded(is_active or stack.count() > 0)
 
+    @staticmethod
+    def _highlight(item: QTreeWidgetItem) -> None:
+        item.setBackground(0, QColor(233, 30, 99, 60))
+        item.setForeground(0, QColor("#ffffff"))
+
+    # ------------------------------------------------------------- 跳转
     def _jump_to(self, item, *_):
         if item.childCount() > 0:
             return  # 点的是分组头，不跳转
-        idx = item.data(0, Qt.ItemDataRole.UserRole)
-        if idx is not None:
-            self._stack.setIndex(int(idx))
+        payload = item.data(0, Qt.ItemDataRole.UserRole)
+        if not payload:
+            return
+        key, idx = payload
+        main = self._main
+        if isinstance(key, Action):
+            # 该记录属于某个动作：先把它切成当前动作（不动其他动作的数据），再跳转
+            if main is not None and main.image_viewer.current_action is not key:
+                main.select_action_for_history(key)
+            stack = key.undo_stack
+        else:
+            stack = main._undo_stack if main is not None else None
+        if stack is not None and 0 <= idx <= stack.count():
+            stack.setIndex(int(idx))
 
 
 class MainWindow(QMainWindow):
@@ -343,6 +427,12 @@ class MainWindow(QMainWindow):
         self._transform_history_state = None
         self._transform_history_pending = None
         self._restoring_transform_history = False
+        # 快照记录基线：始终等于"最近一次落账后的文档状态"（current_only 格式）。
+        # 任何动作内改动（选择/偏移/动画参数…）的 before 都取它，因此单次改动、
+        # 交错改动都能正确记录，undo 一步只回退一步。
+        self._last_snapshot_state: dict | None = None
+        self._per_action_snap_timer: QTimer | None = None
+        self._per_action_snap_text = ""
         self._project_path: Path | None = None
         self._project_json_path: str | None = None  # 当前工程关联的 JSON 文件路径
         self._project_dirty = False
@@ -356,6 +446,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         self._transform_history_state = self._capture_transform_state()
+        self._last_snapshot_state = self._capture_snapshot()
         # 起始标签页
         self._documents.append({"name": self._project_name, "dirty": False, "state": None})
         self.tabs.add_tab(self._project_name)
@@ -363,7 +454,7 @@ class MainWindow(QMainWindow):
         self._set_project_title()
 
         # 右侧浮动窗口：历史记录（独立窗口，有关闭按钮，不挤压主窗口）
-        self._history_panel = HistoryPanel(self._undo_stack, self)
+        self._history_panel = HistoryPanel(self, self)
         self._history_dock = QDockWidget("历史记录", self)
         self._history_dock.setWidget(self._history_panel)
         self._history_dock.setFeatures(
@@ -376,11 +467,15 @@ class MainWindow(QMainWindow):
             "QDockWidget::title { background: #2a2a2a; padding: 4px 8px; border-bottom: 1px solid #3d3d3d; }"
         )
         self._history_dock.setMinimumWidth(180)
-        self._history_dock.setMaximumWidth(240)
+        self._history_dock.setMaximumWidth(340)
         self._history_dock.setMinimumHeight(300)
         # 放在主窗口右侧
         self._history_dock.move(self.x() + self.width() + 10, self.y() + 80)
         self._history_dock.show()
+        # 程序退出时断开历史面板到各 undo 栈的连接（防 Qt 析构崩溃）
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._history_panel.disconnect_all)
 
     def _capture_transform_state(self):
         """只存当前动作的变换状态，undo 不影响其他动作。"""
@@ -406,13 +501,10 @@ class MainWindow(QMainWindow):
         self._restoring_transform_history = True
         self._suppress_selection_snapshot = True
         # 停掉所有 pending debounce timer
-        for tname in ("_selection_snap_timer", "_frame_snap_timer", "_anim_snap_timer", "_offset_snap_timer", "_adjust_snap_timer"):
-            t = getattr(self, tname, None)
-            if t is not None:
-                t.stop()
+        if self._per_action_snap_timer is not None:
+            self._per_action_snap_timer.stop()
+        self._per_action_snap_text = ""
         self._snapshot_before = None
-        self._offset_snap_before = None
-        self._last_selection_state = None
         try:
             for _, action, rotations, mirror_h, mirror_v, pivots, quads, modes in state:
                 if action not in self.actions:
@@ -437,6 +529,7 @@ class MainWindow(QMainWindow):
         finally:
             self._restoring_transform_history = False
             self._suppress_selection_snapshot = False
+            self._last_snapshot_state = self._capture_snapshot()
 
     def _begin_transform_history(self) -> None:
         self._suppress_selection_snapshot = True
@@ -453,7 +546,7 @@ class MainWindow(QMainWindow):
             return f"变换全部帧{name}"
         if mode:
             return f"变换帧{fi+1}{name}({mode})"
-        return f"变换{name}"
+        return f"变换帧{fi+1}{name}"
 
     def _finish_transform_history(self) -> None:
         self._suppress_selection_snapshot = False
@@ -464,6 +557,8 @@ class MainWindow(QMainWindow):
         after = self._capture_transform_state()
         if before != after and not self._restoring_transform_history:
             self._active_stack().push(_TransformHistoryCommand(self, before, after, self._transform_text()))
+            # 变换已单独落账 → 快照基线同步到最新，避免被快照 timer 再记一条
+            self._last_snapshot_state = self._capture_snapshot()
         self._transform_history_state = after
 
     def _on_transform_history_changed(self) -> None:
@@ -475,6 +570,7 @@ class MainWindow(QMainWindow):
         before = self._transform_history_state
         if before is not None and before != current:
             self._active_stack().push(_TransformHistoryCommand(self, before, current, self._transform_text()))
+            self._last_snapshot_state = self._capture_snapshot()
         self._transform_history_state = current
 
     def _reset_transform_history(self) -> None:
@@ -484,6 +580,12 @@ class MainWindow(QMainWindow):
                 a.undo_stack.clear()
         self._transform_history_pending = None
         self._transform_history_state = self._capture_transform_state()
+        if self._per_action_snap_timer is not None:
+            self._per_action_snap_timer.stop()
+        self._per_action_snap_text = ""
+        self._last_snapshot_state = self._capture_snapshot()
+        if hasattr(self, "_history_panel"):
+            self._history_panel.rebuild()
 
     def _active_stack(self) -> QUndoStack:
         """当前动作的 undo stack（动作内操作），没有则用全局 stack。"""
@@ -493,19 +595,30 @@ class MainWindow(QMainWindow):
         return self._undo_stack
 
     def _do_undo(self) -> None:
-        self._active_stack().undo()
+        stack = self._active_stack()
+        if stack.canUndo():
+            stack.undo()
+        elif self._undo_stack.canUndo():
+            # 当前动作栈到底后再接全局栈：让"添加动作"这类全局操作也能 Ctrl+Z 撤销
+            self._undo_stack.undo()
 
     def _do_redo(self) -> None:
-        self._active_stack().redo()
+        stack = self._active_stack()
+        if stack.canRedo():
+            stack.redo()
+        elif self._undo_stack.canRedo():
+            self._undo_stack.redo()
 
-    def _capture_snapshot(self, current_only: bool = True) -> dict:
+    def _capture_snapshot(self, current_only: bool = True, focus_action: Action | None = None) -> dict:
         """纯数据快照：不编码任何 PNG。
 
         current_only=True（默认）：只存当前动作，undo 不影响其他动作。
         current_only=False：存全部动作（用于添加/删除动作）。
+        focus_action：把某个动作当"当前动作"来抓（改非当前动作的名字/颜色时用），
+        恢复时会把数据写回这个动作自己，而不是当前选中的动作。
         """
         viewer = self.image_viewer
-        cur = viewer.current_action
+        cur = focus_action if focus_action is not None else viewer.current_action
         cur_idx = self.actions.index(cur) if cur in self.actions else -1
 
         def _action_data(action):
@@ -551,7 +664,7 @@ class MainWindow(QMainWindow):
         else:
             actions = [_action_data(a) for a in self.actions]
 
-        return {
+        snap = {
             "current_only": current_only,
             "current_index": cur_idx,
             "actions": actions,
@@ -560,18 +673,55 @@ class MainWindow(QMainWindow):
                 "frame_logical": {str(k): list(v) for k, v in viewer._frame_logical.items()},
             },
         }
+        if not current_only:
+            # 结构性快照携带动作对象引用：undo/redo 时复用原对象（保留各自的
+            # 独立 undo 栈），而不是重建新对象把动作自己的历史清空。
+            snap["action_objects"] = list(self.actions)
+        return snap
+
+    def _apply_action_data(self, action: Action, raw: dict) -> None:
+        """把快照/工程里的原始数据重灌到一个动作对象上（不动它的 undo_stack）。"""
+        for attr in ("fps", "loop_mode", "padding", "ground_enabled", "ground_offset",
+                     "reuse_frame_settings", "show_anchor", "ref_frame", "ref_opacity",
+                     "frame_opacity", "bg_mode", "action_type", "move_direction", "move_speed"):
+            if attr in raw:
+                setattr(action, attr, raw[attr])
+        action.name = str(raw.get("name", action.name))
+        action.color = str(raw.get("color", action.color))
+        action.selected_indices = [int(x) for x in raw.get("selected_indices", [])]
+        action.composite_groups = [[int(x) for x in g] for g in raw.get("composite_groups", [])]
+        layouts = raw.get("frame_layouts")
+        action.frame_layouts = None if layouts is None else [
+            [(int(i), int(x), int(y)) for i, x, y in layout] for layout in layouts
+        ]
+        action.frame_layouts_base = int(raw.get("frame_layouts_base", 0))
+        action.frame_rects = [tuple(map(int, x)) for x in raw.get("frame_rects", [])]
+        action.frame_parts = []
+        for frame_parts in raw.get("frame_parts", []):
+            parsed = []
+            for part in frame_parts:
+                if len(part) >= 5:
+                    parsed.append((tuple(map(int, part[0])), int(part[1]), int(part[2]), int(part[3]), int(part[4])))
+            action.frame_parts.append(parsed)
+        action.anchor = tuple(float(x) for x in self._tuple2(raw.get("anchor"), (0.5, 0.5)))
+        action.frame_offsets = {int(k): tuple(map(int, v)) for k, v in (raw.get("frame_offsets") or {}).items()}
+        action.frame_durations = {int(k): max(1, int(v)) for k, v in (raw.get("frame_durations") or {}).items()}
+        action.frame_rotations = {int(k): int(v) for k, v in (raw.get("frame_rotations") or {}).items()}
+        action.frame_mirror_h = set(map(int, raw.get("frame_mirror_h", [])))
+        action.frame_mirror_v = set(map(int, raw.get("frame_mirror_v", [])))
+        action.frame_rotation_pivots = {int(k): tuple(map(float, v)) for k, v in (raw.get("frame_rotation_pivots") or {}).items()}
+        action.frame_quads = {int(k): tuple(map(float, v)) for k, v in (raw.get("frame_quads") or {}).items()}
+        action.frame_transform_modes = {int(k): set(v) for k, v in (raw.get("frame_transform_modes") or {}).items()}
+        action.invalidate_transforms()
 
     def _restore_snapshot(self, snap: dict) -> None:
         """从轻量快照恢复工程：恢复 actions 数据，帧图从 atlas 重建。"""
         self._suppress_selection_snapshot = True
         # 停掉所有 pending debounce timer，避免 restore 后误触发 push
-        for tname in ("_selection_snap_timer", "_frame_snap_timer", "_anim_snap_timer", "_offset_snap_timer", "_adjust_snap_timer"):
-            t = getattr(self, tname, None)
-            if t is not None:
-                t.stop()
+        if self._per_action_snap_timer is not None:
+            self._per_action_snap_timer.stop()
+        self._per_action_snap_text = ""
         self._snapshot_before = None
-        self._offset_snap_before = None
-        self._last_selection_state = None
         try:
             viewer = self.image_viewer
             viewer._detect_generation += 1
@@ -581,42 +731,11 @@ class MainWindow(QMainWindow):
             raw_list = snap.get("actions", [])
 
             if current_only and cur_idx >= 0 and cur_idx < len(self.actions):
-                # 只恢复当前动作，不动其他动作
+                # 只恢复当前动作，不动其他动作（该动作自己的 undo 栈原样保留）
                 raw = raw_list[cur_idx] if cur_idx < len(raw_list) else None
                 if raw:
                     action = self.actions[cur_idx]
-                    for attr in ("fps", "loop_mode", "padding", "ground_enabled", "ground_offset",
-                                 "reuse_frame_settings", "show_anchor", "ref_frame", "ref_opacity",
-                                 "frame_opacity", "bg_mode", "action_type", "move_direction", "move_speed"):
-                        if attr in raw:
-                            setattr(action, attr, raw[attr])
-                    action.name = str(raw.get("name", action.name))
-                    action.color = str(raw.get("color", action.color))
-                    action.selected_indices = [int(x) for x in raw.get("selected_indices", [])]
-                    action.composite_groups = [[int(x) for x in g] for g in raw.get("composite_groups", [])]
-                    layouts = raw.get("frame_layouts")
-                    action.frame_layouts = None if layouts is None else [
-                        [(int(i), int(x), int(y)) for i, x, y in layout] for layout in layouts
-                    ]
-                    action.frame_layouts_base = int(raw.get("frame_layouts_base", 0))
-                    action.frame_rects = [tuple(map(int, x)) for x in raw.get("frame_rects", [])]
-                    action.frame_parts = []
-                    for frame_parts in raw.get("frame_parts", []):
-                        parsed = []
-                        for part in frame_parts:
-                            if len(part) >= 5:
-                                parsed.append((tuple(map(int, part[0])), int(part[1]), int(part[2]), int(part[3]), int(part[4])))
-                        action.frame_parts.append(parsed)
-                    action.anchor = tuple(float(x) for x in self._tuple2(raw.get("anchor"), (0.5, 0.5)))
-                    action.frame_offsets = {int(k): tuple(map(int, v)) for k, v in (raw.get("frame_offsets") or {}).items()}
-                    action.frame_durations = {int(k): max(1, int(v)) for k, v in (raw.get("frame_durations") or {}).items()}
-                    action.frame_rotations = {int(k): int(v) for k, v in (raw.get("frame_rotations") or {}).items()}
-                    action.frame_mirror_h = set(map(int, raw.get("frame_mirror_h", [])))
-                    action.frame_mirror_v = set(map(int, raw.get("frame_mirror_v", [])))
-                    action.frame_rotation_pivots = {int(k): tuple(map(float, v)) for k, v in (raw.get("frame_rotation_pivots") or {}).items()}
-                    action.frame_quads = {int(k): tuple(map(float, v)) for k, v in (raw.get("frame_quads") or {}).items()}
-                    action.frame_transform_modes = {int(k): set(v) for k, v in (raw.get("frame_transform_modes") or {}).items()}
-                    action.invalidate_transforms()
+                    self._apply_action_data(action, raw)
                     viewer.crop_frames_for_action(action)
                     # 刷新左侧动作卡片（名字/颜色）
                     for ci in range(self.action_list.count()):
@@ -630,43 +749,27 @@ class MainWindow(QMainWindow):
                 # 全量恢复（添加/删除动作）
                 self.actions.clear()
                 self.action_list.clear()
-                for raw in raw_list:
-                    action = Action(str(raw.get("name", "未命名动作")), str(raw.get("color", "#E91E63")))
-                    action.undo_stack = QUndoStack(self)
-                    from spritesheet.settings import undo_limit
-                    action.undo_stack.setUndoLimit(undo_limit())
-                    for attr in ("fps", "loop_mode", "padding", "ground_enabled", "ground_offset",
-                                 "reuse_frame_settings", "show_anchor", "ref_frame", "ref_opacity",
-                                 "frame_opacity", "bg_mode", "action_type", "move_direction", "move_speed"):
-                        if attr in raw:
-                            setattr(action, attr, raw[attr])
-                    action.selected_indices = [int(x) for x in raw.get("selected_indices", [])]
-                    action.composite_groups = [[int(x) for x in g] for g in raw.get("composite_groups", [])]
-                    layouts = raw.get("frame_layouts")
-                    action.frame_layouts = None if layouts is None else [
-                        [(int(i), int(x), int(y)) for i, x, y in layout] for layout in layouts
-                    ]
-                    action.frame_layouts_base = int(raw.get("frame_layouts_base", 0))
-                    action.frame_rects = [tuple(map(int, x)) for x in raw.get("frame_rects", [])]
-                    action.frame_parts = []
-                    for frame_parts in raw.get("frame_parts", []):
-                        parsed = []
-                        for part in frame_parts:
-                            if len(part) >= 5:
-                                parsed.append((tuple(map(int, part[0])), int(part[1]), int(part[2]), int(part[3]), int(part[4])))
-                        action.frame_parts.append(parsed)
-                    action.anchor = tuple(float(x) for x in self._tuple2(raw.get("anchor"), (0.5, 0.5)))
-                    action.frame_offsets = {int(k): tuple(map(int, v)) for k, v in (raw.get("frame_offsets") or {}).items()}
-                    action.frame_durations = {int(k): max(1, int(v)) for k, v in (raw.get("frame_durations") or {}).items()}
-                    action.frame_rotations = {int(k): int(v) for k, v in (raw.get("frame_rotations") or {}).items()}
-                    action.frame_mirror_h = set(map(int, raw.get("frame_mirror_h", [])))
-                    action.frame_mirror_v = set(map(int, raw.get("frame_mirror_v", [])))
-                    action.frame_rotation_pivots = {int(k): tuple(map(float, v)) for k, v in (raw.get("frame_rotation_pivots") or {}).items()}
-                    action.frame_quads = {int(k): tuple(map(float, v)) for k, v in (raw.get("frame_quads") or {}).items()}
-                    action.frame_transform_modes = {int(k): set(v) for k, v in (raw.get("frame_transform_modes") or {}).items()}
-                    action.invalidate_transforms()
-                    self.actions.append(action)
-                    self._append_action_card(action)
+                # 优先复用快照携带的动作对象：每个动作自己的独立 undo 栈原样保留，
+                # undo"删除动作"后找回来的动作，它的历史还在。
+                saved_objects = snap.get("action_objects")
+                if saved_objects is not None and len(saved_objects) == len(raw_list):
+                    for action, raw in zip(saved_objects, raw_list):
+                        self._apply_action_data(action, raw)
+                        if action.undo_stack is None:
+                            action.undo_stack = QUndoStack(self)
+                            from spritesheet.settings import undo_limit
+                            action.undo_stack.setUndoLimit(undo_limit())
+                        self.actions.append(action)
+                        self._append_action_card(action)
+                else:
+                    for raw in raw_list:
+                        action = Action(str(raw.get("name", "未命名动作")), str(raw.get("color", "#E91E63")))
+                        action.undo_stack = QUndoStack(self)
+                        from spritesheet.settings import undo_limit
+                        action.undo_stack.setUndoLimit(undo_limit())
+                        self._apply_action_data(action, raw)
+                        self.actions.append(action)
+                        self._append_action_card(action)
                 viewer.set_actions(self.actions)
                 viewer.set_current_action(None)
                 vstate = snap.get("viewer") or {}
@@ -688,17 +791,24 @@ class MainWindow(QMainWindow):
             print(f"[undo] 恢复快照失败: {e}", file=sys.stderr)
         finally:
             self._suppress_selection_snapshot = False
-            self._last_selection_state = None
-            self._offset_snap_before = None
             self._snapshot_before = None
+            self._last_snapshot_state = self._capture_snapshot()
+            if hasattr(self, "_history_panel"):
+                self._history_panel.rebuild()
 
-    def _push_snapshot(self, text: str, current_only: bool = True) -> None:
-        self._snapshot_before = self._capture_snapshot(current_only)
+    def _push_snapshot(self, text: str, current_only: bool = True,
+                       focus_action: Action | None = None) -> None:
+        """结构性/命名性操作开始前调用：抓 before 快照。
+
+        focus_action：改的是非当前动作（改名/改色）时传它，记录与恢复都只落在这个动作。
+        """
+        self._snapshot_before = self._capture_snapshot(current_only, focus_action)
         self._snapshot_text = text
         self._snapshot_current_only = current_only
+        self._snapshot_focus = focus_action
 
     def _push_snapshot_done(self) -> None:
-        """结构性操作完成后调用：push snapshot command。"""
+        """结构性/命名性操作完成后调用：push snapshot command。"""
         if getattr(self, "_suppress_selection_snapshot", False):
             self._snapshot_before = None
             self._snapshot_text = ""
@@ -707,12 +817,23 @@ class MainWindow(QMainWindow):
         if before is None:
             return
         current_only = getattr(self, "_snapshot_current_only", True)
-        after = self._capture_snapshot(current_only)
+        focus = getattr(self, "_snapshot_focus", None)
+        after = self._capture_snapshot(current_only, focus)
         if before != after:
-            stack = self._active_stack() if current_only else self._undo_stack
+            if focus is not None and current_only and focus.undo_stack is not None:
+                # 改的是别的动作：记到那个动作自己的栈里
+                stack = focus.undo_stack
+            elif current_only:
+                stack = self._active_stack()
+            else:
+                stack = self._undo_stack
             stack.push(_SnapshotCommand(self, before, after, self._snapshot_text))
         self._snapshot_before = None
         self._snapshot_text = ""
+        self._snapshot_focus = None
+        # 结构性操作会改变 actions 列表/当前动作：快照基线同步到最新，
+        # 避免后续动作内记录用错 before。
+        self._last_snapshot_state = self._capture_snapshot()
 
     @staticmethod
     def _tuple2(value, default=(0, 0)) -> tuple:
@@ -1035,12 +1156,13 @@ class MainWindow(QMainWindow):
         # 清掉 snapshot 缓存和 pending timer，避免跨文档污染
         self._snapshot_before = None
         self._snapshot_text = ""
-        self._offset_snap_before = None
-        self._last_selection_state = None
-        for tname in ("_selection_snap_timer", "_frame_snap_timer", "_anim_snap_timer", "_offset_snap_timer", "_adjust_snap_timer"):
-            t = getattr(self, tname, None)
-            if t is not None:
-                t.stop()
+        self._snapshot_focus = None
+        if self._per_action_snap_timer is not None:
+            self._per_action_snap_timer.stop()
+        self._per_action_snap_text = ""
+        self._last_snapshot_state = self._capture_snapshot()
+        if hasattr(self, "_history_panel"):
+            self._history_panel.rebuild()
 
         viewer.canvas.update()
         viewer._update_rulers()
@@ -1795,6 +1917,8 @@ class MainWindow(QMainWindow):
                 return
         self._stop_update_thread()
         self.image_viewer.shutdown()
+        if hasattr(self, "_history_panel") and self._history_panel is not None:
+            self._history_panel.disconnect_all()
         super().closeEvent(event)
 
     def _open_image(self):
@@ -2239,9 +2363,10 @@ class MainWindow(QMainWindow):
         card.start_rename()
         self.lbl_status.setText(f"已添加动作「{name}」，共 {len(action.frames)} 帧")
         self._push_snapshot_done()
+        self._history_panel.rebuild()
 
     def _on_action_color_changed(self, action: Action, color: str):
-        self._push_snapshot(f"改动作颜色「{action.name}」→ {color}")
+        self._push_snapshot(f"改动作颜色「{action.name}」→ {color}", focus_action=action)
         action.color = color
         if self.image_viewer.current_action is action:
             self.image_viewer.action_color = color
@@ -2250,7 +2375,7 @@ class MainWindow(QMainWindow):
         self._push_snapshot_done()
 
     def _on_action_name_changed(self, action: Action, name: str):
-        self._push_snapshot(f"改动作名「{action.name}」→「{name}」")
+        self._push_snapshot(f"改动作名「{action.name}」→「{name}」", focus_action=action)
         action.name = name
         self._mark_project_dirty()
         self._push_snapshot_done()
@@ -2259,6 +2384,11 @@ class MainWindow(QMainWindow):
         """删除动作卡片并将选择切换到相邻动作。"""
         if action not in self.actions:
             return
+        # 先把当前动作还没落账的改动记下来（归属它自己的栈），
+        # 避免删除后 pending timer 触发时把 before/after 串到别的动作
+        if getattr(self, "_per_action_snap_timer", None) is not None and self._per_action_snap_timer.isActive():
+            self._finish_per_action_snapshot()
+        self._per_action_snap_text = ""
         self._push_snapshot(f"删除动作「{action.name}」", current_only=False)
         row = next((i for i in range(self.action_list.count())
                     if self.action_list.item(i).data(Qt.ItemDataRole.UserRole) is action), -1)
@@ -2290,6 +2420,7 @@ class MainWindow(QMainWindow):
             self.preview.set_action(None)
             self.lbl_status.setText("已删除动作，当前没有动作")
         self._push_snapshot_done()
+        self._history_panel.rebuild()
 
     def _select_action_by_obj(self, action: Action):
         for i in range(self.action_list.count()):
@@ -2298,128 +2429,99 @@ class MainWindow(QMainWindow):
                 self.action_list.setCurrentRow(i)
                 break
 
+    def select_action_for_history(self, action: Action) -> None:
+        """历史面板跳转用：把某个动作切成当前动作（不额外标脏）。"""
+        if self.image_viewer.current_action is action:
+            return
+        for i in range(self.action_list.count()):
+            if self.action_list.item(i).data(Qt.ItemDataRole.UserRole) is action:
+                self.action_list.setCurrentRow(i)
+                break
+
     def _on_action_selected(self, row: int):
         if row < 0 or row >= len(self.actions):
             return
         action = self.actions[row]
+        # 切动作前先把上一个动作还没落账的改动记下来（归属它自己的栈）
+        if getattr(self, "_per_action_snap_timer", None) is not None and self._per_action_snap_timer.isActive():
+            self._finish_per_action_snapshot()
+        self._per_action_snap_text = ""
         self.image_viewer.set_current_action(action)
         # 裁剪帧
         self.image_viewer.crop_frames_for_action(action)
         self.preview.set_action(action)
-        # 历史面板切换到该动作的独立 undo 栈
-        if hasattr(self, "_history_panel") and self._history_panel is not None:
-            if action.undo_stack is not None:
-                self._history_panel.set_stack(action.undo_stack)
+        # 快照基线切到新动作，动作内记录之间互不串
+        self._last_snapshot_state = self._capture_snapshot()
         self.lbl_status.setText(f"当前动作：{action.name}，{len(action.frames)} 帧")
-        self._mark_project_dirty()
 
     def _on_selection_changed(self):
-        """根据是否已加载图片切换按钮文字。"""
+        """选择图块：刷新帧 + 落账为一条动作内记录。"""
         if self.image_viewer.current_action:
             self.image_viewer.crop_frames_for_action(self.image_viewer.current_action)
             self.preview.set_action(self.image_viewer.current_action)
             self._transform_history_state = self._capture_transform_state()
-            # 选择图块改变帧组成：debounce 后 push 快照记录
-            self._schedule_selection_snapshot()
+            cur = self.image_viewer.current_action
+            name = f"「{cur.name}」" if cur else ""
+            n = len(cur.selected_indices) if cur else 0
+            # 选择图块改变帧组成：debounce 后统一记录
+            self._schedule_per_action_snapshot(f"选择图块{name}({n}个)")
 
-    def _schedule_selection_snapshot(self):
-        """选择图块后延迟 push：before 用上次缓存的状态（因为信号在点击后才到）。"""
-        if not hasattr(self, "_selection_snap_timer"):
-            from PyQt6.QtCore import QTimer
-            self._selection_snap_timer = QTimer(self)
-            self._selection_snap_timer.setSingleShot(True)
-            self._selection_snap_timer.timeout.connect(self._finish_selection_snapshot)
-        self._selection_snap_timer.start(200)
+    # ------------------------------------------------------------- 动作内统一记录
+    def _schedule_per_action_snapshot(self, text: str) -> None:
+        """动作内任何数据改动（选择/偏移/动画参数/切帧）都走这里：
 
-    def _finish_selection_snapshot(self):
-        """选择图块结束：push「上次状态 → 当前状态」。"""
+        只重启一个合并 timer。fire 时用「上次落账后的状态」当 before、
+        「当前状态」当 after，有变化才 push —— 单次改动、交错改动都能正确记录，
+        且 undo 一步只回退一步（不再跨步回滚）。
+        """
+        if getattr(self, "_suppress_selection_snapshot", False):
+            return
+        if self._per_action_snap_timer is None:
+            self._per_action_snap_timer = QTimer(self)
+            self._per_action_snap_timer.setSingleShot(True)
+            self._per_action_snap_timer.timeout.connect(self._finish_per_action_snapshot)
+        self._per_action_snap_text = text
+        self._per_action_snap_timer.start(400)
+
+    def _finish_per_action_snapshot(self) -> None:
+        """动作内记录统一出口。"""
+        text = self._per_action_snap_text
+        self._per_action_snap_text = ""
         if getattr(self, "_suppress_selection_snapshot", False):
             return
         after = self._capture_snapshot()
-        before = getattr(self, "_last_selection_state", None)
-        cur = self.image_viewer.current_action
-        name = f"「{cur.name}」" if cur else ""
-        # 取当前动作的 selected_indices 数量
-        ai = self.actions.index(cur) if cur in self.actions else -1
-        n = len(after["actions"][ai].get("selected_indices", [])) if ai >= 0 else 0
-        text = f"选择图块{name}({n}个)"
-        if before is None and cur is not None:
-            # 第一次选择：before 用空选择状态
-            before = self._capture_snapshot()
-            if ai >= 0:
-                before["actions"][ai]["selected_indices"] = []
-                before["actions"][ai]["composite_groups"] = []
+        before = self._last_snapshot_state
         if before is not None and before != after:
-            self._active_stack().push(_SnapshotCommand(self, before, after, text))
-        self._last_selection_state = after
+            self._active_stack().push(_SnapshotCommand(self, before, after, text or "修改"))
+        self._last_snapshot_state = after
 
     def _on_anim_bar_changed(self):
         """动画参数(fps/时长/锚点等)改动后 debounce 记录。"""
-        if getattr(self, "_suppress_selection_snapshot", False):
-            return
-        if not hasattr(self, "_anim_snap_timer"):
-            from PyQt6.QtCore import QTimer
-            self._anim_snap_timer = QTimer(self)
-            self._anim_snap_timer.setSingleShot(True)
-            self._anim_snap_timer.timeout.connect(self._push_snapshot_done)
-        if not getattr(self, "_snapshot_before", None):
-            cur = self.image_viewer.current_action
-            name = f"「{cur.name}」" if cur else ""
-            self._push_snapshot(f"修改动画参数{name}")
-        self._anim_snap_timer.start(400)
-
-    def _on_frame_changed(self, idx: int):
-        """预览区切换帧序号：debounce 后记录。"""
-        if getattr(self, "_suppress_selection_snapshot", False):
-            return
-        if not hasattr(self, "_frame_snap_timer"):
-            from PyQt6.QtCore import QTimer
-            self._frame_snap_timer = QTimer(self)
-            self._frame_snap_timer.setSingleShot(True)
-            self._frame_snap_timer.timeout.connect(self._push_snapshot_done)
-        if not getattr(self, "_snapshot_before", None):
-            cur = self.image_viewer.current_action
-            name = f"「{cur.name}」" if cur else ""
-            self._push_snapshot(f"切换帧{name} → 帧{idx+1}")
-        self._frame_snap_timer.start(300)
-
-    def _on_frame_offset_dragged(self, idx: int, nx: int, ny: int):
-        """微调帧偏移：debounce 后记录。"""
-        if not hasattr(self, "_offset_snap_timer"):
-            from PyQt6.QtCore import QTimer
-            self._offset_snap_timer = QTimer(self)
-            self._offset_snap_timer.setSingleShot(True)
-            self._offset_snap_timer.timeout.connect(self._finish_offset_snapshot)
-        if not getattr(self, "_offset_snap_before", None):
-            self._offset_snap_before = self._capture_snapshot()
-        self._offset_snap_timer.start(400)
-
-    def _on_adjust_panel_changed(self):
-        """adjust_panel 改动（帧偏移微调按钮/滑块/重置）：debounce 后记录。"""
-        if getattr(self, "_suppress_selection_snapshot", False):
-            return
-        if not hasattr(self, "_adjust_snap_timer"):
-            from PyQt6.QtCore import QTimer
-            self._adjust_snap_timer = QTimer(self)
-            self._adjust_snap_timer.setSingleShot(True)
-            self._adjust_snap_timer.timeout.connect(self._finish_offset_snapshot)
-        if not getattr(self, "_offset_snap_before", None):
-            self._offset_snap_before = self._capture_snapshot()
-        self._adjust_snap_timer.start(400)
-
-    def _finish_offset_snapshot(self):
-        if getattr(self, "_suppress_selection_snapshot", False):
-            self._offset_snap_before = None
-            return
-        before = getattr(self, "_offset_snap_before", None)
-        if before is None:
-            return
-        after = self._capture_snapshot()
         cur = self.image_viewer.current_action
         name = f"「{cur.name}」" if cur else ""
-        if before != after:
-            self._active_stack().push(_SnapshotCommand(self, before, after, f"微调帧偏移{name}"))
-        self._offset_snap_before = None
+        self._schedule_per_action_snapshot(f"修改动画参数{name}")
+
+    def _on_frame_changed(self, idx: int):
+        """预览区切换帧序号：并入同一合并窗口（切帧本身不改数据，不会多记）。"""
+        cur = self.image_viewer.current_action
+        name = f"「{cur.name}」" if cur else ""
+        self._schedule_per_action_snapshot(f"切换帧{name} → 帧{idx+1}")
+
+    def _on_frame_offset_dragged(self, idx: int, nx: int, ny: int):
+        """画布上拖动微调帧偏移：debounce 后记录。"""
+        cur = self.image_viewer.current_action
+        name = f"「{cur.name}」" if cur else ""
+        self._schedule_per_action_snapshot(f"微调帧偏移{name}")
+
+    def _on_adjust_panel_changed(self):
+        """adjust_panel 改动（偏移按钮/滑块/重置/时长…）：并入统一记录。
+
+        注意：旋转/镜像等变换类改动会被 ``_on_transform_history_changed``
+        先行落账并刷新快照基线，因此这里不会重复记录。
+        """
+        cur = self.image_viewer.current_action
+        name = f"「{cur.name}」" if cur else ""
+        self._schedule_per_action_snapshot(f"微调帧偏移{name}")
 
     def _on_frames_updated(self):
         """后台检测完成后刷新动作帧和界面摘要。"""
