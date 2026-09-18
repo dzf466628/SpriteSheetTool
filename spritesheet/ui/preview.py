@@ -1863,7 +1863,7 @@ class ActionPreviewWidget(QWidget):
         self.thumb_list.setFixedHeight(76)
         # IconMode + 固定 gridSize + item.setSizeHint，点击区域与格子完全一致
         self.thumb_list.setViewMode(QListWidget.ViewMode.IconMode)
-        self.thumb_list.setIconSize(QSize(40, 40))
+        self.thumb_list.setIconSize(QSize(36, 36))
         self.thumb_list.setResizeMode(QListWidget.ResizeMode.Fixed)
         self.thumb_list.setMovement(QListWidget.Movement.Static)
         self.thumb_list.setFlow(QListWidget.Flow.LeftToRight)
@@ -2014,24 +2014,24 @@ class ActionPreviewWidget(QWidget):
         for i in range(len(self._action.frames)):
             item = QListWidgetItem()
             pm = action_frame_pixmap(self._action, i)
-            thumb = QPixmap(40, 40)
+            thumb = QPixmap(36, 36)
             thumb.fill(Qt.GlobalColor.transparent)
             painter = QPainter(thumb)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             scaled = pm.scaled(
-                26, 26,
+                30, 30,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
             painter.drawPixmap(
-                (30 - scaled.width()) // 2,
-                (30 - scaled.height()) // 2,
+                (36 - scaled.width()) // 2,
+                (36 - scaled.height()) // 2,
                 scaled,
             )
             # 帧编号画在右下角（角标），不用 item.setText，避免文字撑大 item 导致点击偏移
             painter.setPen(QColor("#E0E0E0"))
             painter.setFont(QFont("Microsoft YaHei UI", 7, QFont.Weight.Bold))
-            painter.drawText(QRect(20, 22, 18, 14), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom, str(i + 1))
+            painter.drawText(QRect(18, 20, 14, 12), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom, str(i + 1))
             painter.end()
             item.setIcon(QIcon(thumb))
             item.setSizeHint(QSize(48, 48))
