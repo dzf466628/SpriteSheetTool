@@ -77,8 +77,14 @@ class SettingsDialog(QDialog):
         self.spin_min_area.valueChanged.connect(self._on_min_area_changed)
         row_min.addWidget(self.spin_min_area)
         row_min.addWidget(QLabel("像素的碎片"))
+        # 红色像素块可视化：按阈值大小画红方块
+        self.lbl_min_preview = QLabel()
+        self.lbl_min_preview.setFixedSize(40, 40)
+        self.lbl_min_preview.setStyleSheet("background: #222; border: 1px solid #555;")
+        row_min.addWidget(self.lbl_min_preview)
         row_min.addStretch()
         layout.addLayout(row_min)
+        self._update_min_preview(self.spin_min_area.value())
 
         hint_min = QLabel(
             "自动识别图块时，最长边不超过此值的连通区域会被当作噪点忽略。\n"
@@ -154,6 +160,19 @@ class SettingsDialog(QDialog):
 
     def _on_min_area_changed(self, value: int) -> None:
         set_detect_min_area(value)
+        self._update_min_preview(value)
+
+    def _update_min_preview(self, value: int) -> None:
+        """在 40x40 预览框里画红色方块，大小 = min(value, 32)。"""
+        from PyQt6.QtGui import QPixmap, QPainter, QColor
+        pm = QPixmap(40, 40)
+        pm.fill(QColor("#222222"))
+        p = QPainter(pm)
+        sz = min(value, 32)
+        if sz > 0:
+            p.fillRect((40 - sz) // 2, (40 - sz) // 2, sz, sz, QColor("#E91E63"))
+        p.end()
+        self.lbl_min_preview.setPixmap(pm)
 
     def _on_undo_limit_changed(self, value: int) -> None:
         set_undo_limit(value)

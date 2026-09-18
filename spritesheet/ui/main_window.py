@@ -20,7 +20,7 @@ from PyQt6.QtGui import (
     QAction, QColor, QKeySequence, QPainter, QPen, QPixmap, QUndoCommand, QUndoStack,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QApplication, QDialog, QDockWidget, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QMainWindow, QMessageBox, QProgressBar, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
@@ -242,50 +242,31 @@ class AboutDialog(QDialog):
         layout.addLayout(btn_row)
 
 
-class HistoryDialog(QDialog):
-    """撤销历史弹窗：列出所有操作，点击跳转到任意一步。"""
+class HistoryPanel(QWidget):
+    """操作历史侧边栏（停靠窗口右侧）：列出所有操作，双击跳转。"""
 
     def __init__(self, stack: QUndoStack, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("历史记录")
-        self.setModal(True)
-        self.setMinimumWidth(360)
-        self.setMinimumHeight(400)
         self._stack = stack
+        self.setMinimumWidth(180)
+        self.setMaximumWidth(240)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
 
-        title = QLabel("操作历史")
-        title.setStyleSheet("color: #F06292; font-weight: bold; font-size: 13px;")
+        title = QLabel("历史记录")
+        title.setStyleSheet("color: #F06292; font-weight: bold; font-size: 12px;")
         layout.addWidget(title)
 
         self.list = QListWidget()
         self.list.setStyleSheet(
             "QListWidget { background: #1a1a1a; color: #e0e0e0; border: 1px solid #3d3d3d; border-radius: 4px; }"
-            "QListWidget::item { padding: 6px 10px; }"
+            "QListWidget::item { padding: 4px 8px; font-size: 11px; }"
             "QListWidget::item:selected { background: rgba(233,30,99,0.3); }"
         )
         self.list.itemDoubleClicked.connect(self._jump_to)
         layout.addWidget(self.list)
-
-        hint = QLabel("点击任意一步跳转到该状态（双击跳转）。当前位置高亮显示。")
-        hint.setStyleSheet("color: #9a9a9a; font-size: 11px;")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        btn_close = QPushButton("关闭")
-        btn_close.setFixedSize(80, 30)
-        btn_close.setStyleSheet(
-            "QPushButton { background: #E91E63; color: white; border: none; border-radius: 4px; }"
-            "QPushButton:hover { background: #F06292; }"
-        )
-        btn_close.clicked.connect(self.accept)
-        btn_row.addWidget(btn_close)
-        layout.addLayout(btn_row)
 
         self._refresh()
         stack.indexChanged.connect(self._refresh)
@@ -293,13 +274,11 @@ class HistoryDialog(QDialog):
     def _refresh(self, *_):
         self.list.clear()
         idx = self._stack.index()
-        # index 0 = 初始状态
         self.list.addItem("● 初始状态")
         for i in range(self._stack.count()):
             cmd = self._stack.command(i)
             text = cmd.text() or f"操作 {i+1}"
-            self.list.addItem(f"  {i+1}. {text}")
-        # 高亮当前位置
+            self.list.addItem(f"{i+1}. {text}")
         for i in range(self.list.count()):
             item = self.list.item(i)
             if i == idx:
@@ -349,6 +328,17 @@ class MainWindow(QMainWindow):
         self.tabs.add_tab(self._project_name)
         self._refresh_tab_label()
         self._set_project_title()
+
+        # 右侧停靠：历史记录竖条
+        self._history_panel = HistoryPanel(self._undo_stack, self)
+        self._history_dock = QDockWidget("历史记录", self)
+        self._history_dock.setWidget(self._history_panel)
+        self._history_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
+        self._history_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetClosable
+            | QDockWidget.DockWidgetFeature.DockWidgetMovable
+        )
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._history_dock)
 
     def _capture_transform_state(self):
         """Capture only frame transform fields, keeping undo focused and cheap."""
@@ -1302,9 +1292,11 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(act_redo)
         self._act_redo = act_redo
 
-        act_history = QAction("历史记录…", self)
+        act_history = QAction("历史记录面板", self)
         act_history.setShortcut(QKeySequence("Ctrl+H"))
         act_history.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        act_history.setCheckable(True)
+        act_history.setChecked(True)
         act_history.triggered.connect(self._open_history)
         edit_menu.addAction(act_history)
 
@@ -1339,9 +1331,8 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _open_history(self) -> None:
-        """编辑 → 历史记录…：查看操作历史并跳转到任意一步。"""
-        dialog = HistoryDialog(self._undo_stack, self)
-        dialog.exec()
+        """编辑 → 历史记录…：显示/隐藏右侧历史停靠栏。"""
+        self._history_dock.setVisible(not self._history_dock.isVisible())
 
     def _open_about(self) -> None:
         """帮助 → 关于 SpriteSheetTool：GPL 声明 + 第三方组件清单。"""
@@ -2037,7 +2028,7 @@ class MainWindow(QMainWindow):
         if self.image_viewer.current_action:
             self.image_viewer.crop_frames_for_action(self.image_viewer.current_action)
             self.preview.set_action(self.image_viewer.current_action)
-            self._reset_transform_history()
+            self._transform_history_state = self._capture_transform_state()
 
     def _on_frames_updated(self):
         """后台检测完成后刷新动作帧和界面摘要。"""
@@ -2049,5 +2040,5 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText(
                 f"已完成元素检测：当前共检测到 {len(self.image_viewer._frames)} 个元素"
             )
-        self._reset_transform_history()
+        self._transform_history_state = self._capture_transform_state()
         self._mark_project_dirty()
