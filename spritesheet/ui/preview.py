@@ -313,9 +313,6 @@ class PreviewCanvas(QWidget):
             self._frozen_layout = None
             self._frame_index = idx
             self._hover_kind, self._hover_index = None, -1
-            # 切帧 = 切换到别的编辑目标：自动退出变换模式（发起方按钮弹回）
-            if self._transform_mode:
-                self.set_transform_mode(None)
             self.update()
 
     def set_playing(self, playing: bool) -> None:
@@ -2105,7 +2102,11 @@ class ActionPreviewWidget(QWidget):
             item.setIcon(QIcon(thumb))
             item.setSizeHint(QSize(48, 48))
             self.thumb_list.addItem(item)
+        # 重建后默认行 0；blockSignals 避免触发 currentRowChanged → _on_thumb_changed
+        # （那会把 _frame_index 重置成 0，并在变换拖动中误触发切帧副作用）
+        self.thumb_list.blockSignals(True)
         self.thumb_list.setCurrentRow(0)
+        self.thumb_list.blockSignals(False)
 
     def _refresh_thumbs(self):
         """重建缩略图但保持当前选中帧与多选状态（旋转/镜像变化后同步）。
@@ -2120,7 +2121,10 @@ class ActionPreviewWidget(QWidget):
         self._populate_thumbs()
         n = len(self._action.frames)
         if row >= 0:
+            # 恢复选中帧是程序性操作：blockSignals 防止误触用户切帧逻辑
+            self.thumb_list.blockSignals(True)
             self.thumb_list.setCurrentRow(min(row, n - 1))
+            self.thumb_list.blockSignals(False)
         for i in selected:
             if i < n:
                 self.thumb_list.item(i).setSelected(True)
@@ -2146,6 +2150,9 @@ class ActionPreviewWidget(QWidget):
     def _tick(self):
         if not self._action or not self._action.frames:
             return
+        # 播放自动切帧与变换拖动冲突：正在变换时先退出变换模式
+        if getattr(self, "canvas", None) is not None and self.canvas._transform_mode:
+            self.canvas.set_transform_mode(None)
         n = len(self._action.frames)
         if self._action.loop_mode == Action.LOOP:
             self._frame_index = (self._frame_index + 1) % n
@@ -2188,6 +2195,9 @@ class ActionPreviewWidget(QWidget):
         self.frame_changed.emit(self._frame_index)
 
     def _on_slider_changed(self, val: int):
+        # 用户拖滑杆切帧：自动退出变换模式（按钮弹回）
+        if getattr(self, "canvas", None) is not None and self.canvas._transform_mode:
+            self.canvas.set_transform_mode(None)
         self._frame_index = val
         self._sync_frame()
 
@@ -2245,6 +2255,9 @@ class ActionPreviewWidget(QWidget):
         modifiers = QApplication.keyboardModifiers()
         if modifiers & Qt.KeyboardModifier.ControlModifier:
             return
+        # 用户点击缩略图切帧 = 切换到别的编辑目标：自动退出变换模式（按钮弹回）
+        if getattr(self, "canvas", None) is not None and self.canvas._transform_mode:
+            self.canvas.set_transform_mode(None)
         self._frame_index = row
         self._sync_frame()
 

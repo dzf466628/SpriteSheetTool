@@ -118,17 +118,49 @@ def main() -> int:
           f"实际: {canvas._transform_owner!r}")
 
     print("=== 需求2: 切换工具/点击其他自动取消 ===")
-    # 底部激活 rotate，切帧 → 自动退出 + 底部弹回
+    # 底部激活 rotate，用户点缩略图切帧 → 自动退出 + 底部弹回
     ab["rotate"].click()
     check("底部再次激活 rotate", canvas.transform_mode() == "rotate"
           and canvas._transform_owner == "all")
-    win.preview.canvas.set_frame(0)
+    win.preview._on_thumb_changed(1)  # 模拟用户点击第 2 帧缩略图
     check("切帧后变换模式自动退出", canvas.transform_mode() is None,
           f"实际: {canvas.transform_mode()!r}")
     all_lit = [k for k, b in ab.items() if b.isChecked()]
     check("切帧后底部按钮全部弹回", not all_lit, f"点亮了: {all_lit}")
     right_lit = [k for k, b in pb.items() if b.isChecked()]
     check("切帧后右侧按钮也弹回", not right_lit, f"点亮了: {right_lit}")
+
+    print("=== 需求2b: 变换拖动中不弹起 + 帧索引稳定 ===")
+    # 右侧 scale 激活，从手柄按下→拖动→释放，全程模式保持、帧索引不被重置
+    panel._on_mode_button("scale", True)
+    win.preview._frame_index = 2
+    win.preview._sync_frame()
+    handle_pts = canvas._handles_canvas(canvas._current_mo())
+    check("变换手柄可命中", len(handle_pts) >= 4, f"pts={len(handle_pts)}")
+    hp0 = canvas._logical_to_screen(handle_pts[0]).toPoint()
+    QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=hp0)
+    check("按下后进入拖动", canvas.transform_mode() == "scale" and canvas._drag_kind == "corner",
+          f"实际 mode={canvas.transform_mode()!r} drag={canvas._drag_kind!r}")
+    hp1 = hp0 + QPoint(25, 12)
+    QTest.mouseMove(canvas, pos=hp1)
+    check("拖动中模式保持（不弹起）",
+          canvas.transform_mode() == "scale" and canvas._drag_kind == "corner",
+          f"实际 mode={canvas.transform_mode()!r} drag={canvas._drag_kind!r}")
+    check("拖动中帧索引未被重置", win.preview._frame_index == 2,
+          f"实际: {win.preview._frame_index}")
+    QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=hp1)
+    check("释放后模式保持", canvas.transform_mode() == "scale",
+          f"实际: {canvas.transform_mode()!r}")
+    panel._on_mode_button("scale", False)
+
+    print("=== 需求2c: 播放中切帧自动取消变换 ===")
+    ab["rotate"].click()
+    check("激活 rotate", canvas.transform_mode() == "rotate")
+    win.preview._playing = True
+    win.preview._tick()  # 模拟播放定时器切帧
+    check("播放切帧自动退出变换模式", canvas.transform_mode() is None,
+          f"实际: {canvas.transform_mode()!r}")
+    win.preview._playing = False
 
     # 底部激活 rotate → 再点同按钮 = 退出
     ab["rotate"].click()
