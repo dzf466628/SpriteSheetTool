@@ -20,8 +20,10 @@ from PyQt6.QtGui import (
     QAction, QColor, QKeySequence, QPainter, QPen, QPixmap, QUndoCommand, QUndoStack,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QDockWidget, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QMainWindow, QMessageBox, QProgressBar, QPushButton, QSplitter, QVBoxLayout, QWidget,
+    QApplication, QDialog, QDockWidget, QFileDialog, QHBoxLayout, QLabel,
+    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar,
+    QPushButton, QSplitter, QVBoxLayout, QWidget,
+    QTreeWidget, QTreeWidgetItem,
 )
 
 from spritesheet import __app_name__, __version__
@@ -243,7 +245,7 @@ class AboutDialog(QDialog):
 
 
 class HistoryPanel(QWidget):
-    """操作历史浮层（贴主窗口右侧，不挤压主窗口）：列出所有操作，双击跳转。"""
+    """树状操作历史：按动作分組，双击跳转。"""
 
     def __init__(self, stack: QUndoStack, parent=None) -> None:
         super().__init__(parent)
@@ -252,44 +254,62 @@ class HistoryPanel(QWidget):
         self.setStyleSheet(
             "#historyPanel { background: #1e1e1e; border: 1px solid #3d3d3d; border-radius: 6px; }"
         )
-        self.setMinimumWidth(180)
-        self.setMaximumWidth(240)
+        self.setMinimumWidth(200)
+        self.setMaximumWidth(280)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
-        self.list = QListWidget()
-        self.list.setStyleSheet(
-            "QListWidget { background: #1a1a1a; color: #e0e0e0; border: 1px solid #3d3d3d; border-radius: 4px; }"
-            "QListWidget::item { padding: 4px 8px; font-size: 11px; }"
-            "QListWidget::item:selected { background: rgba(233,30,99,0.3); }"
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setStyleSheet(
+            "QTreeWidget { background: #1a1a1a; color: #e0e0e0; border: 1px solid #3d3d3d; border-radius: 4px; }"
+            "QTreeWidget::item { padding: 3px 6px; font-size: 11px; }"
+            "QTreeWidget::item:selected { background: rgba(233,30,99,0.3); }"
+            "QTreeBranch:open, QTreeBranch:closed { color: #F06292; }"
         )
-        self.list.itemDoubleClicked.connect(self._jump_to)
-        layout.addWidget(self.list)
+        self.tree.itemDoubleClicked.connect(self._jump_to)
+        layout.addWidget(self.tree)
 
         self._refresh()
         stack.indexChanged.connect(self._refresh)
 
+    def _parse_action(self, text: str) -> str:
+        """从'变换帧3「动作1」(rotate)'提取动作名'动作1'。"""
+        if "「" in text and "」" in text:
+            return text.split("「", 1)[1].split("」", 1)[0]
+        return "全局"
+
     def _refresh(self, *_):
-        self.list.clear()
+        self.tree.clear()
         idx = self._stack.index()
-        self.list.addItem("● 初始状态")
+        groups: dict[str, list[tuple[int, str]]] = {}
+        # 初始状态
+        groups.setdefault("全局", []).append((0, "● 初始状态"))
         for i in range(self._stack.count()):
             cmd = self._stack.command(i)
             text = cmd.text() or f"操作 {i+1}"
-            self.list.addItem(f"{i+1}. {text}")
-        for i in range(self.list.count()):
-            item = self.list.item(i)
-            if i == idx:
-                item.setSelected(True)
-                item.setBackground(QColor(233, 30, 99, 60))
-            else:
-                item.setBackground(QColor(0, 0, 0, 0))
+            action = self._parse_action(text)
+            groups.setdefault(action, []).append((i + 1, text))
+        # 建树
+        for action, items in groups.items():
+            parent = QTreeWidgetItem(self.tree, [f"▸ {action} ({len(items)})"])
+            parent.setForeground(0, QColor("#F06292"))
+            for undo_idx, text in items:
+                child = QTreeWidgetItem(parent, [text])
+                child.setData(0, Qt.ItemDataRole.UserRole, undo_idx)
+                if undo_idx == idx:
+                    child.setBackground(0, QColor(233, 30, 99, 60))
+                    child.setForeground(0, QColor("#ffffff"))
+            parent.setExpanded(True)
 
-    def _jump_to(self, item):
-        row = self.list.row(item)
-        self._stack.setIndex(row)
+    def _jump_to(self, item, *_):
+        if item.childCount() > 0:
+            return  # 点的是分组头，不跳转
+        idx = item.data(0, Qt.ItemDataRole.UserRole)
+        if idx is not None:
+            self._stack.setIndex(int(idx))
 
 
 class MainWindow(QMainWindow):
