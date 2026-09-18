@@ -103,7 +103,7 @@ class SettingsDialog(QDialog):
         row_hist = QHBoxLayout()
         row_hist.addWidget(QLabel("保留最近"))
         self.spin_undo_limit = QSpinBox()
-        self.spin_undo_limit.setRange(0, 30)
+        self.spin_undo_limit.setRange(0, 200)
         self.spin_undo_limit.setSingleStep(1)
         self.spin_undo_limit.setValue(undo_limit())
         self.spin_undo_limit.setFixedWidth(80)
