@@ -572,6 +572,10 @@ class MainWindow(QMainWindow):
             self.image_viewer.blockSignals(False)
             self.action_list.blockSignals(False)
             self._suppress_selection_snapshot = False
+            # 重置选择快照缓存，避免 undo 后下次选择用错 before
+            self._last_selection_state = None
+            self._offset_snap_before = None
+            self._snapshot_before = None
 
     def _push_snapshot(self, text: str) -> None:
         """在结构性操作（增删动作/帧等）前调用：记录操作前快照，操作后自动补 after。
