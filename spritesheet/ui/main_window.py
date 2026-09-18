@@ -20,7 +20,7 @@ from PyQt6.QtGui import (
     QAction, QColor, QKeySequence, QPainter, QPen, QPixmap, QUndoCommand, QUndoStack,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QDockWidget, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QMainWindow, QMessageBox, QProgressBar, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
@@ -243,11 +243,15 @@ class AboutDialog(QDialog):
 
 
 class HistoryPanel(QWidget):
-    """操作历史侧边栏（停靠窗口右侧）：列出所有操作，双击跳转。"""
+    """操作历史浮层（贴主窗口右侧，不挤压主窗口）：列出所有操作，双击跳转。"""
 
     def __init__(self, stack: QUndoStack, parent=None) -> None:
         super().__init__(parent)
         self._stack = stack
+        self.setObjectName("historyPanel")
+        self.setStyleSheet(
+            "#historyPanel { background: #1e1e1e; border: 1px solid #3d3d3d; border-radius: 6px; }"
+        )
         self.setMinimumWidth(180)
         self.setMaximumWidth(240)
 
@@ -329,17 +333,10 @@ class MainWindow(QMainWindow):
         self._refresh_tab_label()
         self._set_project_title()
 
-        # 右侧停靠：历史记录竖条
+        # 右侧浮层：历史记录（不参与布局，不挤压主窗口）
         self._history_panel = HistoryPanel(self._undo_stack, self)
-        self._history_dock = QDockWidget("历史记录", self)
-        self._history_dock.setWidget(self._history_panel)
-        self._history_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
-        self._history_dock.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetClosable
-            | QDockWidget.DockWidgetFeature.DockWidgetMovable
-        )
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._history_dock)
-        self._history_dock.setFloating(False)
+        self._history_panel.setVisible(True)
+        self._history_panel.raise_()
 
     def _capture_transform_state(self):
         """Capture only frame transform fields, keeping undo focused and cheap."""
@@ -430,9 +427,56 @@ class MainWindow(QMainWindow):
         self._transform_history_state = self._capture_transform_state()
 
     def _capture_snapshot(self) -> dict:
-        """轻量快照：只存工程数据（不含帧PNG），帧图从 atlas 重建。"""
-        manifest, _sections = self._project_manifest()
-        return manifest
+        """纯数据快照：不编码任何 PNG，只存 actions 的数据字段，帧图从 atlas 重建。"""
+        viewer = self.image_viewer
+        actions = []
+        for action in self.actions:
+            parts = []
+            for frame_parts in action.frame_parts:
+                parts.append([
+                    [list(rect), int(rx), int(ry), int(ox), int(oy)]
+                    for rect, rx, ry, ox, oy in frame_parts
+                ])
+            actions.append({
+                "name": action.name, "color": action.color,
+                "selected_indices": list(action.selected_indices),
+                "composite_groups": [list(g) for g in action.composite_groups],
+                "frame_layouts": None if action.frame_layouts is None else [
+                    [[int(i), int(x), int(y)] for i, x, y in layout]
+                    for layout in action.frame_layouts
+                ],
+                "frame_layouts_base": action.frame_layouts_base,
+                "frame_rects": [list(r) for r in action.frame_rects],
+                "frame_parts": parts,
+                "frame_count": len(action.frames),
+                "fps": action.fps, "loop_mode": action.loop_mode,
+                "padding": action.padding, "ground_enabled": action.ground_enabled,
+                "ground_offset": action.ground_offset,
+                "reuse_frame_settings": action.reuse_frame_settings,
+                "show_anchor": action.show_anchor, "anchor": list(action.anchor),
+                "frame_offsets": {str(k): list(v) for k, v in action.frame_offsets.items()},
+                "frame_durations": {str(k): int(v) for k, v in action.frame_durations.items()},
+                "frame_rotations": {str(k): v for k, v in action.frame_rotations.items()},
+                "frame_mirror_h": sorted(action.frame_mirror_h),
+                "frame_mirror_v": sorted(action.frame_mirror_v),
+                "frame_rotation_pivots": {str(k): list(v) for k, v in action.frame_rotation_pivots.items()},
+                "frame_quads": {str(k): list(v) for k, v in action.frame_quads.items()},
+                "frame_transform_modes": {str(k): sorted(v) for k, v in action.frame_transform_modes.items()},
+                "ref_frame": action.ref_frame, "ref_opacity": action.ref_opacity,
+                "frame_opacity": action.frame_opacity, "bg_mode": action.bg_mode,
+                "action_type": action.action_type, "move_direction": action.move_direction,
+                "move_speed": action.move_speed,
+            })
+        cur_idx = self.actions.index(viewer.current_action) if viewer.current_action in self.actions else -1
+        return {
+            "format": "spritesheet-tool-project",
+            "actions": actions,
+            "preview": {"action_index": cur_idx},
+            "viewer": {
+                "frames": [list(r) for r in viewer._frames],
+                "frame_logical": {str(k): list(v) for k, v in viewer._frame_logical.items()},
+            },
+        }
 
     def _restore_snapshot(self, snap: dict) -> None:
         """从轻量快照恢复工程：恢复 actions 数据，帧图从 atlas 重建。"""
@@ -478,6 +522,12 @@ class MainWindow(QMainWindow):
                 self._append_action_card(action)
             viewer.set_actions(self.actions)
             viewer.set_current_action(None)
+            # 恢复 viewer frames/logical
+            vstate = snap.get("viewer") or {}
+            if vstate.get("frames"):
+                viewer._frames = [tuple(map(int, r)) for r in vstate["frames"]]
+            if vstate.get("frame_logical"):
+                viewer._frame_logical = {int(k): tuple(map(int, v)) for k, v in vstate["frame_logical"].items()}
             # 从 atlas 重建帧图
             for action in self.actions:
                 viewer.crop_frames_for_action(action)
@@ -489,7 +539,7 @@ class MainWindow(QMainWindow):
                 self.action_list.setCurrentRow(ai)
                 self.preview.set_action(action)
             self._transform_history_state = self._capture_transform_state()
-            self.canvas.update() if hasattr(self, 'canvas') else None
+            viewer.canvas.update()
         except Exception as e:  # noqa: BLE001
             print(f"[undo] 恢复快照失败: {e}", file=sys.stderr)
 
@@ -1384,8 +1434,11 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _open_history(self) -> None:
-        """编辑 → 历史记录…：显示/隐藏右侧历史停靠栏。"""
-        self._history_dock.setVisible(not self._history_dock.isVisible())
+        """编辑 → 历史记录面板：显示/隐藏右侧浮层。"""
+        self._history_panel.setVisible(not self._history_panel.isVisible())
+        if self._history_panel.isVisible():
+            self._history_panel.raise_()
+            self._position_history_panel()
 
     def _open_about(self) -> None:
         """帮助 → 关于 SpriteSheetTool：GPL 声明 + 第三方组件清单。"""
@@ -1551,6 +1604,20 @@ class MainWindow(QMainWindow):
             if not self._save_project():
                 return False
         return True
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._position_history_panel()
+
+    def _position_history_panel(self) -> None:
+        """历史面板浮在主窗口右侧（不参与布局，不挤压主窗口）。"""
+        if not hasattr(self, "_history_panel"):
+            return
+        w = 200
+        margin = 4
+        top = self.menuBar().height() + margin
+        h = self.height() - top - margin
+        self._history_panel.setGeometry(self.width() - w - margin, top, w, h)
 
     def closeEvent(self, event) -> None:
         """关闭窗口前：先处理未保存的标签，再收尾原图区。
