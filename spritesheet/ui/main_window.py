@@ -339,6 +339,7 @@ class MainWindow(QMainWindow):
             | QDockWidget.DockWidgetFeature.DockWidgetMovable
         )
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._history_dock)
+        self._history_dock.setFloating(False)
 
     def _capture_transform_state(self):
         """Capture only frame transform fields, keeping undo focused and cheap."""
@@ -429,14 +430,66 @@ class MainWindow(QMainWindow):
         self._transform_history_state = self._capture_transform_state()
 
     def _capture_snapshot(self) -> dict:
-        """全量工程快照（含帧图），用于结构性操作的 undo。"""
-        manifest, sections = self._project_manifest()
-        return {"manifest": manifest, "sections": sections}
+        """轻量快照：只存工程数据（不含帧PNG），帧图从 atlas 重建。"""
+        manifest, _sections = self._project_manifest()
+        return manifest
 
     def _restore_snapshot(self, snap: dict) -> None:
-        """从全量快照恢复工程。"""
+        """从轻量快照恢复工程：恢复 actions 数据，帧图从 atlas 重建。"""
         try:
-            self._apply_sstool_project(snap["manifest"], snap["sections"])
+            viewer = self.image_viewer
+            viewer._detect_generation += 1
+            self._end_all_renames()
+            self.actions.clear()
+            self.action_list.clear()
+            for raw in snap.get("actions", []):
+                action = Action(str(raw.get("name", "未命名动作")), str(raw.get("color", "#E91E63")))
+                for attr in ("fps", "loop_mode", "padding", "ground_enabled", "ground_offset",
+                             "reuse_frame_settings", "show_anchor", "ref_frame", "ref_opacity",
+                             "frame_opacity", "bg_mode", "action_type", "move_direction", "move_speed"):
+                    if attr in raw:
+                        setattr(action, attr, raw[attr])
+                action.selected_indices = [int(x) for x in raw.get("selected_indices", [])]
+                action.composite_groups = [[int(x) for x in g] for g in raw.get("composite_groups", [])]
+                layouts = raw.get("frame_layouts")
+                action.frame_layouts = None if layouts is None else [
+                    [(int(i), int(x), int(y)) for i, x, y in layout] for layout in layouts
+                ]
+                action.frame_layouts_base = int(raw.get("frame_layouts_base", 0))
+                action.frame_rects = [tuple(map(int, x)) for x in raw.get("frame_rects", [])]
+                action.frame_parts = []
+                for frame_parts in raw.get("frame_parts", []):
+                    parsed = []
+                    for part in frame_parts:
+                        if len(part) >= 5:
+                            parsed.append((tuple(map(int, part[0])), int(part[1]), int(part[2]), int(part[3]), int(part[4])))
+                    action.frame_parts.append(parsed)
+                action.anchor = tuple(float(x) for x in self._tuple2(raw.get("anchor"), (0.5, 0.5)))
+                action.frame_offsets = {int(k): tuple(map(int, v)) for k, v in (raw.get("frame_offsets") or {}).items()}
+                action.frame_durations = {int(k): max(1, int(v)) for k, v in (raw.get("frame_durations") or {}).items()}
+                action.frame_rotations = {int(k): int(v) for k, v in (raw.get("frame_rotations") or {}).items()}
+                action.frame_mirror_h = set(map(int, raw.get("frame_mirror_h", [])))
+                action.frame_mirror_v = set(map(int, raw.get("frame_mirror_v", [])))
+                action.frame_rotation_pivots = {int(k): tuple(map(float, v)) for k, v in (raw.get("frame_rotation_pivots") or {}).items()}
+                action.frame_quads = {int(k): tuple(map(float, v)) for k, v in (raw.get("frame_quads") or {}).items()}
+                action.frame_transform_modes = {int(k): set(v) for k, v in (raw.get("frame_transform_modes") or {}).items()}
+                action.invalidate_transforms()
+                self.actions.append(action)
+                self._append_action_card(action)
+            viewer.set_actions(self.actions)
+            viewer.set_current_action(None)
+            # 从 atlas 重建帧图
+            for action in self.actions:
+                viewer.crop_frames_for_action(action)
+            preview_state = snap.get("preview") or {}
+            ai = int(preview_state.get("action_index", -1))
+            action = self.actions[ai] if 0 <= ai < len(self.actions) else None
+            if action is not None:
+                viewer.set_current_action(action)
+                self.action_list.setCurrentRow(ai)
+                self.preview.set_action(action)
+            self._transform_history_state = self._capture_transform_state()
+            self.canvas.update() if hasattr(self, 'canvas') else None
         except Exception as e:  # noqa: BLE001
             print(f"[undo] 恢复快照失败: {e}", file=sys.stderr)
 
@@ -2029,6 +2082,22 @@ class MainWindow(QMainWindow):
             self.image_viewer.crop_frames_for_action(self.image_viewer.current_action)
             self.preview.set_action(self.image_viewer.current_action)
             self._transform_history_state = self._capture_transform_state()
+            # 选择图块改变帧组成：debounce 后 push 快照记录
+            self._schedule_selection_snapshot()
+
+    def _schedule_selection_snapshot(self):
+        """选择图块后延迟 push 快照（避免拖选过程中频繁 push）。"""
+        if not hasattr(self, "_selection_snap_timer"):
+            from PyQt6.QtCore import QTimer
+            self._selection_snap_timer = QTimer(self)
+            self._selection_snap_timer.setSingleShot(True)
+            self._selection_snap_timer.timeout.connect(self._finish_selection_snapshot)
+        if not getattr(self, "_snapshot_before", None):
+            self._push_snapshot("选择图块")
+        self._selection_snap_timer.start(600)
+
+    def _finish_selection_snapshot(self):
+        self._push_snapshot_done()
 
     def _on_frames_updated(self):
         """后台检测完成后刷新动作帧和界面摘要。"""
