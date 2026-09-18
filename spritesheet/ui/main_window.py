@@ -370,22 +370,22 @@ class MainWindow(QMainWindow):
         self._history_dock.show()
 
     def _capture_transform_state(self):
-        """Capture only frame transform fields, keeping undo focused and cheap."""
-        state = []
-        for action in self.actions:
-            state.append((
-                id(action), action,
-                tuple(sorted((int(k), int(v)) for k, v in action.frame_rotations.items())),
-                tuple(sorted(int(k) for k in action.frame_mirror_h)),
-                tuple(sorted(int(k) for k in action.frame_mirror_v)),
-                tuple(sorted((int(k), tuple(float(x) for x in v))
-                             for k, v in action.frame_rotation_pivots.items())),
-                tuple(sorted((int(k), tuple(float(x) for x in v))
-                             for k, v in action.frame_quads.items())),
-                tuple(sorted((int(k), tuple(sorted(str(x) for x in v)))
-                             for k, v in action.frame_transform_modes.items())),
-            ))
-        return tuple(state)
+        """只存当前动作的变换状态，undo 不影响其他动作。"""
+        cur = self.image_viewer.current_action
+        if cur is None:
+            return tuple()
+        return tuple([(
+            id(cur), cur,
+            tuple(sorted((int(k), int(v)) for k, v in cur.frame_rotations.items())),
+            tuple(sorted(int(k) for k in cur.frame_mirror_h)),
+            tuple(sorted(int(k) for k in cur.frame_mirror_v)),
+            tuple(sorted((int(k), tuple(float(x) for x in v))
+                         for k, v in cur.frame_rotation_pivots.items())),
+            tuple(sorted((int(k), tuple(float(x) for x in v))
+                         for k, v in cur.frame_quads.items())),
+            tuple(sorted((int(k), tuple(sorted(str(x) for x in v)))
+                         for k, v in cur.frame_transform_modes.items())),
+        )])
 
     def _restore_transform_state(self, state) -> None:
         if self._restoring_transform_history:
@@ -401,27 +401,15 @@ class MainWindow(QMainWindow):
         self._offset_snap_before = None
         self._last_selection_state = None
         try:
-            restored_ids = set()
             for _, action, rotations, mirror_h, mirror_v, pivots, quads, modes in state:
                 if action not in self.actions:
                     continue
-                restored_ids.add(id(action))
                 action.frame_rotations = dict(rotations)
                 action.frame_mirror_h = set(mirror_h)
                 action.frame_mirror_v = set(mirror_v)
                 action.frame_rotation_pivots = dict(pivots)
                 action.frame_quads = dict(quads)
                 action.frame_transform_modes = {k: set(v) for k, v in modes}
-                action.invalidate_transforms()
-            for action in self.actions:
-                if id(action) in restored_ids:
-                    continue
-                action.frame_rotations.clear()
-                action.frame_mirror_h.clear()
-                action.frame_mirror_v.clear()
-                action.frame_rotation_pivots.clear()
-                action.frame_quads.clear()
-                action.frame_transform_modes.clear()
                 action.invalidate_transforms()
             self._transform_history_state = self._capture_transform_state()
             cur = self.image_viewer.current_action
