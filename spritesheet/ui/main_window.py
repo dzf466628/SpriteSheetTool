@@ -688,6 +688,7 @@ class MainWindow(QMainWindow):
             "viewer": {
                 "frames": [list(r) for r in viewer._frames],
                 "frame_logical": {str(k): list(v) for k, v in viewer._frame_logical.items()},
+                "ignored_frames": sorted(viewer._ignored_frames),
             },
         }
         if not current_only:
@@ -814,6 +815,8 @@ class MainWindow(QMainWindow):
                     viewer._frames = [tuple(map(int, r)) for r in vstate["frames"]]
                 if vstate.get("frame_logical"):
                     viewer._frame_logical = {int(k): tuple(map(int, v)) for k, v in vstate["frame_logical"].items()}
+                if "ignored_frames" in vstate:
+                    viewer._ignored_frames = set(vstate["ignored_frames"])
                 for action in self.actions:
                     viewer.crop_frames_for_action(action)
                 ai = snap.get("current_index", -1)
@@ -1008,6 +1011,7 @@ class MainWindow(QMainWindow):
             "viewer": {
                 "frames": [list(x) for x in viewer._frames],
                 "frame_logical": {str(k): list(v) for k, v in viewer._frame_logical.items()},
+                "ignored_frames": sorted(viewer._ignored_frames),
                 "zoom": viewer._zoom, "offset": [viewer._offset.x(), viewer._offset.y()],
                 "bg_mode": viewer._bg_mode, "compose_mode": viewer.compose_mode,
                 "manual_compose": viewer._manual_compose,
@@ -1068,6 +1072,7 @@ class MainWindow(QMainWindow):
             "source_images": list(v._source_images),
             "frames": list(v._frames),
             "frame_logical": dict(v._frame_logical),
+            "ignored_frames": set(v._ignored_frames),
             "zoom": v._zoom,
             "offset": QPointF(v._offset),
             "bg_mode": v._bg_mode,
@@ -1097,6 +1102,7 @@ class MainWindow(QMainWindow):
             "source_images": [],
             "frames": [],
             "frame_logical": {},
+            "ignored_frames": set(),
             "zoom": 1.0,
             "offset": QPointF(0, 0),
             "bg_mode": "checker",
@@ -1133,6 +1139,7 @@ class MainWindow(QMainWindow):
         viewer._source_images = list(doc["source_images"])
         viewer._frames = list(doc["frames"])
         viewer._frame_logical = dict(doc["frame_logical"])
+        viewer._ignored_frames = set(doc.get("ignored_frames") or [])
         viewer._zoom = float(doc["zoom"])
         viewer._offset = QPointF(doc["offset"])
         viewer._bg_mode = doc["bg_mode"]
@@ -1457,6 +1464,7 @@ class MainWindow(QMainWindow):
             viewer._source_images = [combined]
         viewer._frames = [tuple(map(int, x)) for x in viewer_state.get("frames", [])]
         viewer._frame_logical = {int(k): tuple(map(int, v)) for k, v in (viewer_state.get("frame_logical") or {}).items()}
+        viewer._ignored_frames = set(viewer_state.get("ignored_frames") or [])
         viewer._zoom = float(viewer_state.get("zoom", 1.0))
         viewer._offset = QPointF(*self._tuple2(viewer_state.get("offset"), (0, 0)))
         viewer._bg_mode = str(viewer_state.get("bg_mode", "checker"))
@@ -1657,8 +1665,11 @@ class MainWindow(QMainWindow):
         self.anim_bar.changed.connect(self._on_anim_bar_changed)
         # 底部横条「变换（全部帧）」模式 → 预览画布（作用于全部帧）
         self.anim_bar.mode_requested.connect(self.preview.adjust_panel.enter_transform_mode_all)
-        # 画布变换模式变化（进入/退出/点空白）→ 同步底部横条按钮
-        self.preview.canvas.transform_mode_changed.connect(self.anim_bar.set_mode)
+        # 画布变换模式变化（进入/退出/点空白）→ 同步底部横条按钮；
+        # 传入发起方 owner，让两套变换工具按钮各自独立点亮/弹回
+        self.preview.canvas.transform_mode_changed.connect(
+            lambda m, c=self.preview.canvas: self.anim_bar.set_mode(
+                m, owner=getattr(c, "_transform_owner", "")))
         # 当前帧切换 → 底部横条「微调（全部帧）」以当前帧偏移为起点
         self.preview.frame_changed.connect(self.anim_bar.set_current_frame)
         self.preview.frame_changed.connect(self._on_frame_changed)

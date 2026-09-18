@@ -567,17 +567,19 @@ class _Canvas(QWidget):
         menu.addSeparator()
         act_merge = menu.addAction("合并为一帧（拼成同一帧）")
         act_merge_one = menu.addAction("合并为一整块（碎块捏成一个元素）")
+        act_ignore = menu.addAction("忽略选中区域")
         menu.addSeparator()
         act_invert = menu.addAction("反选")
         act_select_all = menu.addAction("全选")
         act_clear = menu.addAction("清空选择")
-        act_remove = menu.addAction("忽略选中元素")
+        act_remove = menu.addAction("取消选中")
         menu.addSeparator()
         act_export = menu.addAction("导出选中为单独 PNG…")
 
         # 禁用不适用的项
         act_merge.setEnabled(n_sel >= 2)
         act_merge_one.setEnabled(n_sel >= 2)
+        act_ignore.setEnabled(n_sel >= 1)
         act_clear.setEnabled(n_sel >= 1)
         act_remove.setEnabled(n_sel >= 1)
         act_export.setEnabled(n_frames >= 1)
@@ -589,6 +591,8 @@ class _Canvas(QWidget):
             self._viewer.menu_merge_composite()
         elif chosen is act_merge_one:
             self._viewer.menu_merge_single_block()
+        elif chosen is act_ignore:
+            self._viewer.menu_ignore_selected_regions()
         elif chosen is act_invert:
             self._viewer.menu_invert_selection()
         elif chosen is act_select_all:
@@ -862,6 +866,9 @@ class ImageViewer(QWidget):
         # 从 JSON 导入时，图块被重新打包过，这里会填入 JSON 记录的元素原始坐标，
         # 从而让合成帧的拼接间距与导出前完全一致。
         self._frame_logical: dict[int, tuple[int, int]] = {}
+        # 被「忽略选中区域」标记的元素索引集合：不参与自动识别为可选区域
+        # （点击/框选/全选/反选全部排除），绘制时仍显示灰色虚线标识存在。
+        self._ignored_frames: set[int] = set()
         # 选中与框选（选中状态存储在当前 Action.selected_indices）
         self.current_action: Action | None = None
         self.compose_mode = False
@@ -1004,6 +1011,9 @@ class ImageViewer(QWidget):
             if generation != self._detect_generation:
                 return
             shifted = [(x, y + y_offset, w, h) for x, y, w, h in frames]
+            if not base_frames:
+                # 全新检测（元素索引全部重建）：旧的忽略标记无法可靠对应，清空
+                self._ignored_frames.clear()
             self._frames = list(base_frames) + shifted
             self.canvas.update()
             self._update_rulers()
@@ -1176,6 +1186,8 @@ class ImageViewer(QWidget):
         new_index = ni  # 新元素在重建后的索引
         new_frames.append(new_rect)
         self._frames = new_frames
+        # 被忽略标记跟着索引重映射（忽略元素不可选，不会成为合并对象）
+        self._ignored_frames = {mapping[i] for i in self._ignored_frames if i in mapping}
         # 所有动作：重映射 selected_indices / composite_groups / frame_layouts
         for act in self._all_actions():
             act.selected_indices = [mapping[i] for i in act.selected_indices if i in mapping]
@@ -1239,7 +1251,10 @@ class ImageViewer(QWidget):
         if action is None:
             return
         sel = set(action.selected_indices)
-        action.selected_indices = [i for i in range(len(self._frames)) if i not in sel]
+        action.selected_indices = [
+            i for i in range(len(self._frames))
+            if i not in sel and i not in self._ignored_frames
+        ]
         action.composite_groups = []
         self.crop_frames_for_action(action)
         self.frames_updated.emit()
@@ -1250,7 +1265,9 @@ class ImageViewer(QWidget):
         action = self.current_action
         if action is None:
             return
-        action.selected_indices = list(range(len(self._frames)))
+        action.selected_indices = [
+            i for i in range(len(self._frames)) if i not in self._ignored_frames
+        ]
         action.composite_groups = []
         self.crop_frames_for_action(action)
         self.frames_updated.emit()
@@ -1270,7 +1287,7 @@ class ImageViewer(QWidget):
         self.action_performed.emit("清空选择")
 
     def menu_remove_selected_elements(self) -> None:
-        """忽略选中元素：从当前动作移除（不从工程删除，以后还能选回）。"""
+        """取消选中：从当前动作移除（不从工程删除，以后还能选回）。"""
         action = self.current_action
         if action is None or not action.selected_indices:
             return
@@ -1282,7 +1299,37 @@ class ImageViewer(QWidget):
         action.composite_groups = [g for g in action.composite_groups if g]
         self.crop_frames_for_action(action)
         self.frames_updated.emit()
-        self.action_performed.emit("忽略选中元素")
+        self.action_performed.emit("取消选中")
+
+    def menu_ignore_selected_regions(self) -> None:
+        """忽略选中区域：把选中元素标记为忽略，不再自动识别为可选区域。
+
+        被忽略的元素仍显示灰色虚线（标识存在），但点击 / 框选 / 全选 / 反选
+        都选不中它；操作影响所有动作，走全量快照进历史记录，可撤销恢复。
+        """
+        action = self.current_action
+        if action is None or not action.selected_indices:
+            return
+        # 数据改动前先发信号，让 main_window 抓全量 before
+        self.about_to_perform_full.emit()
+        ignored = set(action.selected_indices)
+        self._ignored_frames.update(ignored)
+        for act in self._all_actions():
+            act.selected_indices = [i for i in act.selected_indices if i not in ignored]
+            act.composite_groups = [
+                [i for i in g if i not in ignored] for g in act.composite_groups
+            ]
+            act.composite_groups = [g for g in act.composite_groups if g]
+            if act.frame_layouts:
+                # 布局成员（元素索引, rx, ry）：含被忽略元素的布局成员直接移除
+                act.frame_layouts = [
+                    [m for m in layout if m[0] not in ignored]
+                    for layout in act.frame_layouts
+                ]
+                act.frame_layouts = [l for l in act.frame_layouts if l] or None
+            self.crop_frames_for_action(act)
+        self.frames_updated.emit()
+        self.action_performed_full.emit("忽略选中区域")
 
     def menu_export_selected_png(self) -> None:
         """把当前动作每帧导出为单独 PNG。"""
@@ -1662,6 +1709,8 @@ class ImageViewer(QWidget):
         if not self._pixmap:
             return -1
         for i, (fx, fy, fw, fh) in enumerate(self._frames):
+            if i in self._ignored_frames:
+                continue  # 被忽略的区域不可点选
             rect = QRectF(self._offset.x() + fx * self._zoom,
                           self._offset.y() + fy * self._zoom,
                           fw * self._zoom, fh * self._zoom)
@@ -1673,6 +1722,8 @@ class ImageViewer(QWidget):
         """返回与视图矩形相交的所有 frame 索引。"""
         result = []
         for i, (fx, fy, fw, fh) in enumerate(self._frames):
+            if i in self._ignored_frames:
+                continue  # 被忽略的区域不参与框选
             frame_rect = QRectF(self._offset.x() + fx * self._zoom,
                                  self._offset.y() + fy * self._zoom,
                                  fw * self._zoom, fh * self._zoom)
