@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import struct
+import sys
 import threading
+import traceback
 from pathlib import Path
 
 from PyQt6.QtCore import (
@@ -552,6 +554,14 @@ class _Canvas(QWidget):
             self.update()
 
     def contextMenuEvent(self, event):
+        """右键菜单统一兜底：菜单构建 / 弹出 / 执行的任何 Python 异常都只记录、
+        不闪退整个程序（原生层崩溃由 main.py 的 faulthandler 写入 crash.log）。"""
+        try:
+            self._context_menu_impl(event)
+        except Exception:
+            sys.stderr.write(traceback.format_exc())
+
+    def _context_menu_impl(self, event):
         """右键菜单：根据选中数量启用/禁用项。"""
         action = self._viewer.current_action
         menu = QMenu(self)
@@ -563,8 +573,10 @@ class _Canvas(QWidget):
         n_sel = len(action.selected_indices) if action else 0
         n_frames = len(action.frames) if action else 0
         # 右键所指的那个元素：「取消选中」只取消它，保留其他选中
-        hit_index = self._viewer._frame_at_point(event.position()) if action else -1
-        hit_selected = hit_index >= 0 and hit_index in set(action.selected_indices)
+        hit_pos = QPointF(event.pos())
+        hit_index = self._viewer._frame_at_point(hit_pos) if action else -1
+        hit_selected = bool(hit_index >= 0 and action
+                            and hit_index in set(action.selected_indices))
 
         act_actual = menu.addAction("实际像素 (100%)")
         menu.addSeparator()

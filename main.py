@@ -6,6 +6,8 @@
 """
 import os
 import sys
+import faulthandler
+import traceback
 
 from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import QApplication
@@ -13,6 +15,38 @@ from PyQt6.QtWidgets import QApplication
 from spritesheet.single_instance import SingleInstance
 from spritesheet.ui.main_window import MainWindow
 from spritesheet.ui.theme import APP_QSS, install_dark_titlebars
+
+
+def _install_crash_logging() -> None:
+    """把未捕获异常和原生致命错误（access violation 等）写入程序目录 crash.log。
+
+    PyQt 事件回调里未捕获的 Python 异常、以及 Qt C++ 层 fatal 在 Windows 上常常
+    直接表现为"右键/拖动一下程序就没了"且控制台没有任何信息。faulthandler 在
+    Windows 注册向量化异常处理，能在崩溃瞬间 dump 出 Python 栈；sys.excepthook
+    记录普通异常。下次闪退即可凭 crash.log 定位，而不是靠猜。
+    """
+    import datetime
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crash.log")
+    try:
+        fh = open(log_path, "a", encoding="utf-8")
+        fh.write("\n==== 会话开始 %s ====\n" % datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        fh.flush()
+        faulthandler.enable(fh)
+    except Exception:
+        fh = None
+    prev_hook = sys.excepthook
+
+    def hook(exc_type, exc_value, exc_tb):
+        try:
+            if fh is not None:
+                fh.write("\n[未捕获异常 %s]\n" % datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                traceback.print_exception(exc_type, exc_value, exc_tb, file=fh)
+                fh.flush()
+        except Exception:
+            pass
+        return prev_hook(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = hook
 
 
 def _project_arg(argv: list[str]) -> str | None:
@@ -24,6 +58,7 @@ def _project_arg(argv: list[str]) -> str | None:
 
 
 def main() -> int:
+    _install_crash_logging()
     app = QApplication(sys.argv)
     app.setApplicationName("SpriteSheetTool")
     app.setStyle("Fusion")
