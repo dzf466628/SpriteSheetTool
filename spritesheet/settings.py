@@ -100,17 +100,17 @@ def set_detect_min_area(value: int) -> None:
 
 
 def undo_limit() -> int:
-    """历史记录保留步数。默认 50，范围 0-200。快照纯数据(不含PNG)，每步几KB，200步也不卡。"""
+    """历史记录保留步数。默认 100，范围 0-500。快照纯数据(不含PNG)，每步几KB，500步也不卡。"""
     try:
-        value = int(_settings().value(KEY_UNDO_LIMIT, 50))
+        value = int(_settings().value(KEY_UNDO_LIMIT, 100))
     except Exception as e:  # noqa: BLE001
         print(f"[settings] 读取 {KEY_UNDO_LIMIT} 失败: {e}", file=sys.stderr)
-        return 50
-    return max(0, min(200, value))
+        return 100
+    return max(0, min(500, value))
 
 
 def set_undo_limit(value: int) -> None:
     try:
-        _settings().setValue(KEY_UNDO_LIMIT, max(0, min(200, int(value))))
+        _settings().setValue(KEY_UNDO_LIMIT, max(0, min(500, int(value))))
     except Exception as e:  # noqa: BLE001
         print(f"[settings] 写入 {KEY_UNDO_LIMIT} 失败: {e}", file=sys.stderr)
