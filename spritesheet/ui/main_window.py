@@ -269,7 +269,7 @@ class HistoryPanel(QWidget):
             "QTreeWidget::item:selected { background: rgba(233,30,99,0.3); }"
             "QTreeBranch:open, QTreeBranch:closed { color: #F06292; }"
         )
-        self.tree.itemDoubleClicked.connect(self._jump_to)
+        self.tree.itemClicked.connect(self._jump_to)
         layout.addWidget(self.tree)
 
         self._refresh()
