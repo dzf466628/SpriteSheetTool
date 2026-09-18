@@ -563,11 +563,35 @@ class _Canvas(QWidget):
         )
         act_merge = menu.addAction("合并为一帧（拼成同一帧）")
         act_merge_one = menu.addAction("合并为一整块（碎块捏成一个元素）")
+        menu.addSeparator()
+        act_rotate = menu.addAction("全部帧旋转 90°")
+        act_mirror = menu.addAction("全部帧水平镜像")
+        menu.addSeparator()
+        act_invert = menu.addAction("反选")
+        act_select_all = menu.addAction("全选")
+        act_clear = menu.addAction("清空选择")
+        act_remove = menu.addAction("删除选中元素")
+        menu.addSeparator()
+        act_export = menu.addAction("导出选中为单独 PNG…")
         chosen = menu.exec(event.globalPos())
         if chosen is act_merge:
             self._viewer.menu_merge_composite()
         elif chosen is act_merge_one:
             self._viewer.menu_merge_single_block()
+        elif chosen is act_rotate:
+            self._viewer.menu_rotate_all_frames(90)
+        elif chosen is act_mirror:
+            self._viewer.menu_mirror_all_frames()
+        elif chosen is act_invert:
+            self._viewer.menu_invert_selection()
+        elif chosen is act_select_all:
+            self._viewer.menu_select_all()
+        elif chosen is act_clear:
+            self._viewer.menu_clear_selection()
+        elif chosen is act_remove:
+            self._viewer.menu_remove_selected_elements()
+        elif chosen is act_export:
+            self._viewer.menu_export_selected_png()
 
     def _open_file_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1165,6 +1189,123 @@ class ImageViewer(QWidget):
     def _all_actions(self) -> list:
         """返回所有动作（当前 viewer 所属的工程动作列表）。"""
         return getattr(self, "actions", [])
+
+    # ---- 右键菜单：批量 / 选择 / 导出 ----
+
+    def menu_rotate_all_frames(self, angle: int) -> None:
+        """把当前动作所有帧旋转 angle 度。"""
+        action = self.current_action
+        if action is None:
+            return
+        n = len(action.frames)
+        for i in range(n):
+            action.frame_rotations[i] = (action.frame_rotations.get(i, 0) + angle) % 360
+        action.invalidate_transforms()
+        self.frames_updated.emit()
+        self.selection_changed.emit()
+
+    def menu_mirror_all_frames(self) -> None:
+        """把当前动作所有帧水平镜像切换。"""
+        action = self.current_action
+        if action is None:
+            return
+        for i in range(len(action.frames)):
+            if i in action.frame_mirror_h:
+                action.frame_mirror_h.discard(i)
+            else:
+                action.frame_mirror_h.add(i)
+        action.invalidate_transforms()
+        self.frames_updated.emit()
+        self.selection_changed.emit()
+
+    def menu_invert_selection(self) -> None:
+        """反选：选中当前没选的元素。"""
+        action = self.current_action
+        if action is None:
+            return
+        sel = set(action.selected_indices)
+        action.selected_indices = [i for i in range(len(self._frames)) if i not in sel]
+        action.composite_groups = []
+        self.crop_frames_for_action(action)
+        self.frames_updated.emit()
+        self.selection_changed.emit()
+
+    def menu_select_all(self) -> None:
+        """全选所有元素。"""
+        action = self.current_action
+        if action is None:
+            return
+        action.selected_indices = list(range(len(self._frames)))
+        action.composite_groups = []
+        self.crop_frames_for_action(action)
+        self.frames_updated.emit()
+        self.selection_changed.emit()
+
+    def menu_clear_selection(self) -> None:
+        """清空当前动作选择。"""
+        action = self.current_action
+        if action is None:
+            return
+        action.selected_indices = []
+        action.composite_groups = []
+        action.frame_layouts = None
+        action.frame_layouts_base = 0
+        self.crop_frames_for_action(action)
+        self.frames_updated.emit()
+        self.selection_changed.emit()
+
+    def menu_remove_selected_elements(self) -> None:
+        """从工程彻底删除选中元素（不合并）。"""
+        action = self.current_action
+        if action is None or not action.selected_indices:
+            return
+        removed = set(action.selected_indices)
+        mapping = {}
+        ni = 0
+        for old_i in range(len(self._frames)):
+            if old_i in removed:
+                continue
+            mapping[old_i] = ni
+            ni += 1
+        old_logical = self._frame_logical
+        new_frames = []
+        self._frame_logical = {}
+        for old_i in range(len(self._frames)):
+            if old_i in removed:
+                continue
+            new_frames.append(self._frames[old_i])
+            if old_i in old_logical:
+                self._frame_logical[mapping[old_i]] = old_logical[old_i]
+        self._frames = new_frames
+        for act in self._all_actions():
+            act.selected_indices = [mapping[i] for i in act.selected_indices if i in mapping]
+            act.composite_groups = [
+                [mapping[i] for i in g if i in mapping] for g in act.composite_groups
+            ]
+            act.composite_groups = [g for g in act.composite_groups if g]
+            if act.frame_layouts:
+                new_layouts = []
+                for layout in act.frame_layouts:
+                    nl = [(mapping[i], rx, ry) for i, rx, ry in layout if i in mapping]
+                    if nl:
+                        new_layouts.append(nl)
+                act.frame_layouts = new_layouts or None
+            self.crop_frames_for_action(act)
+        self.frames_updated.emit()
+        self.selection_changed.emit()
+
+    def menu_export_selected_png(self) -> None:
+        """把当前动作每帧导出为单独 PNG。"""
+        from PyQt6.QtWidgets import QFileDialog
+        action = self.current_action
+        if action is None or not action.frames:
+            return
+        folder = QFileDialog.getExistingDirectory(self, "导出选中帧 PNG 到文件夹")
+        if not folder:
+            return
+        base = "frame"
+        for i, pm in enumerate(action.frames):
+            pm.save(str(Path(folder) / f"{base}_{i:03d}.png"), "PNG")
 
     # ---- 帧复用（按钮模式 + Alt+点击 临时模式）----
 
