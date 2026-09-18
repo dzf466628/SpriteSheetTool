@@ -954,6 +954,16 @@ class MainWindow(QMainWindow):
         if self._transform_history_state is None:
             self._transform_history_state = self._capture_transform_state()
 
+        # 清掉 snapshot 缓存和 pending timer，避免跨文档污染
+        self._snapshot_before = None
+        self._snapshot_text = ""
+        self._offset_snap_before = None
+        self._last_selection_state = None
+        for tname in ("_selection_snap_timer", "_frame_snap_timer", "_anim_snap_timer", "_offset_snap_timer"):
+            t = getattr(self, tname, None)
+            if t is not None:
+                t.stop()
+
         viewer.canvas.update()
         viewer._update_rulers()
         self._refresh_tab_label()
