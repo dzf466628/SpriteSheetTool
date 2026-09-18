@@ -109,7 +109,7 @@ class SettingsDialog(QDialog):
         self.spin_undo_limit.setFixedWidth(80)
         self.spin_undo_limit.valueChanged.connect(self._on_undo_limit_changed)
         row_hist.addWidget(self.spin_undo_limit)
-        row_hist.addWidget(QLabel("步操作（0-30，默认10）"))
+        row_hist.addWidget(QLabel("步操作（0-500，默认100）"))
         row_hist.addStretch()
         layout.addLayout(row_hist)
 

@@ -2410,7 +2410,11 @@ class MainWindow(QMainWindow):
             if c not in used_colors:
                 color = c
                 break
-        name = f"动作{len(self.actions) + 1}"
+        used_names = {a.name for a in self.actions}
+        n = len(self.actions) + 1
+        while f"动作{n}" in used_names:
+            n += 1
+        name = f"动作{n}"
         action = Action(name, color)
         action.undo_stack = QUndoStack(self)
         from spritesheet.settings import undo_limit
