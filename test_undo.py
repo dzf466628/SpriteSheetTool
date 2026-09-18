@@ -237,5 +237,133 @@ check("改名后面板刷新含动作2", any("改名的动作2" in t for t in to
 
 win.close()
 
+# ============================================================ 工程 / 图片 / JSON 与历史记录的衔接
+# 15. 切标签、追加图片、导入 JSON：不能丢记录、不能误清历史、归属不能串
+from unittest import mock  # noqa: E402
+import json  # noqa: E402
+import tempfile  # noqa: E402
+
+mock.patch("spritesheet.ui.main_window.QMessageBox").start()   # offscreen 下模态框会永久阻塞
+win = MainWindow()
+pm = make_pixmap(128, 128)
+win.image_viewer._pixmap = pm
+win.image_viewer._source_images = [pm]
+win.image_viewer._frames = [(0, 0, 32, 32), (32, 0, 32, 32), (0, 32, 32, 32), (32, 32, 32, 32)]
+win._on_add_action_clicked()
+pump()
+a1 = win.actions[0]
+win.image_viewer.set_current_action(a1)
+a1.selected_indices = [0, 1]
+win._on_selection_changed()          # 只 schedule，不 pump：模拟"改完立刻切标签"
+check("切标签前待决记录未落账", a1.undo_stack.count() == 0)
+win._new_tab(switch=True)
+check("切标签前自动落账", a1.undo_stack.count() == 1)
+win._switch_tab(0)
+pump()
+check("切回原标签动作还是同一对象", win.actions[0] is a1)
+check("切回后记录还在", a1.undo_stack.count() == 1)
+
+# 16. 追加图片：保留已有历史 + 记一条全局操作 + undo 能还原原图
+g_before = win._undo_stack.count()
+global_before = [win._undo_stack.command(i).text() for i in range(g_before)]
+a1_stack_before = a1.undo_stack.count()
+old_pixmap = win.image_viewer._pixmap
+win._on_image_loaded(make_pixmap(64, 64))
+pump()
+check("追加图片产生全局记录", win._undo_stack.count() == g_before + 1)
+check("追加图片记录文字正确",
+      win._undo_stack.command(win._undo_stack.count() - 1).text().startswith("添加第 2 张原图"))
+check("追加图片不清空已有历史",
+      [win._undo_stack.command(i).text() for i in range(g_before)] == global_before)
+check("追加图片不动动作自己的栈", a1.undo_stack.count() == a1_stack_before)
+check("原图确实追加了", win.image_viewer._pixmap is not old_pixmap)
+win._undo_stack.undo()
+pump()
+check("undo 追加图片还原原图", win.image_viewer._pixmap is old_pixmap)
+check("undo 追加图片还原源图数量", len(win.image_viewer._source_images) == 1)
+win._undo_stack.redo()
+pump()
+check("redo 追加图片回到追加后", win.image_viewer._pixmap is not old_pixmap)
+
+# 17. 导入 JSON 到本工程：动作归属 + 全局记录 + 保留历史
+tmp = tempfile.mkdtemp()
+atlas = make_pixmap(64, 64)
+atlas.save(os.path.join(tmp, "atlas.png"))
+with open(os.path.join(tmp, "atlas.json"), "w", encoding="utf-8") as fh:
+    json.dump({
+        "frames": [
+            {"filename": "f0", "frame": {"x": 0, "y": 0, "w": 32, "h": 32}, "duration": 100},
+            {"filename": "f1", "frame": {"x": 32, "y": 0, "w": 32, "h": 32}, "duration": 100},
+        ],
+        "meta": {"image": "atlas.png", "size": {"w": 64, "h": 64}},
+    }, fh)
+from spritesheet.importer import load_project  # noqa: E402
+json_path = os.path.join(tmp, "atlas.json")
+expected_actions = len(load_project(json_path).actions)
+g_before = win._undo_stack.count()
+n_actions_before = len(win.actions)
+win._import_project(json_path, target="current")
+pump()
+check("导入 JSON 追加了动作", len(win.actions) == n_actions_before + expected_actions)
+check("导入 JSON 产生全局记录", win._undo_stack.count() == g_before + 1)
+check("导入 JSON 记录文字含动作数",
+      "导入" in win._undo_stack.command(win._undo_stack.count() - 1).text())
+imported = win.actions[-1]
+check("导入的动作有自己的独立栈", imported.undo_stack is not None)
+check("导入的动作进历史面板分组",
+      any("动作：" in tree.topLevelItem(i).text(0) for i in range(tree.topLevelItemCount())))
+win.image_viewer.set_current_action(imported)
+imported.selected_indices = [0]
+win._on_selection_changed()
+pump()
+check("导入动作内改动记进它自己的栈", imported.undo_stack.count() == 1)
+check("全局栈没被动作内改动污染", win._undo_stack.count() == g_before + 1)
+check("导入前的历史保留", win._undo_stack.command(0).text().startswith("添加动作"))
+check("原动作的栈没被导入影响", a1.undo_stack.count() == a1_stack_before)
+win._undo_stack.undo()
+pump()
+check("undo 导入还原动作数量", len(win.actions) == n_actions_before)
+
+# 18. 检测完成后快照基线刷新（否则之后第一次动作内改动会拿旧状态当 before）
+win._on_frames_updated()
+check("检测完成后基线已刷新", win._last_snapshot_state == win._capture_snapshot())
+
+# 19. 导入到新建工程：从干净历史起步
+tmp2 = tempfile.mkdtemp()
+make_pixmap(64, 64).save(os.path.join(tmp2, "atlas2.png"))
+with open(os.path.join(tmp2, "atlas2.json"), "w", encoding="utf-8") as fh:
+    json.dump({
+        "frames": [{"filename": "f0", "frame": {"x": 0, "y": 0, "w": 32, "h": 32}, "duration": 100}],
+        "meta": {"image": "atlas2.png", "size": {"w": 64, "h": 64}},
+    }, fh)
+win._import_project(os.path.join(tmp2, "atlas2.json"), target="new")
+pump()
+check("新工程只留导入这一条记录", win._undo_stack.count() == 1)
+check("新工程第一条记录是导入", win._undo_stack.command(0).text().startswith("导入"))
+check("新工程导入的动作都有独立栈", all(a.undo_stack is not None for a in win.actions))
+
+# 20. 工程与工程之间：打开 .sstool 走新标签、历史各归各的、互不串
+from spritesheet.project_file import write_project  # noqa: E402
+proj_path = os.path.join(tmp2, "proj.sstool")
+manifest, sections = win._project_manifest()
+write_project(proj_path, manifest, sections)
+tab_before = win.tabs.count()
+history_before_open = [win._undo_stack.command(i).text() for i in range(win._undo_stack.count())]
+check("打开工程前当前标签有历史", len(history_before_open) > 0)
+check("打开工程成功", win._open_project(proj_path) is True)
+pump()
+check("打开工程落到了新标签", win.tabs.count() == tab_before + 1)
+check("新工程历史从干净开始", win._undo_stack.count() == 0)
+check("新工程所有动作的栈都是空的",
+      all(a.undo_stack is not None and a.undo_stack.count() == 0 for a in win.actions))
+win._switch_tab(tab_before - 1)      # 切回打开工程前那个活文档（导入的工程）
+pump()
+check("切回原工程历史仍在",
+      [win._undo_stack.command(i).text() for i in range(win._undo_stack.count())] == history_before_open)
+check("切回原工程后动作栈没被新工程串掉",
+      all(a.undo_stack is not None for a in win.actions))
+
+win.close()
+
 print(f"\n=== 结果: {passed} passed, {failed} failed ===")
 sys.exit(1 if failed else 0)

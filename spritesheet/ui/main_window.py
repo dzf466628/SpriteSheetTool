@@ -574,10 +574,19 @@ class MainWindow(QMainWindow):
         self._transform_history_state = current
 
     def _reset_transform_history(self) -> None:
+        """替换全部内容（打开工程/首次载图/新建标签导入）时：清空所有 undo 历史再收尾。"""
         self._undo_stack.clear()
         for a in self.actions:
             if a.undo_stack is not None:
                 a.undo_stack.clear()
+        self._refresh_history_after_change()
+
+    def _refresh_history_after_change(self) -> None:
+        """内容/帧变化后的统一收尾：停 pending、刷新基线，**不清任何 undo 历史**。
+
+        追加图片、导入 JSON 这类"在现有工程上叠加"的操作应该保留已有历史，
+        只把快照基线切到最新状态，后续动作内记录才不会串到旧状态。
+        """
         self._transform_history_pending = None
         self._transform_history_state = self._capture_transform_state()
         if self._per_action_snap_timer is not None:
@@ -586,6 +595,11 @@ class MainWindow(QMainWindow):
         self._last_snapshot_state = self._capture_snapshot()
         if hasattr(self, "_history_panel"):
             self._history_panel.rebuild()
+
+    def _flush_pending_snapshot(self) -> None:
+        """切动作/删动作/切文档前把还没落账的改动记下来（归属它自己的栈）。"""
+        if self._per_action_snap_timer is not None and self._per_action_snap_timer.isActive():
+            self._finish_per_action_snapshot()
 
     def _active_stack(self) -> QUndoStack:
         """当前动作的 undo stack（动作内操作），没有则用全局 stack。"""
@@ -677,6 +691,10 @@ class MainWindow(QMainWindow):
             # 结构性快照携带动作对象引用：undo/redo 时复用原对象（保留各自的
             # 独立 undo 栈），而不是重建新对象把动作自己的历史清空。
             snap["action_objects"] = list(self.actions)
+            # 同时携带原图引用（不拷贝，QPixmap 隐式共享）：追加图片/导入 JSON
+            # 这类会改原图的操作，undo 时把原图指回追加前，redo 指回追加后。
+            snap["pixmap"] = viewer._pixmap
+            snap["source_images"] = list(viewer._source_images)
         return snap
 
     def _apply_action_data(self, action: Action, raw: dict) -> None:
@@ -772,6 +790,11 @@ class MainWindow(QMainWindow):
                         self._append_action_card(action)
                 viewer.set_actions(self.actions)
                 viewer.set_current_action(None)
+                # 若快照带原图（新快照），先还原原图再裁帧，追加图片/导入 JSON
+                # 才能被完整撤销；旧快照没有该字段时保持当前原图（帧 rect 不依赖它）。
+                if "pixmap" in snap:
+                    viewer._pixmap = snap["pixmap"]
+                    viewer._source_images = list(snap.get("source_images") or [])
                 vstate = snap.get("viewer") or {}
                 if vstate.get("frames"):
                     viewer._frames = [tuple(map(int, r)) for r in vstate["frames"]]
@@ -1175,6 +1198,9 @@ class MainWindow(QMainWindow):
         current = self.tabs.current_index()
         if index == current:
             return
+        # 切文档前先把还没落账的动作内改动记下来（归属当前动作自己的栈），
+        # 否则 _restore_document 停掉 timer 后记录就丢了
+        self._flush_pending_snapshot()
         if 0 <= current < len(self._documents):
             slot = self._documents[current]
             slot["state"] = self._capture_document()
@@ -1189,6 +1215,8 @@ class MainWindow(QMainWindow):
     def _new_tab(self, name: str | None = None, switch: bool = True) -> int:
         """新建一个空白工程标签页。"""
         current = self.tabs.current_index()
+        # 当前文档还有没落账的改动时先记下来，别让它跟着丢在切换里
+        self._flush_pending_snapshot()
         if 0 <= current < len(self._documents):
             slot = self._documents[current]
             slot["state"] = self._capture_document()
@@ -1250,6 +1278,9 @@ class MainWindow(QMainWindow):
     def _close_tab(self, index: int) -> None:
         if not (0 <= index < self.tabs.count()):
             return
+        # 关闭当前文档前先把没落账的改动记进它自己的栈，再随文档一起收走
+        if index == self.tabs.current_index():
+            self._flush_pending_snapshot()
         is_current = index == self.tabs.current_index()
         if is_current:
             name = self._project_name
@@ -1359,6 +1390,11 @@ class MainWindow(QMainWindow):
         """
         index = self._tab_open_target()
         was_current = index == self.tabs.current_index()
+        if not was_current:
+            # 先切到目标标签（`_tab_open_target` 新开的空白页）再装工程内容：
+            # 否则工程会被装进"当前活文档"的控件里，连带把它已有的内容、
+            # 动作以及 undo 历史一起冲掉（`_reset_transform_history` 会 clear 栈）。
+            self._switch_tab(index)
         try:
             manifest, sections = read_project(path)
             self._apply_sstool_project(manifest, sections)
@@ -2048,6 +2084,12 @@ class MainWindow(QMainWindow):
         """
         viewer = self.image_viewer
         atlas = pm
+        # 导入前抓 before：把"导入"本身记成一条全局操作（快照含原图引用，
+        # 因此撤销能把导入的图片、元素、动作整体撤掉）
+        self._push_snapshot(
+            f"导入 {getattr(project, 'format_label', 'JSON')}：{len(project.actions)} 个动作",
+            current_only=False,
+        )
 
         # 3) 载入原图（append 模式：拼到当前原图下方，新 tiles 的 y 加偏移）
         if append and viewer._pixmap is not None and not viewer._pixmap.isNull():
@@ -2106,6 +2148,11 @@ class MainWindow(QMainWindow):
         for ai, imported in enumerate(project.actions):
             color = imported.color or MACARON_COLORS[ai % len(MACARON_COLORS)]
             action = Action(imported.name, color)
+            # 导入的动作也要有自己的独立 undo 栈：否则它的选择/变换/偏移会被
+            # 记到全局栈上（归属错乱），历史面板也不会有它的分组
+            action.undo_stack = QUndoStack(self)
+            from spritesheet.settings import undo_limit
+            action.undo_stack.setUndoLimit(undo_limit())
             action.fps = imported.fps
             action.loop_mode = imported.loop
             action.anchor = imported.anchor
@@ -2157,7 +2204,14 @@ class MainWindow(QMainWindow):
         self.btn_add_action.setText("+ 添加动作")
         if self.actions:
             self.action_list.setCurrentRow(0)
-        self._reset_transform_history()
+        if append:
+            # 追加导入：保留当前工程已有的 undo 历史，只把基线刷到最新
+            self._push_snapshot_done()
+            self._refresh_history_after_change()
+        else:
+            # 新建/首次导入：从干净历史起步，"导入"成为新工程的第一条记录
+            self._reset_transform_history()
+            self._push_snapshot_done()
 
         msg = (f"已导入 {project.format_label}：{len(self.actions)} 个动作、"
                f"{total_frames} 帧、{len(tiles)} 个图块")
@@ -2289,7 +2343,17 @@ class MainWindow(QMainWindow):
             self.image_viewer.set_current_action(None)
             self.preview.set_action(None)
         else:
+            if pm is None or pm.isNull():
+                return
+            # 追加前抓 before（含旧原图引用），把"加图"本身记成一条全局操作：
+            # Ctrl+Z 能把新加的图和它检测出的元素一起撤掉。
+            self._push_snapshot(
+                f"添加第 {len(self.image_viewer._source_images) + 1} 张原图",
+                current_only=False,
+            )
             if not self.image_viewer.append_pixmap(pm):
+                self._snapshot_before = None
+                self._snapshot_text = ""
                 return
             # 新图追加到帧列表末尾，原有 selected_indices 无需改动；
             # 重新裁剪所有动作以刷新当前源图的帧缓存。
@@ -2297,9 +2361,15 @@ class MainWindow(QMainWindow):
                 self.image_viewer.crop_frames_for_action(action)
             if self.image_viewer.current_action:
                 self.preview.set_action(self.image_viewer.current_action)
+            self._push_snapshot_done()
         # 同步最新原图给预览组件，供导出弹窗的原图预览使用
         self.preview.set_source_pixmap(self.image_viewer._pixmap)
-        self._reset_transform_history()
+        if has_image:
+            # 追加图片：**保留**已有 undo 历史，只把快照基线/面板刷到最新
+            self._refresh_history_after_change()
+        else:
+            # 首次载图（从空白开始）：旧历史本来只有空栈，清掉无妨
+            self._reset_transform_history()
         self.btn_add_action.setText("+ 添加动作")
         source_count = len(self.image_viewer._source_images)
         verb = "已加载" if source_count == 1 else "已添加"
@@ -2534,4 +2604,7 @@ class MainWindow(QMainWindow):
                 f"已完成元素检测：当前共检测到 {len(self.image_viewer._frames)} 个元素"
             )
         self._transform_history_state = self._capture_transform_state()
+        # 检测完成后帧集合变了：快照基线跟着刷到最新，否则之后第一次动作内改动
+        # 会拿"检测前"的旧状态当 before（增量算错，甚至整条记录被吞）
+        self._last_snapshot_state = self._capture_snapshot()
         self._mark_project_dirty()
