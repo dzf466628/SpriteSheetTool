@@ -142,8 +142,8 @@ class UpdateDownloadDialog(QDialog):
 class _TransformHistoryCommand(QUndoCommand):
     """Undo command for per-frame free-transform state."""
 
-    def __init__(self, owner, before, after) -> None:
-        super().__init__("变换")
+    def __init__(self, owner, before, after, text: str = "变换") -> None:
+        super().__init__(text)
         self._owner = owner
         self.before = before
         self.after = after
@@ -411,6 +411,18 @@ class MainWindow(QMainWindow):
         if not self._restoring_transform_history and self._transform_history_pending is None:
             self._transform_history_pending = self._capture_transform_state()
 
+    def _transform_text(self) -> str:
+        """根据当前变换模式生成历史记录文字。"""
+        cur = self.image_viewer.current_action
+        name = f"「{cur.name}」" if cur else ""
+        mode = getattr(self.preview.canvas, "_transform_mode", "")
+        fi = getattr(self.preview, "_frame_index", 0)
+        if mode == "all":
+            return f"变换全部帧{name}"
+        if mode:
+            return f"变换帧{fi+1}{name}({mode})"
+        return f"变换{name}"
+
     def _finish_transform_history(self) -> None:
         self._suppress_selection_snapshot = False
         if self._transform_history_pending is None:
@@ -419,7 +431,7 @@ class MainWindow(QMainWindow):
         self._transform_history_pending = None
         after = self._capture_transform_state()
         if before != after and not self._restoring_transform_history:
-            self._undo_stack.push(_TransformHistoryCommand(self, before, after))
+            self._undo_stack.push(_TransformHistoryCommand(self, before, after, self._transform_text()))
         self._transform_history_state = after
 
     def _on_transform_history_changed(self) -> None:
@@ -427,11 +439,10 @@ class MainWindow(QMainWindow):
             return
         current = self._capture_transform_state()
         if self._transform_history_pending is not None:
-            # Continuous drag is committed once on mouse release.
             return
         before = self._transform_history_state
         if before is not None and before != current:
-            self._undo_stack.push(_TransformHistoryCommand(self, before, current))
+            self._undo_stack.push(_TransformHistoryCommand(self, before, current, self._transform_text()))
         self._transform_history_state = current
 
     def _reset_transform_history(self) -> None:
@@ -2201,7 +2212,9 @@ class MainWindow(QMainWindow):
         before = getattr(self, "_last_selection_state", None)
         cur = self.image_viewer.current_action
         name = f"「{cur.name}」" if cur else ""
-        n = len(after.get("actions", [{}])[0].get("selected_indices", [])) if cur else 0
+        # 取当前动作的 selected_indices 数量
+        ai = self.actions.index(cur) if cur in self.actions else -1
+        n = len(after["actions"][ai].get("selected_indices", [])) if ai >= 0 else 0
         text = f"选择图块{name}({n}个)"
         if before is not None and before != after:
             self._undo_stack.push(_SnapshotCommand(self, before, after, text))
