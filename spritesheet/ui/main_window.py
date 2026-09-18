@@ -2161,18 +2161,25 @@ class MainWindow(QMainWindow):
             self._schedule_selection_snapshot()
 
     def _schedule_selection_snapshot(self):
-        """选择图块后延迟 push 快照（框选结束后才记录）。"""
+        """选择图块后延迟 push：before 用上次缓存的状态（因为信号在点击后才到）。"""
         if not hasattr(self, "_selection_snap_timer"):
             from PyQt6.QtCore import QTimer
             self._selection_snap_timer = QTimer(self)
             self._selection_snap_timer.setSingleShot(True)
             self._selection_snap_timer.timeout.connect(self._finish_selection_snapshot)
-        if not getattr(self, "_snapshot_before", None):
-            self._push_snapshot(f"选择图块({len(self.image_viewer._frames)}个元素)")
         self._selection_snap_timer.start(200)
 
     def _finish_selection_snapshot(self):
-        self._push_snapshot_done()
+        """选择图块结束：push「上次状态 → 当前状态」。"""
+        after = self._capture_snapshot()
+        before = getattr(self, "_last_selection_state", None)
+        cur = self.image_viewer.current_action
+        name = f"「{cur.name}」" if cur else ""
+        n = len(after.get("actions", [{}])[0].get("selected_indices", [])) if cur else 0
+        text = f"选择图块{name}({n}个)"
+        if before is not None and before != after:
+            self._undo_stack.push(_SnapshotCommand(self, before, after, text))
+        self._last_selection_state = after
 
     def _on_anim_bar_changed(self):
         """动画参数(fps/时长/锚点等)改动后 debounce 记录。"""
