@@ -51,7 +51,6 @@ def main() -> int:
     win._on_image_loaded(pm)
     detected = {"n": None}
     win.image_viewer.frames_updated.connect(lambda: detected.update(n=len(win.image_viewer._frames)))
-    deadline = 0
     import time
     t0 = time.perf_counter()
     while detected["n"] is None and time.perf_counter() - t0 < 60:
