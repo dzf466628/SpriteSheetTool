@@ -2188,6 +2188,8 @@ class MainWindow(QMainWindow):
 
     def _on_anim_bar_changed(self):
         """动画参数(fps/时长/锚点等)改动后 debounce 记录。"""
+        if getattr(self, "_suppress_selection_snapshot", False):
+            return
         if not hasattr(self, "_anim_snap_timer"):
             from PyQt6.QtCore import QTimer
             self._anim_snap_timer = QTimer(self)
@@ -2201,6 +2203,8 @@ class MainWindow(QMainWindow):
 
     def _on_frame_changed(self, idx: int):
         """预览区切换帧序号：debounce 后记录。"""
+        if getattr(self, "_suppress_selection_snapshot", False):
+            return
         if not hasattr(self, "_frame_snap_timer"):
             from PyQt6.QtCore import QTimer
             self._frame_snap_timer = QTimer(self)
