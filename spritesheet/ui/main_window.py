@@ -391,6 +391,17 @@ class MainWindow(QMainWindow):
         if self._restoring_transform_history:
             return
         self._restoring_transform_history = True
+        self._suppress_selection_snapshot = True
+        # 停掉所有 pending debounce timer
+        for tname in ("_selection_snap_timer", "_frame_snap_timer", "_anim_snap_timer", "_offset_snap_timer"):
+            t = getattr(self, tname, None)
+            if t is not None:
+                t.stop()
+        self._snapshot_before = None
+        self._offset_snap_before = None
+        self.preview.blockSignals(True)
+        self.image_viewer.blockSignals(True)
+        self.action_list.blockSignals(True)
         try:
             restored_ids = set()
             for _, action, rotations, mirror_h, mirror_v, pivots, quads, modes in state:
@@ -425,6 +436,13 @@ class MainWindow(QMainWindow):
                 self.preview.adjust_panel._transform_changed = False
         finally:
             self._restoring_transform_history = False
+            self.preview.blockSignals(False)
+            self.image_viewer.blockSignals(False)
+            self.action_list.blockSignals(False)
+            self._suppress_selection_snapshot = False
+            self._last_selection_state = None
+            self._offset_snap_before = None
+            self._snapshot_before = None
 
     def _begin_transform_history(self) -> None:
         self._suppress_selection_snapshot = True
