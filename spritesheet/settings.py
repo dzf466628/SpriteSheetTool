@@ -22,6 +22,7 @@ APP_NAME = "SpriteSheetTool"
 KEY_SHOW_THUMBNAIL = "project/show_thumbnail"
 KEY_LAST_DIR = "files/last_directory"
 KEY_DETECT_MIN_AREA = "detect/min_area"
+KEY_UNDO_LIMIT = "history/undo_limit"
 
 
 def _settings() -> QSettings:
@@ -96,3 +97,20 @@ def set_detect_min_area(value: int) -> None:
         _settings().setValue(KEY_DETECT_MIN_AREA, max(0, int(value)))
     except Exception as e:  # noqa: BLE001
         print(f"[settings] 写入 {KEY_DETECT_MIN_AREA} 失败: {e}", file=sys.stderr)
+
+
+def undo_limit() -> int:
+    """历史记录保留步数。默认 10，范围 0-30。"""
+    try:
+        value = int(_settings().value(KEY_UNDO_LIMIT, 10))
+    except Exception as e:  # noqa: BLE001
+        print(f"[settings] 读取 {KEY_UNDO_LIMIT} 失败: {e}", file=sys.stderr)
+        return 10
+    return max(0, min(30, value))
+
+
+def set_undo_limit(value: int) -> None:
+    try:
+        _settings().setValue(KEY_UNDO_LIMIT, max(0, min(30, int(value))))
+    except Exception as e:  # noqa: BLE001
+        print(f"[settings] 写入 {KEY_UNDO_LIMIT} 失败: {e}", file=sys.stderr)

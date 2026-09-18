@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 from spritesheet.settings import (
     detect_min_area, set_detect_min_area,
     set_show_project_thumbnail, show_project_thumbnail,
+    set_undo_limit, undo_limit,
 )
 
 
@@ -89,6 +90,31 @@ class SettingsDialog(QDialog):
         hint_min.setContentsMargins(22, 0, 0, 0)
         layout.addWidget(hint_min)
 
+        title_hist = QLabel("历史记录")
+        title_hist.setStyleSheet("color: #F06292; font-weight: bold; font-size: 13px;")
+        layout.addWidget(title_hist)
+
+        row_hist = QHBoxLayout()
+        row_hist.addWidget(QLabel("保留最近"))
+        self.spin_undo_limit = QSpinBox()
+        self.spin_undo_limit.setRange(0, 30)
+        self.spin_undo_limit.setSingleStep(1)
+        self.spin_undo_limit.setValue(undo_limit())
+        self.spin_undo_limit.setFixedWidth(80)
+        self.spin_undo_limit.valueChanged.connect(self._on_undo_limit_changed)
+        row_hist.addWidget(self.spin_undo_limit)
+        row_hist.addWidget(QLabel("步操作（0-30，默认10）"))
+        row_hist.addStretch()
+        layout.addLayout(row_hist)
+
+        hint_hist = QLabel(
+            "步数太多会占内存、操作多了可能卡。改完重启生效。"
+        )
+        hint_hist.setWordWrap(True)
+        hint_hist.setStyleSheet("color: #9a9a9a; font-size: 11px;")
+        hint_hist.setContentsMargins(22, 0, 0, 0)
+        layout.addWidget(hint_hist)
+
         line2 = QFrame()
         line2.setFrameShape(QFrame.Shape.HLine)
         line2.setStyleSheet("color: #3d3d3d;")
@@ -128,6 +154,9 @@ class SettingsDialog(QDialog):
 
     def _on_min_area_changed(self, value: int) -> None:
         set_detect_min_area(value)
+
+    def _on_undo_limit_changed(self, value: int) -> None:
+        set_undo_limit(value)
 
     def _on_check_update(self) -> None:
         if self._check_update is not None:

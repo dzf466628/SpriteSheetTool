@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QPointF, QRectF, QSize, QTimer, Qt, pyqtSignal
@@ -156,6 +157,26 @@ class _TransformHistoryCommand(QUndoCommand):
 
     def undo(self) -> None:
         self._owner._restore_transform_state(self.before)
+
+
+class _SnapshotCommand(QUndoCommand):
+    """全量快照式 undo：保存整个工程状态（含帧图），undo/redo 恢复。"""
+
+    def __init__(self, owner, before: dict, after: dict, text: str) -> None:
+        super().__init__(text)
+        self._owner = owner
+        self.before = before
+        self.after = after
+        self._initial_redo = True
+
+    def redo(self) -> None:
+        if self._initial_redo:
+            self._initial_redo = False
+            return
+        self._owner._restore_snapshot(self.after)
+
+    def undo(self) -> None:
+        self._owner._restore_snapshot(self.before)
 
 
 class AboutDialog(QDialog):
@@ -305,6 +326,8 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)   # 支持拖入图片或 JSON 工程
         self.actions: list[Action] = []
         self._undo_stack = QUndoStack(self)
+        from spritesheet.settings import undo_limit
+        self._undo_stack.setUndoLimit(undo_limit())
         self._transform_history_state = None
         self._transform_history_pending = None
         self._restoring_transform_history = False
@@ -414,6 +437,38 @@ class MainWindow(QMainWindow):
         self._undo_stack.clear()
         self._transform_history_pending = None
         self._transform_history_state = self._capture_transform_state()
+
+    def _capture_snapshot(self) -> dict:
+        """全量工程快照（含帧图），用于结构性操作的 undo。"""
+        manifest, sections = self._project_manifest()
+        return {"manifest": manifest, "sections": sections}
+
+    def _restore_snapshot(self, snap: dict) -> None:
+        """从全量快照恢复工程。"""
+        try:
+            self._apply_sstool_project(snap["manifest"], snap["sections"])
+        except Exception as e:  # noqa: BLE001
+            print(f"[undo] 恢复快照失败: {e}", file=sys.stderr)
+
+    def _push_snapshot(self, text: str) -> None:
+        """在结构性操作（增删动作/帧等）前调用：记录操作前快照，操作后自动补 after。
+
+        用法：操作前调一次 before = self._capture_snapshot()，操作完后调
+        self._push_snapshot_done(before, "操作名")。本方法只记 before。
+        """
+        self._snapshot_before = self._capture_snapshot()
+        self._snapshot_text = text
+
+    def _push_snapshot_done(self) -> None:
+        """结构性操作完成后调用：push snapshot command。"""
+        before = getattr(self, "_snapshot_before", None)
+        if before is None:
+            return
+        after = self._capture_snapshot()
+        if before != after:
+            self._undo_stack.push(_SnapshotCommand(self, before, after, self._snapshot_text))
+        self._snapshot_before = None
+        self._snapshot_text = ""
 
     @staticmethod
     def _tuple2(value, default=(0, 0)) -> tuple:
@@ -1892,8 +1947,9 @@ class MainWindow(QMainWindow):
                 break
         name = f"动作{len(self.actions) + 1}"
         action = Action(name, color)
+        self._push_snapshot("添加动作")
         self.actions.append(action)
-        self._reset_transform_history()
+        self._transform_history_state = self._capture_transform_state()
         self._mark_project_dirty()
         self.image_viewer.set_actions(self.actions)
 
@@ -1909,6 +1965,7 @@ class MainWindow(QMainWindow):
         # 新建动作直接进入重命名状态
         card.start_rename()
         self.lbl_status.setText(f"已添加动作「{name}」，共 {len(action.frames)} 帧")
+        self._push_snapshot_done()
 
     def _on_action_color_changed(self, action: Action, color: str):
         action.color = color
@@ -1925,6 +1982,7 @@ class MainWindow(QMainWindow):
         """删除动作卡片并将选择切换到相邻动作。"""
         if action not in self.actions:
             return
+        self._push_snapshot("删除动作")
         row = next((i for i in range(self.action_list.count())
                     if self.action_list.item(i).data(Qt.ItemDataRole.UserRole) is action), -1)
         if row < 0:
@@ -1937,7 +1995,7 @@ class MainWindow(QMainWindow):
             card.deleteLater()
         del item
         self.actions.remove(action)
-        self._reset_transform_history()
+        self._transform_history_state = self._capture_transform_state()
         self._mark_project_dirty()
         self.image_viewer.set_actions(self.actions)
 
@@ -1954,6 +2012,7 @@ class MainWindow(QMainWindow):
             self.image_viewer.set_current_action(None)
             self.preview.set_action(None)
             self.lbl_status.setText("已删除动作，当前没有动作")
+        self._push_snapshot_done()
 
     def _select_action_by_obj(self, action: Action):
         for i in range(self.action_list.count()):
