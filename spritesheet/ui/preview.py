@@ -1111,6 +1111,8 @@ class AnimAdjustPanel(QWidget):
         self._offset_drag = False
         # 变换作用域：右侧按钮 = 单帧(frame)；底部「动画设置」横条 = 全部帧(all)
         self._transform_scope = "frame"
+        # 多选帧回调：由 ActionPreviewWidget 注入，返回当前选中的帧索引列表
+        self._get_selected_rows = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -1431,6 +1433,7 @@ class AnimAdjustPanel(QWidget):
 
     def _set_current_offset(self, dx: int | None = None, dy: int | None = None) -> None:
         """设置当前帧偏移的某个分量并刷新界面。"""
+        self._exit_transform_mode()
         if not self._action or not self._action.frames:
             self._hint_no_action()
             return
@@ -1466,6 +1469,7 @@ class AnimAdjustPanel(QWidget):
 
     def _adjust_frame(self, dx: int, dy: int):
         """方向按钮：当前帧偏移微调 1px。"""
+        self._exit_transform_mode()
         if not self._action or not self._action.frames:
             self._hint_no_action()
             return
@@ -1475,6 +1479,7 @@ class AnimAdjustPanel(QWidget):
             self._set_current_offset(cur[0] + dx, cur[1] + dy)
 
     def _reset_frame_offset(self):
+        self._exit_transform_mode()
         if not self._action:
             self._hint_no_action()
             return
@@ -1543,11 +1548,21 @@ class AnimAdjustPanel(QWidget):
         self.lbl_transform_summary.setText("当前变换：" + (" · ".join(items) if items else "无变换"))
 
     def _transform_targets(self) -> list:
-        """变换目标：底部「动画设置」横条进入的模式 = 全部帧；右侧 = 当前帧。"""
+        """变换目标：底部横条 = 全部帧；右侧单帧 = Ctrl 多选帧（无多选则当前帧）。"""
         if not self._action:
             return []
         if self._transform_scope == "all":
             return [(self._action, list(range(len(self._action.frames))))]
+        # 单帧模式：Ctrl 多选时作用于所有选中帧
+        get_rows = getattr(self, "_get_selected_rows", None)
+        if get_rows is not None:
+            try:
+                rows = get_rows()
+            except Exception:
+                rows = []
+            valid = [r for r in rows if 0 <= r < len(self._action.frames)]
+            if len(valid) > 1:
+                return [(self._action, valid)]
         return [(self._action, [getattr(self, "_current_frame", 0)])]
 
     # ---- 自由变换：模式按钮 + 预览手柄回调 ----
@@ -1566,6 +1581,12 @@ class AnimAdjustPanel(QWidget):
         if canvas is not None:
             canvas.hint_no_action()
         return True
+
+    def _exit_transform_mode(self) -> None:
+        """切换到其他工具/按钮时自动退出变换模式（按钮弹回、手柄消失）。"""
+        canvas = getattr(self, "canvas", None)
+        if canvas is not None and canvas.transform_mode():
+            canvas.set_transform_mode(None)
 
     def _on_mode_button(self, mode: str, on: bool) -> None:
         canvas = getattr(self, "canvas", None)
@@ -1675,6 +1696,7 @@ class AnimAdjustPanel(QWidget):
         尊重"数据复用"：勾选时清的是整组帧，和旋转/镜像/quad 的处理保持一致。
         帧偏移不在这里清（它属于下面"当前帧微调"那一栏，有自己的重置按钮）。
         """
+        self._exit_transform_mode()
         if not self._action or not self._action.frames:
             self._hint_no_action()
             return
@@ -1696,6 +1718,7 @@ class AnimAdjustPanel(QWidget):
         self._refresh_canvas_label()
 
     def _toggle_mirror(self, axis: str) -> None:
+        self._exit_transform_mode()
         if not self._action or not self._action.frames:
             self._hint_no_action()
             return
@@ -1897,6 +1920,7 @@ class ActionPreviewWidget(QWidget):
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         self.adjust_panel = AnimAdjustPanel()
         self.adjust_panel.set_canvas(self.canvas)
+        self.adjust_panel._get_selected_rows = self._selected_rows
         # 预览画布 ↔ 帧设置面板：变换模式按钮、拖转/拖四边形互相同步
         self.canvas.transform_mode_changed.connect(self.adjust_panel._on_canvas_mode_changed)
         self.canvas.transform_rotated.connect(self.adjust_panel._apply_rotation)
