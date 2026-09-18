@@ -365,6 +365,8 @@ class HistoryPanel(QWidget):
         self.tree.clear()
         active_key = self._active_key()
         for key, stack in self._stacks:
+            if key == "global" and stack.count() == 0:
+                continue
             label = "全局历史" if key == "global" else f"动作：{key.name}"
             parent = QTreeWidgetItem(self.tree, [f"{label}（{stack.count() + 1}）"])
             parent.setForeground(0, QColor("#F06292"))
