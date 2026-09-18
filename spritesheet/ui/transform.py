@@ -264,3 +264,70 @@ def action_anchor_pixels(action: Action, canvas_w: int, canvas_h: int) -> tuple[
     nx = max(0.0, min(1.0, float(action.anchor[0])))
     ny = max(0.0, min(1.0, float(action.anchor[1])))
     return round(canvas_w * nx), round(canvas_h * ny)
+
+
+def whole_reference(action: Action, indices):
+    """整体变换参考框：所有目标帧以最大 base 尺寸居中叠放的统一矩形。
+
+    返回 (W, H, entries)；entries = [(i, ox, oy, w_i, h_i), ...]，
+    其中 (w_i,h_i)=frame_base_size（镜像旋转后、未加 quad），(ox,oy) 是该帧
+    内容在 W×H 参考框里的居中偏移（与 compute_preview_layout 的居中口径一致）。
+    所有帧中心重合于参考框中心 —— 这是"对整个 GIF 做变换"时各帧保持重叠的基准。
+    """
+    idxs = [i for i in dict.fromkeys(indices) if 0 <= i < len(action.frames)]
+    if not idxs:
+        return 0, 0, []
+    sizes = [frame_base_size(action, i) for i in idxs]
+    W = max(s[0] for s in sizes)
+    H = max(s[1] for s in sizes)
+    entries = []
+    for i, (w, h) in zip(idxs, sizes):
+        ox = (W - w) // 2
+        oy = (H - h) // 2
+        entries.append((i, ox, oy, w, h))
+    return W, H, entries
+
+
+def distribute_whole_quad(action: Action, indices, ref_quad):
+    """把"参考框 W×H 的归一化四角 ref_quad"换算成每帧自己的归一化 quad。
+
+    帧 i 内容在参考框中居中于 (ox,oy)；整体四边形映射 M（参考框四角→ref_quad
+    四角，含缩放/斜切/透视）作用到帧 i 内容四角，再平移回帧 i 局部坐标并按
+    帧 base 尺寸归一化。围绕参考框中心的变换下，各帧结果围绕各自内容中心、
+    在画布上保持重叠（中心对称缩放时 quad 与帧尺寸无关）。
+
+    返回 {帧号: quad 或 None（None=恢复默认）}。
+    """
+    ref_quad = tuple(ref_quad)
+    W, H, entries = whole_reference(action, indices)
+    if not entries:
+        return {}
+    ref_src = QPolygonF([QPointF(0, 0), QPointF(W, 0), QPointF(W, H), QPointF(0, H)])
+    ref_dst = QPolygonF([
+        QPointF(ref_quad[0] * W, ref_quad[1] * H),
+        QPointF(ref_quad[2] * W, ref_quad[3] * H),
+        QPointF(ref_quad[4] * W, ref_quad[5] * H),
+        QPointF(ref_quad[6] * W, ref_quad[7] * H),
+    ])
+    matrix = QTransform()
+    ok = QTransform.quadToQuad(ref_src, ref_dst, matrix)
+    result: dict = {}
+    for i, ox, oy, w, h in entries:
+        if not ok or ref_quad == DEFAULT_QUAD or w <= 0 or h <= 0:
+            result[i] = None
+            continue
+        local = [QPointF(ox, oy), QPointF(ox + w, oy),
+                 QPointF(ox + w, oy + h), QPointF(ox, oy + h)]
+        mapped = [matrix.map(pt) for pt in local]
+        qx0, qy0 = mapped[0].x() - ox, mapped[0].y() - oy
+        qx1, qy1 = mapped[1].x() - ox, mapped[1].y() - oy
+        qx2, qy2 = mapped[2].x() - ox, mapped[2].y() - oy
+        qx3, qy3 = mapped[3].x() - ox, mapped[3].y() - oy
+        quad = (qx0 / w, qy0 / h, qx1 / w, qy1 / h,
+                qx2 / w, qy2 / h, qx3 / w, qy3 / h)
+        # 与默认矩形几乎一致则视为无变换，避免写入浮点噪声
+        if max(abs(quad[k] - DEFAULT_QUAD[k]) for k in range(8)) < 1e-4:
+            result[i] = None
+        else:
+            result[i] = tuple(round(v, 6) for v in quad)
+    return result

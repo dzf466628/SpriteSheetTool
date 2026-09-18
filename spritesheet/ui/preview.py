@@ -32,7 +32,7 @@ from .models import Action
 from .transform import (
     DEFAULT_QUAD, DEFAULT_ROTATION_PIVOT, _alpha_bounds, _normalized_rotation_pivot,
     _rotation_transform, action_anchor_pixels, action_frame_pixmap, action_frame_size,
-    compute_preview_layout, frame_base_size,
+    compute_preview_layout, distribute_whole_quad, frame_base_size, whole_reference,
 )
 from .widgets import (
     CompactComboBox, CompactSpinBox, EditableNumberLabel, HintToast, HoverIconButton,
@@ -42,6 +42,7 @@ from .widgets import (
 
 # 无动作时点控件的统一提示（四处入口共用一句，避免文案漂移）
 NO_ACTION_HINT = "请先添加动作：点左侧「+ 添加动作」"
+
 
 # 四角顺序（与 DEFAULT_QUAD 一致）：0=左上 1=右上 2=右下 3=左下。
 # 源矩形里 (0,1) 与 (2,3) 是**水平**边，(1,2) 与 (3,0) 是垂直边 ——
@@ -207,9 +208,18 @@ class PreviewCanvas(QWidget):
         # 多选叠加帧（除主帧外的选中帧，半透明叠加显示）
         self._overlay_frames: list[int] = []
         self._frozen_offset: tuple[int, int] = (0, 0)
+        # 冻结期间参与位置增量叠加的帧及各自起始偏移（整体平移时为多帧）
+        self._frozen_indices: list[int] = []
+        self._frozen_offsets: dict = {}
+        # 整体(GIF 级)平移：变换模式下在整体框内部拖动，作用于全部目标帧
+        self._frame_drag_whole: bool = False
         # 当前变换模式的发起方：'frame'（右侧帧编辑）/ 'all'（底部动作编辑横条）。
         # 两套变换工具按钮独立：谁发起谁点亮，切换/退出时只有发起方弹回。
         self._transform_owner = ""
+        # 本次变换作用的目标帧（动作编辑=全部帧；帧编辑=当前帧/Ctrl 多选）。
+        # 多于 1 帧时进入「整体(GIF 级)变换」：手柄围绕整体包围盒、围绕共同中心。
+        self._transform_indices: list[int] = []
+        self._drag_whole: tuple | None = None
         # 参照帧模式下鼠标拖动当前帧的状态
         self._frame_drag_active: bool = False
         self._frame_drag_last: QPointF | None = None
@@ -221,8 +231,12 @@ class PreviewCanvas(QWidget):
         self._toast.show(NO_ACTION_HINT)
 
     # ---- 偏移拖动：冻结画布区域 ----
-    def begin_layout_freeze(self) -> None:
-        """冻结画布尺寸与各帧位置（拖动偏移滑块/方向按钮时调用）。"""
+    def begin_layout_freeze(self, indices=None) -> None:
+        """冻结画布尺寸与各帧位置（拖动偏移滑块/方向按钮时调用）。
+
+        indices 指定拖动会改变哪些帧的偏移（整体平移时传全部目标帧）；
+        默认仅当前帧（参照帧拖动/偏移控件的原行为）。
+        """
         if self._frozen_layout is not None:
             return
         if not self._action or not self._action.frames:
@@ -232,6 +246,11 @@ class PreviewCanvas(QWidget):
         self._frozen_layout = compute_preview_layout(self._action, self._frame_index)
         self._frozen_index = self._frame_index
         self._frozen_offset = self._action.frame_offsets.get(self._frame_index, (0, 0))
+        if indices is None:
+            indices = [self._frame_index]
+        idxs = sorted({int(i) for i in indices if 0 <= int(i) < len(self._action.frames)})
+        self._frozen_indices = idxs
+        self._frozen_offsets = {i: self._action.frame_offsets.get(i, (0, 0)) for i in idxs}
         self.update()
 
     def end_layout_freeze(self) -> None:
@@ -239,6 +258,8 @@ class PreviewCanvas(QWidget):
         if self._frozen_layout is None:
             return
         self._frozen_layout = None
+        self._frozen_indices = []
+        self._frozen_offsets = {}
         self.update()
 
     def layout_frozen(self) -> bool:
@@ -249,15 +270,22 @@ class PreviewCanvas(QWidget):
         if self._frozen_layout is None:
             return self._current_layout()
         canvas_w, canvas_h, positions, meta = self._frozen_layout
-        idx = self._frozen_index
-        if self._action and 0 <= idx < len(positions):
-            cur = self._action.frame_offsets.get(idx, (0, 0))
-            dx = cur[0] - self._frozen_offset[0]
-            dy = cur[1] - self._frozen_offset[1]
-            if dx or dy:
-                positions = list(positions)
-                tx, ty, fw, fh = positions[idx]
-                positions[idx] = (tx + dx, ty + dy, fw, fh)
+        idxs = self._frozen_indices or [self._frozen_index]
+        positions = list(positions)
+        changed = False
+        for fi in idxs:
+            if self._action and 0 <= fi < len(positions):
+                base = self._frozen_offsets.get(fi, self._frozen_offset if fi == self._frozen_index else (0, 0))
+                cur = self._action.frame_offsets.get(fi, (0, 0))
+                dx = cur[0] - base[0]
+                dy = cur[1] - base[1]
+                if dx or dy:
+                    tx, ty, fw, fh = positions[fi]
+                    positions[fi] = (tx + dx, ty + dy, fw, fh)
+                    changed = True
+        if not changed:
+            # 保持与旧行为一致：无增量时直接返回冻结布局
+            return self._frozen_layout
         return canvas_w, canvas_h, positions, meta
 
     def set_toolbar(self, toolbar):
@@ -469,6 +497,9 @@ class PreviewCanvas(QWidget):
         self._transform_mode = mode
         self._drag_kind = None
         self._drag_layout = None
+        self._drag_whole = None
+        if mode is None:
+            self._transform_indices = []
         self._hover_kind, self._hover_index = None, -1
         self.setCursor(Qt.CursorShape.CrossCursor if self._transform_mode else Qt.CursorShape.ArrowCursor)
         self.update()
@@ -476,6 +507,68 @@ class PreviewCanvas(QWidget):
 
     def transform_mode(self) -> str | None:
         return self._transform_mode
+
+    def set_transform_targets(self, indices) -> None:
+        """设置本次变换作用的帧（动作编辑=全部帧；帧编辑=当前帧或 Ctrl 多选）。"""
+        if not self._action:
+            self._transform_indices = []
+            return
+        n = len(self._action.frames)
+        self._transform_indices = sorted({int(i) for i in indices if 0 <= int(i) < n})
+
+    def _whole_active(self) -> bool:
+        """整体(GIF 级)变换：作用于 2 帧以上，手柄围绕整体包围盒、围绕共同中心。"""
+        return bool(self._transform_mode) and len(self._transform_indices) > 1
+
+    def _whole_frame(self, layout=None):
+        """整体参考框（画布逻辑坐标）：(x0,y0,x1,y1,Cx,Cy,W,H) 或 None。
+
+        W/H 取目标帧 base 尺寸（镜像旋转后、未加 quad）的最大者，中心取目标帧
+        当前布局并集的中心；各帧内容在 W×H 参考框里居中（见 whole_reference）。
+        """
+        if not self._action or not self._transform_indices:
+            return None
+        layout = layout or self._current_layout()
+        if layout is None:
+            return None
+        _, _, positions, _ = layout
+        idxs = [i for i in self._transform_indices if 0 <= i < len(positions)]
+        if not idxs:
+            return None
+        W, H, _entries = whole_reference(self._action, idxs)
+        minx = min(positions[i][0] for i in idxs)
+        miny = min(positions[i][1] for i in idxs)
+        maxx = max(positions[i][0] + positions[i][2] for i in idxs)
+        maxy = max(positions[i][1] + positions[i][3] for i in idxs)
+        cx, cy = (minx + maxx) / 2.0, (miny + maxy) / 2.0
+        x0, y0 = cx - W / 2.0, cy - H / 2.0
+        return x0, y0, x0 + W, y0 + H, cx, cy, W, H
+
+    def _whole_master_entry(self):
+        """(W,H,entry)；entry 优先取占满参考框的帧，否则取面积最大帧，用于反推整体 quad。"""
+        W, H, entries = whole_reference(self._action, self._transform_indices)
+        full = [e for e in entries if e[3] == W and e[4] == H]
+        return W, H, (full[0] if full else max(entries, key=lambda e: e[3] * e[4]))
+
+    def _whole_current_ref(self):
+        """从代表帧当前 quad 反推整体参考框的归一化 quad（让手柄贴合当前整体形状）。"""
+        W, H, entry = self._whole_master_entry()
+        _mi, ox, oy, w, h = entry
+        q = self._action.frame_quads.get(_mi, DEFAULT_QUAD)
+        ref = [0.0] * 8
+        for k in range(4):
+            ref[2 * k] = (ox + q[2 * k] * w) / W if W else 0.0
+            ref[2 * k + 1] = (oy + q[2 * k + 1] * h) / H if H else 0.0
+        return tuple(ref)
+
+    def _whole_handles(self, layout=None) -> list[QPointF]:
+        """整体变换的 4 个手柄（画布逻辑坐标）= 参考框经当前整体 quad 后的四角。"""
+        fr = self._whole_frame(layout)
+        if fr is None:
+            return []
+        x0, y0, _x1, _y1, _cx, _cy, W, H = fr
+        ref = self._whole_current_ref()
+        return [QPointF(x0 + ref[2 * k] * W, y0 + ref[2 * k + 1] * H) for k in range(4)]
 
     def _current_layout(self):
         if not self._action or not self._action.frames:
@@ -521,6 +614,9 @@ class PreviewCanvas(QWidget):
         layout = layout or self._current_layout()
         if layout is None:
             return QPointF(0, 0)
+        if self._whole_active():
+            fr = self._whole_frame(layout)
+            return QPointF(fr[4], fr[5]) if fr is not None else QPointF(0, 0)
         _, _, positions, _ = layout
         tx, ty, _, _ = positions[self._frame_index]
         quad = self._action.frame_quads.get(self._frame_index, DEFAULT_QUAD)
@@ -537,12 +633,16 @@ class PreviewCanvas(QWidget):
 
     def _current_mo(self) -> QPointF:
         """当前 quad 四角的最小角（pixmap 内容贴左上的平移量）。"""
+        if self._whole_active():
+            return QPointF(0, 0)
         quad = self._action.frame_quads.get(self._frame_index, DEFAULT_QUAD)
         dst, _, _ = self._quad_dst(quad)
         return QPointF(min(p.x() for p in dst), min(p.y() for p in dst))
 
     def _handles_canvas(self, mo: QPointF, layout=None, anchor_override=None) -> list[QPointF]:
         """quad 四角 → 画布逻辑坐标（layout 传 None 用当前布局，或传拖动锁定的快照）。"""
+        if self._whole_active():
+            return self._whole_handles(layout)
         if layout is None:
             layout = self._current_layout()
         if layout is None:
@@ -593,6 +693,16 @@ class PreviewCanvas(QWidget):
         radius = max(28.0, radius)
         return center_s, radius, QPointF(center_s.x(), center_s.y() - radius)
 
+    def _hit_whole_body(self, screen_pos) -> bool:
+        """整体变换模式下，屏幕点是否落在整体四边形内部（用于框内拖动=整体平移）。"""
+        if not self._whole_active():
+            return False
+        pts = self._whole_handles()
+        if len(pts) < 4:
+            return False
+        lp = self._screen_to_logical(screen_pos)
+        return QPolygonF(pts).containsPoint(lp, Qt.FillRule.OddEvenFill)
+
     def _hit_test(self, screen_pos):
         """返回 (kind, index)，只让当前模式的玫红控件可命中。"""
         if not self._transform_mode or not self._action or not self._action.frames:
@@ -607,7 +717,7 @@ class PreviewCanvas(QWidget):
         if mode == "rotate":
             pivot = self._rotation_pivot_canvas(layout, mo)
             pivot_s = self._logical_to_screen(pivot)
-            if (pivot_s - screen_pos).manhattanLength() < 15:
+            if not self._whole_active() and (pivot_s - screen_pos).manhattanLength() < 15:
                 return "pivot", -1
             rot = self._rotate_handle_screen(pts, pivot)
             if rot is not None and (rot - screen_pos).manhattanLength() < 15:
@@ -630,6 +740,24 @@ class PreviewCanvas(QWidget):
         self._drag_index = index
         self._drag_layout = self._current_layout()
         self._axis_lock = None          # Shift 锁轴的状态，每次拖拽重新判定
+        if self._whole_active():
+            # 整体(GIF 级)变换：手柄/基准全部围绕目标帧整体参考框
+            fr = self._whole_frame(self._drag_layout)
+            x0, y0, _x1, _y1, cx, cy, W, H = fr
+            self._drag_whole = (x0, y0, W, H)
+            self._drag_wrot, self._drag_hrot = W, H
+            self._drag_mo = QPointF(0, 0)
+            self._drag_orig_c = [QPointF(p) for p in self._whole_handles(self._drag_layout)]
+            self._drag_center = QPointF(cx, cy)
+            self._drag_pivot_canvas = QPointF(cx, cy)
+            _W, _H, wentry = self._whole_master_entry()
+            master = wentry[0]
+            self._drag_orig = tuple(self._action.frame_quads.get(master, DEFAULT_QUAD))
+            if kind == "rotate":
+                self._drag_rot_mouse_start = math.degrees(math.atan2(
+                    screen_pos.y() - cy, screen_pos.x() - cx))
+                self._drag_rot_start = self._action.frame_rotations.get(master, 0)
+            return
         quad = self._action.frame_quads.get(self._frame_index, DEFAULT_QUAD)
         self._drag_orig = tuple(quad)
         dst, w, h = self._quad_dst(quad)
@@ -692,6 +820,14 @@ class PreviewCanvas(QWidget):
 
     def _emit_quad_from_canvas(self, canvas_pts) -> None:
         """把 4 个画布逻辑角点换算成归一化 quad 并发出信号。"""
+        if self._whole_active():
+            x0, y0, W, H = self._drag_whole
+            quad = []
+            for pt in canvas_pts:
+                quad.append((pt.x() - x0) / W if W else 0.0)
+                quad.append((pt.y() - y0) / H if H else 0.0)
+            self.transform_quadded.emit(tuple(round(v, 6) for v in quad))
+            return
         w, h = self._drag_wrot, self._drag_hrot
         mo = self._drag_mo
         _, _, positions, _ = self._drag_layout
@@ -782,7 +918,12 @@ class PreviewCanvas(QWidget):
                 new[horizontal_neighbor].setX(orig_c[horizontal_neighbor].x() - dx)
                 new[vertical_neighbor].setY(orig_c[vertical_neighbor].y() - dy)
             elif mode == "scale":
-                anchor = orig_c[(k + 2) % 4]
+                if self._whole_active():
+                    # 整体(GIF 级)缩放围绕整体中心（不是对角），多帧才会保持重叠
+                    anchor = QPointF(sum(p.x() for p in orig_c) / 4.0,
+                                     sum(p.y() for p in orig_c) / 4.0)
+                else:
+                    anchor = orig_c[(k + 2) % 4]
                 den_x = orig_c[k].x() - anchor.x()
                 den_y = orig_c[k].y() - anchor.y()
                 if abs(den_x) < 1e-6 or abs(den_y) < 1e-6:
@@ -807,8 +948,8 @@ class PreviewCanvas(QWidget):
                 dx = cur.x() - (orig_c[a].x() + orig_c[b].x()) / 2.0
                 new[a].setX(orig_c[a].x() + dx)
                 new[b].setX(orig_c[b].x() + dx)
-                if shift:
-                    # Shift = 居中剪切：对边朝相反方向等量移动，整体中心不动
+                if shift or self._whole_active():
+                    # Shift（或整体变换）= 居中剪切：对边朝相反方向等量移动，中心不动
                     # （不然光拖一条边，图形会整体往上/下跑）。
                     for other in ((k + 2) % 4, (k + 3) % 4):
                         new[other].setX(orig_c[other].x() - dx)
@@ -816,7 +957,7 @@ class PreviewCanvas(QWidget):
                 dy = cur.y() - (orig_c[a].y() + orig_c[b].y()) / 2.0
                 new[a].setY(orig_c[a].y() + dy)
                 new[b].setY(orig_c[b].y() + dy)
-                if shift:
+                if shift or self._whole_active():
                     for other in ((k + 2) % 4, (k + 3) % 4):
                         new[other].setY(orig_c[other].y() - dy)
             self._emit_quad_from_canvas(new)
@@ -882,7 +1023,15 @@ class PreviewCanvas(QWidget):
         if self._transform_mode and event.button() == Qt.MouseButton.LeftButton:
             kind, idx = self._hit_test(event.position())
             if kind is None:
-                self.set_transform_mode(None)  # 点空白退出
+                if self._whole_active() and self._hit_whole_body(event.position()):
+                    # 整体(GIF 级)平移：在整体框内部拖动，所有目标帧一起移动
+                    self.begin_layout_freeze(list(self._transform_indices))
+                    self._frame_drag_active = True
+                    self._frame_drag_whole = True
+                    self._frame_drag_last = event.position()
+                    self.setCursor(Qt.CursorShape.SizeAllCursor)
+                else:
+                    self.set_transform_mode(None)  # 点框外空白退出
             else:
                 self._begin_drag(kind, idx, event.position())
 
@@ -899,8 +1048,11 @@ class PreviewCanvas(QWidget):
             dx = int(round(delta.x() / scale))
             dy = int(round(delta.y() / scale))
             if dx or dy:
-                # Ctrl 多选时所有选中帧一起移动（与右侧偏移控件一致）
-                indices = self._drag_target_indices()
+                # 整体平移作用于全部目标帧；否则 Ctrl 多选时移动所有选中帧
+                if self._frame_drag_whole:
+                    indices = list(self._transform_indices)
+                else:
+                    indices = self._drag_target_indices()
                 for idx in indices:
                     cur = self._action.frame_offsets.get(idx, (0, 0))
                     nx, ny = cur[0] + dx, cur[1] + dy
@@ -927,10 +1079,53 @@ class PreviewCanvas(QWidget):
         if self._frame_drag_active:
             self._frame_drag_active = False
             self._frame_drag_last = None
+            self._frame_drag_whole = False
             self.end_layout_freeze()
             self.unsetCursor()
         if self._drag_kind:
             self._end_drag()
+
+    def _paint_whole_frames(self, p: QPainter, cx: float, cy: float, scale: float, layout=None):
+        """整体(GIF 级)变换：把所有目标帧围绕共同中心叠合绘制。
+
+        主帧不透明、其余半透明（看出多帧是否重合）；拖动中中心取锁定参考框，
+        非拖动复用 paintEvent 已算布局，各帧按实时尺寸居中 -> 围绕整体中心、不跳位。
+        返回主帧的屏幕矩形（供参照帧高亮边框复用）。
+        """
+        if not self._action or not self._transform_indices:
+            return None
+        if self._drag_layout is not None and self._drag_whole is not None:
+            x0, y0, W, H = self._drag_whole
+            ccx, ccy = x0 + W / 2.0, y0 + H / 2.0
+        else:
+            fr = self._whole_frame(layout)
+            if fr is None:
+                return None
+            ccx, ccy = fr[4], fr[5]
+        opacity = self._action.frame_opacity
+        main_rect = None
+        for i in self._transform_indices:
+            if not (0 <= i < len(self._action.frames)):
+                continue
+            pm = action_frame_pixmap(self._action, i)
+            fw, fh = pm.width(), pm.height()
+            rect = QRectF(cx + (ccx - fw / 2.0) * scale,
+                          cy + (ccy - fh / 2.0) * scale,
+                          fw * scale, fh * scale)
+            is_main = (i == self._frame_index)
+            p.setOpacity(opacity if is_main else 0.4)
+            p.drawPixmap(rect, pm, QRectF(pm.rect()))
+            if is_main:
+                main_rect = rect
+        p.setOpacity(1.0)
+        if main_rect is None and self._transform_indices:
+            # 当前帧不在目标集合（理论不会）：用第一个目标帧占位居中
+            i = self._transform_indices[0]
+            pm = action_frame_pixmap(self._action, i)
+            main_rect = QRectF(cx + (ccx - pm.width() / 2.0) * scale,
+                               cy + (ccy - pm.height() / 2.0) * scale,
+                               pm.width() * scale, pm.height() * scale)
+        return main_rect
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -973,43 +1168,50 @@ class PreviewCanvas(QWidget):
         p.setPen(pen)
         p.drawRect(canvas_rect)
 
-        # 参照帧（洋葱皮，半透明）
-        if 0 <= self._action.ref_frame < len(self._action.frames) and self._action.ref_frame != self._frame_index:
-            ref_tx, ref_ty, ref_w, ref_h = positions[self._action.ref_frame]
-            ref_rect = QRectF(cx + ref_tx * scale, cy + ref_ty * scale, ref_w * scale, ref_h * scale)
-            p.setOpacity(self._action.ref_opacity)
-            ref_pm = action_frame_pixmap(self._action, self._action.ref_frame)
-            p.drawPixmap(ref_rect, ref_pm, QRectF(ref_pm.rect()))
-            p.setOpacity(1.0)
-
-        # 多选叠加帧（Ctrl 多选：除主帧外的选中帧，半透明叠加显示）
-        for fi in self._overlay_frames:
-            if 0 <= fi < len(self._action.frames) and fi != self._frame_index:
-                ox, oy, ow, oh = positions[fi]
-                o_rect = QRectF(cx + ox * scale, cy + oy * scale, ow * scale, oh * scale)
-                p.setOpacity(0.5)
-                o_pm = action_frame_pixmap(self._action, fi)
-                p.drawPixmap(o_rect, o_pm, QRectF(o_pm.rect()))
+        # 整体(GIF 级)变换：所有目标帧围绕共同中心叠合；否则走单帧/洋葱皮/多选叠加
+        # 整体(GIF 级)变换：所有目标帧围绕共同中心叠合；否则走单帧/洋葱皮/多选叠加
+        frame_rect = (self._paint_whole_frames(
+                          p, cx, cy, scale,
+                          (canvas_w, canvas_h, positions, (pad, max_w, max_h)))
+                      if self._whole_active() else None)
+        if frame_rect is None:
+            # 参照帧（洋葱皮，半透明）
+            if 0 <= self._action.ref_frame < len(self._action.frames) and self._action.ref_frame != self._frame_index:
+                ref_tx, ref_ty, ref_w, ref_h = positions[self._action.ref_frame]
+                ref_rect = QRectF(cx + ref_tx * scale, cy + ref_ty * scale, ref_w * scale, ref_h * scale)
+                p.setOpacity(self._action.ref_opacity)
+                ref_pm = action_frame_pixmap(self._action, self._action.ref_frame)
+                p.drawPixmap(ref_rect, ref_pm, QRectF(ref_pm.rect()))
                 p.setOpacity(1.0)
 
-        # 当前帧（始终显示一帧，居中显示）
-        if self._transform_mode and self._drag_layout is not None:
-            # 拖动期间锁定布局位置，并用 quad 包围盒最小角变化补偿，避免帧跳动
-            _, _, pos_drag, _ = self._drag_layout
-            tx, ty, _, _ = pos_drag[self._frame_index]
-            mo0 = self._drag_mo
-            mo_new = self._current_mo()
-            offx = mo_new.x() - mo0.x()
-            offy = mo_new.y() - mo0.y()
-            fw, fh = action_frame_size(self._action, self._frame_index)
-            frame_rect = QRectF(cx + (tx + offx) * scale, cy + (ty + offy) * scale, fw * scale, fh * scale)
-        else:
-            tx, ty, fw, fh = positions[self._frame_index]
-            frame_rect = QRectF(cx + tx * scale, cy + ty * scale, fw * scale, fh * scale)
-        p.setOpacity(self._action.frame_opacity)
-        frame_pm = action_frame_pixmap(self._action, self._frame_index)
-        p.drawPixmap(frame_rect, frame_pm, QRectF(frame_pm.rect()))
-        p.setOpacity(1.0)
+            # 多选叠加帧（Ctrl 多选：除主帧外的选中帧，半透明叠加显示）
+            for fi in self._overlay_frames:
+                if 0 <= fi < len(self._action.frames) and fi != self._frame_index:
+                    ox, oy, ow, oh = positions[fi]
+                    o_rect = QRectF(cx + ox * scale, cy + oy * scale, ow * scale, oh * scale)
+                    p.setOpacity(0.5)
+                    o_pm = action_frame_pixmap(self._action, fi)
+                    p.drawPixmap(o_rect, o_pm, QRectF(o_pm.rect()))
+                    p.setOpacity(1.0)
+
+            # 当前帧（始终显示一帧，居中显示）
+            if self._transform_mode and self._drag_layout is not None:
+                # 拖动期间锁定布局位置，并用 quad 包围盒最小角变化补偿，避免帧跳动
+                _, _, pos_drag, _ = self._drag_layout
+                tx, ty, _, _ = pos_drag[self._frame_index]
+                mo0 = self._drag_mo
+                mo_new = self._current_mo()
+                offx = mo_new.x() - mo0.x()
+                offy = mo_new.y() - mo0.y()
+                fw, fh = action_frame_size(self._action, self._frame_index)
+                frame_rect = QRectF(cx + (tx + offx) * scale, cy + (ty + offy) * scale, fw * scale, fh * scale)
+            else:
+                tx, ty, fw, fh = positions[self._frame_index]
+                frame_rect = QRectF(cx + tx * scale, cy + ty * scale, fw * scale, fh * scale)
+            p.setOpacity(self._action.frame_opacity)
+            frame_pm = action_frame_pixmap(self._action, self._frame_index)
+            p.drawPixmap(frame_rect, frame_pm, QRectF(frame_pm.rect()))
+            p.setOpacity(1.0)
         # 参照帧模式：当前帧高亮边框（提示可拖动）
         if self._action.ref_frame >= 0:
             p.setPen(QPen(QColor("#E91E63"), 2.0))
@@ -1633,6 +1835,9 @@ class AnimAdjustPanel(QWidget):
             # 右侧按钮进入的变换模式只作用于当前帧
             self._transform_scope = "frame"
             canvas.set_transform_mode(mode, "frame")
+            for _act, inds in self._transform_targets():
+                canvas.set_transform_targets(inds)
+                break
         elif canvas.transform_mode() == mode:
             canvas.set_transform_mode(None)
 
@@ -1644,14 +1849,17 @@ class AnimAdjustPanel(QWidget):
         """
         canvas = getattr(self, "canvas", None)
         owner = getattr(canvas, "_transform_owner", "") if canvas is not None else ""
-        if owner == "all":
-            mode = ""
-        if not mode:
-            # 画布退出变换模式：作用域回到单帧
+        actual = canvas.transform_mode() if canvas is not None else ""
+        # 右侧按钮只在「帧编辑(frame)」发起时点亮；动作编辑(all)发起一律弹回
+        button_mode = mode if owner == "frame" else ""
+        # 作用域只在画布真正退出变换（actual 为空）时才回到单帧。
+        # 注意不能用被置空的 mode 判断：all 激活时 mode 也会被置空（仅为不亮按钮），
+        # 否则会把刚设好的 "all" 立刻重置回 "frame"，导致动作编辑只改当前帧。
+        if not actual:
             self._transform_scope = "frame"
         btn = {"rotate": self.btn_mode_rotate, "scale": self.btn_mode_scale,
                "skew": self.btn_mode_skew, "perspective": self.btn_mode_perspective,
-               "distort": self.btn_mode_distort}.get(mode)
+               "distort": self.btn_mode_distort}.get(button_mode)
         buttons = (self.btn_mode_rotate, self.btn_mode_scale, self.btn_mode_skew,
                    self.btn_mode_perspective, self.btn_mode_distort)
         # QButtonGroup 的 exclusive 模式下，显式暂时关闭互斥才能可靠地
@@ -1673,6 +1881,8 @@ class AnimAdjustPanel(QWidget):
                 return
             self._transform_scope = "all"
             canvas.set_transform_mode(mode, "all")
+            if self._action:
+                canvas.set_transform_targets(list(range(len(self._action.frames))))
         elif canvas.transform_mode():
             self._transform_scope = "frame"
             canvas.set_transform_mode(None, "all")
@@ -1683,11 +1893,15 @@ class AnimAdjustPanel(QWidget):
             return
         angle = int(angle) % 360
         for act, indices in self._transform_targets():
+            whole = len(indices) > 1
             for i in indices:
                 if angle == 0:
                     act.frame_rotations.pop(i, None)
                 else:
                     act.frame_rotations[i] = angle
+                if whole:
+                    # 整体旋转围绕共同中心：清掉各帧自定义旋转中心，统一回内容中心
+                    act.frame_rotation_pivots.pop(i, None)
             act.invalidate_transforms()
         self._transform_changed = True
         self.changed.emit()
@@ -1699,8 +1913,10 @@ class AnimAdjustPanel(QWidget):
             return
         pivot = _normalized_rotation_pivot(pivot)
         for act, indices in self._transform_targets():
+            whole = len(indices) > 1
             for i in indices:
-                if pivot == DEFAULT_ROTATION_PIVOT:
+                if whole or pivot == DEFAULT_ROTATION_PIVOT:
+                    # 整体变换不支持偏心旋转中心：固定在整体（=各帧内容）中心
                     act.frame_rotation_pivots.pop(i, None)
                 else:
                     act.frame_rotation_pivots[i] = pivot
@@ -1715,15 +1931,28 @@ class AnimAdjustPanel(QWidget):
         quad = tuple(quad)
         mode = getattr(getattr(self, "canvas", None), "transform_mode", lambda: None)() or ""
         for act, indices in self._transform_targets():
-            for i in indices:
-                if quad == DEFAULT_QUAD:
-                    act.frame_quads.pop(i, None)
-                    if mode:
-                        act.frame_transform_modes.pop(i, None)
-                else:
-                    act.frame_quads[i] = quad
-                    if mode:
-                        act.frame_transform_modes.setdefault(i, set()).add(mode)
+            if len(indices) > 1:
+                # 整体(GIF 级)：把参考框 quad 逐帧换算成各帧自己的 quad，保持重叠
+                dist = distribute_whole_quad(act, indices, quad)
+                for i, q in dist.items():
+                    if q is None:
+                        act.frame_quads.pop(i, None)
+                        if mode:
+                            act.frame_transform_modes.pop(i, None)
+                    else:
+                        act.frame_quads[i] = q
+                        if mode:
+                            act.frame_transform_modes.setdefault(i, set()).add(mode)
+            else:
+                for i in indices:
+                    if quad == DEFAULT_QUAD:
+                        act.frame_quads.pop(i, None)
+                        if mode:
+                            act.frame_transform_modes.pop(i, None)
+                    else:
+                        act.frame_quads[i] = quad
+                        if mode:
+                            act.frame_transform_modes.setdefault(i, set()).add(mode)
             act.invalidate_transforms()
         self._transform_changed = True
         self.changed.emit()
