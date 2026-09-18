@@ -407,10 +407,12 @@ class MainWindow(QMainWindow):
             self._restoring_transform_history = False
 
     def _begin_transform_history(self) -> None:
+        self._suppress_selection_snapshot = True
         if not self._restoring_transform_history and self._transform_history_pending is None:
             self._transform_history_pending = self._capture_transform_state()
 
     def _finish_transform_history(self) -> None:
+        self._suppress_selection_snapshot = False
         if self._transform_history_pending is None:
             return
         before = self._transform_history_pending
@@ -1333,6 +1335,7 @@ class MainWindow(QMainWindow):
         # 当前帧切换 → 底部横条「微调（全部帧）」以当前帧偏移为起点
         self.preview.frame_changed.connect(self.anim_bar.set_current_frame)
         self.preview.frame_changed.connect(self._on_frame_changed)
+        self.preview.canvas.frame_offset_dragged.connect(self._on_frame_offset_dragged)
         self.image_viewer._toolbar.bg_changed.connect(lambda _mode: self._mark_project_dirty())
         self.image_viewer._toolbar.compose_toggled.connect(lambda _checked: self._mark_project_dirty())
         # 程序退出（含未走 close 的路径）也要收尾原图区与更新检查线程，
@@ -2171,6 +2174,8 @@ class MainWindow(QMainWindow):
 
     def _finish_selection_snapshot(self):
         """选择图块结束：push「上次状态 → 当前状态」。"""
+        if getattr(self, "_suppress_selection_snapshot", False):
+            return
         after = self._capture_snapshot()
         before = getattr(self, "_last_selection_state", None)
         cur = self.image_viewer.current_action
@@ -2206,6 +2211,28 @@ class MainWindow(QMainWindow):
             name = f"「{cur.name}」" if cur else ""
             self._push_snapshot(f"切换帧{name} → 帧{idx+1}")
         self._frame_snap_timer.start(300)
+
+    def _on_frame_offset_dragged(self, idx: int, nx: int, ny: int):
+        """微调帧偏移：debounce 后记录。"""
+        if not hasattr(self, "_offset_snap_timer"):
+            from PyQt6.QtCore import QTimer
+            self._offset_snap_timer = QTimer(self)
+            self._offset_snap_timer.setSingleShot(True)
+            self._offset_snap_timer.timeout.connect(self._finish_offset_snapshot)
+        if not getattr(self, "_offset_snap_before", None):
+            self._offset_snap_before = self._capture_snapshot()
+        self._offset_snap_timer.start(400)
+
+    def _finish_offset_snapshot(self):
+        before = getattr(self, "_offset_snap_before", None)
+        if before is None:
+            return
+        after = self._capture_snapshot()
+        cur = self.image_viewer.current_action
+        name = f"「{cur.name}」" if cur else ""
+        if before != after:
+            self._undo_stack.push(_SnapshotCommand(self, before, after, f"微调帧偏移{name}"))
+        self._offset_snap_before = None
 
     def _on_frames_updated(self):
         """后台检测完成后刷新动作帧和界面摘要。"""
