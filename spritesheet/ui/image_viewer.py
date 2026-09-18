@@ -24,7 +24,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QButtonGroup, QFileDialog, QGridLayout, QHBoxLayout, QPushButton, QWidget,
+    QApplication, QButtonGroup, QFileDialog, QGridLayout, QHBoxLayout, QMenu, QPushButton, QWidget,
 )
 
 from spritesheet.settings import last_directory, set_last_directory
@@ -551,6 +551,24 @@ class _Canvas(QWidget):
                         self.selection_changed.emit()
             self.update()
 
+    def contextMenuEvent(self, event):
+        """框选后右键：合并 / 合并为一整块。"""
+        action = self._viewer.current_action
+        if action is None or len(action.selected_indices) < 2:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background: #2b2b2b; color: #e8e8e8; border: 1px solid #555; }"
+            "QMenu::item:selected { background: #E91E63; }"
+        )
+        act_merge = menu.addAction("合并为一帧（拼成同一帧）")
+        act_merge_one = menu.addAction("合并为一整块（碎块捏成一个元素）")
+        chosen = menu.exec(event.globalPos())
+        if chosen is act_merge:
+            self._viewer.menu_merge_composite()
+        elif chosen is act_merge_one:
+            self._viewer.menu_merge_single_block()
+
     def _open_file_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "添加图片", last_directory(),
@@ -1069,6 +1087,84 @@ class ImageViewer(QWidget):
             if clean:
                 groups.append(clean)
         self.current_action.composite_groups = groups
+
+    # ---- 右键菜单：合并 ----
+
+    def menu_merge_composite(self) -> None:
+        """合并为一帧：把当前选中的多个元素组成一个合成组（拼在同一帧里）。"""
+        action = self.current_action
+        if action is None or len(action.selected_indices) < 2:
+            return
+        group = list(action.selected_indices)
+        # 去掉和已有组完全重复的
+        if group not in action.composite_groups:
+            action.composite_groups.append(group)
+        self._normalize_composite_groups()
+        self.crop_frames_for_action(action)
+        self.frames_updated.emit()
+        self.selection_changed.emit()
+
+    def menu_merge_single_block(self) -> None:
+        """合并为一整块：把选中的多个碎块按整体包围盒捏成一个新元素，原碎块删除。"""
+        action = self.current_action
+        if action is None or len(action.selected_indices) < 2:
+            return
+        sel = sorted(action.selected_indices)
+        # 计算整体包围盒
+        x0 = min(self._frames[i][0] for i in sel)
+        y0 = min(self._frames[i][1] for i in sel)
+        x1 = max(self._frames[i][0] + self._frames[i][2] for i in sel)
+        y1 = max(self._frames[i][1] + self._frames[i][3] for i in sel)
+        new_rect = (x0, y0, x1 - x0, y1 - y0)
+        # 被删除的旧元素索引
+        removed = set(sel)
+        # 索引重映射：旧索引 -> 新索引
+        new_index = len(self._frames)
+        mapping = {}
+        ni = 0
+        for old_i in range(len(self._frames)):
+            if old_i in removed:
+                continue
+            mapping[old_i] = ni
+            ni += 1
+        # 重建 _frames 和 _frame_logical
+        old_logical = self._frame_logical
+        new_frames = []
+        self._frame_logical = {}
+        for old_i in range(len(self._frames)):
+            if old_i in removed:
+                continue
+            new_frames.append(self._frames[old_i])
+            if old_i in old_logical:
+                self._frame_logical[mapping[old_i]] = old_logical[old_i]
+        new_frames.append(new_rect)
+        self._frames = new_frames
+        # 所有动作：重映射 selected_indices / composite_groups / frame_layouts
+        for act in self._all_actions():
+            act.selected_indices = [mapping[i] for i in act.selected_indices if i in mapping]
+            act.composite_groups = [
+                [mapping[i] for i in g if i in mapping] for g in act.composite_groups
+            ]
+            act.composite_groups = [g for g in act.composite_groups if g]
+            if act.frame_layouts:
+                new_layouts = []
+                for layout in act.frame_layouts:
+                    nl = [(mapping[i], rx, ry) for i, rx, ry in layout if i in mapping]
+                    if nl:
+                        new_layouts.append(nl)
+                act.frame_layouts = new_layouts or None
+        # 当前动作选中新元素
+        action.selected_indices = [new_index]
+        action.composite_groups = []
+        action.frame_layouts = None
+        action.frame_layouts_base = 0
+        self.crop_frames_for_action(action)
+        self.frames_updated.emit()
+        self.selection_changed.emit()
+
+    def _all_actions(self) -> list:
+        """返回所有动作（当前 viewer 所属的工程动作列表）。"""
+        return getattr(self, "actions", [])
 
     # ---- 帧复用（按钮模式 + Alt+点击 临时模式）----
 
