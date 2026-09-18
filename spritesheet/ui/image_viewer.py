@@ -569,12 +569,6 @@ class _Canvas(QWidget):
         act_merge_one = menu.addAction("合并为一整块（碎块捏成一个元素）")
         menu.addSeparator()
         act_rotate = menu.addAction("全部帧旋转 90°")
-        act_mirror = menu.addAction("全部帧水平镜像")
-        menu.addSeparator()
-        act_invert = menu.addAction("反选")
-        act_select_all = menu.addAction("全选")
-        act_clear = menu.addAction("清空选择")
-        act_remove = menu.addAction("忽略选中元素")
         menu.addSeparator()
         act_export = menu.addAction("导出选中为单独 PNG…")
 
@@ -582,9 +576,6 @@ class _Canvas(QWidget):
         act_merge.setEnabled(n_sel >= 2)
         act_merge_one.setEnabled(n_sel >= 2)
         act_rotate.setEnabled(n_frames >= 1)
-        act_mirror.setEnabled(n_frames >= 1)
-        act_clear.setEnabled(n_sel >= 1)
-        act_remove.setEnabled(n_sel >= 1)
         act_export.setEnabled(n_frames >= 1)
 
         chosen = menu.exec(event.globalPos())
@@ -596,16 +587,6 @@ class _Canvas(QWidget):
             self._viewer.menu_merge_single_block()
         elif chosen is act_rotate:
             self._viewer.menu_rotate_all_frames(90)
-        elif chosen is act_mirror:
-            self._viewer.menu_mirror_all_frames()
-        elif chosen is act_invert:
-            self._viewer.menu_invert_selection()
-        elif chosen is act_select_all:
-            self._viewer.menu_select_all()
-        elif chosen is act_clear:
-            self._viewer.menu_clear_selection()
-        elif chosen is act_remove:
-            self._viewer.menu_remove_selected_elements()
         elif chosen is act_export:
             self._viewer.menu_export_selected_png()
 

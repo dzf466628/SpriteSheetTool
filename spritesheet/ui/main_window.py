@@ -2543,13 +2543,19 @@ class MainWindow(QMainWindow):
 
     def _on_action_performed(self, text: str):
         """右键菜单操作：用具体文字记录到当前动作栈。"""
-        if self.image_viewer.current_action:
-            self.image_viewer.crop_frames_for_action(self.image_viewer.current_action)
-            self.preview.set_action(self.image_viewer.current_action)
-            self._transform_history_state = self._capture_transform_state()
-            cur = self.image_viewer.current_action
-            name = f"「{cur.name}」" if cur else ""
-            self._schedule_per_action_snapshot(f"{text}{name}")
+        if self.image_viewer.current_action is None:
+            return
+        # 数据已在右键方法里改完，before 用上次落账状态；先抓 before 再刷新界面
+        before = self._last_snapshot_state
+        after = self._capture_snapshot()
+        self.image_viewer.crop_frames_for_action(self.image_viewer.current_action)
+        self.preview.set_action(self.image_viewer.current_action)
+        self._transform_history_state = self._capture_transform_state()
+        cur = self.image_viewer.current_action
+        name = f"「{cur.name}」" if cur else ""
+        if before is not None and before != after:
+            self._active_stack().push(_SnapshotCommand(self, before, after, f"{text}{name}"))
+        self._last_snapshot_state = after
 
     # ------------------------------------------------------------- 动作内统一记录
     def _schedule_per_action_snapshot(self, text: str) -> None:
