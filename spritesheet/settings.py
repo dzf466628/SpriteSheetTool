@@ -21,6 +21,7 @@ APP_NAME = "SpriteSheetTool"
 
 KEY_SHOW_THUMBNAIL = "project/show_thumbnail"
 KEY_LAST_DIR = "files/last_directory"
+KEY_DETECT_MIN_AREA = "detect/min_area"
 
 
 def _settings() -> QSettings:
@@ -78,3 +79,20 @@ def set_last_directory(path: str | os.PathLike | None) -> None:
             _settings().setValue(KEY_LAST_DIR, str(target))
     except Exception as e:  # noqa: BLE001
         print(f"[settings] 写入 {KEY_LAST_DIR} 失败: {e}", file=sys.stderr)
+
+
+def detect_min_area() -> int:
+    """自动识别时忽略的最小碎片面积（像素）。默认 4。"""
+    try:
+        value = int(_settings().value(KEY_DETECT_MIN_AREA, 4))
+    except Exception as e:  # noqa: BLE001
+        print(f"[settings] 读取 {KEY_DETECT_MIN_AREA} 失败: {e}", file=sys.stderr)
+        return 4
+    return max(0, value)
+
+
+def set_detect_min_area(value: int) -> None:
+    try:
+        _settings().setValue(KEY_DETECT_MIN_AREA, max(0, int(value)))
+    except Exception as e:  # noqa: BLE001
+        print(f"[settings] 写入 {KEY_DETECT_MIN_AREA} 失败: {e}", file=sys.stderr)

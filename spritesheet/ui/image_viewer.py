@@ -41,6 +41,7 @@ NO_ACTION_HINT = "请先添加动作：点左侧「+ 添加动作」"
 
 
 def _detect_frames_image(img: QImage, alpha_threshold: int = 10,
+                         min_area: int = 0,
                          cancel=None) -> list[tuple[int, int, int, int]]:
     """在工作线程中检测 QImage 的连通区域（行程 + 并查集）。
 
@@ -146,7 +147,10 @@ def _detect_frames_image(img: QImage, alpha_threshold: int = 10,
               box[0], box[1], box[2] - box[0] + 1, box[3] - box[1] + 1)
              for root, box in boxes.items()]
     found.sort(key=lambda f: (f[0], f[1]))   # 与逐像素扫描的发现顺序一致
-    return [(left, top, width, height) for _, _, left, top, width, height in found]
+    result = [(left, top, width, height) for _, _, left, top, width, height in found]
+    if min_area > 0:
+        result = [r for r in result if r[2] * r[3] >= min_area]
+    return result
 
 
 class _FrameDetectThread(QThread):
@@ -158,16 +162,17 @@ class _FrameDetectThread(QThread):
 
     detected = pyqtSignal(list)
 
-    def __init__(self, image: QImage, parent=None) -> None:
+    def __init__(self, image: QImage, min_area: int = 0, parent=None) -> None:
         super().__init__(parent)
         self._image = image
+        self._min_area = min_area
         self._cancelled = threading.Event()
 
     def cancel(self) -> None:
         self._cancelled.set()
 
     def run(self) -> None:
-        frames = _detect_frames_image(self._image, cancel=self._cancelled.is_set)
+        frames = _detect_frames_image(self._image, min_area=self._min_area, cancel=self._cancelled.is_set)
         if self._cancelled.is_set():
             return                       # 已取消：不再向可能正在析构的对象发信号
         self.detected.emit(frames)
@@ -925,7 +930,8 @@ class ImageViewer(QWidget):
         """异步检测元素，避免大图 flood fill 阻塞 UI 线程。"""
         self._detect_generation += 1
         generation = self._detect_generation
-        thread = _FrameDetectThread(image.copy(), self)
+        from spritesheet.settings import detect_min_area
+        thread = _FrameDetectThread(image.copy(), min_area=detect_min_area(), parent=self)
         self._detect_thread = thread
         self._detect_threads.add(thread)
 

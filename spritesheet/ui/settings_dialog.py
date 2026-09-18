@@ -13,10 +13,13 @@
 from __future__ import annotations
 
 from PyQt6.QtWidgets import (
-    QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout,
+    QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout,
 )
 
-from spritesheet.settings import set_show_project_thumbnail, show_project_thumbnail
+from spritesheet.settings import (
+    detect_min_area, set_detect_min_area,
+    set_show_project_thumbnail, show_project_thumbnail,
+)
 
 
 class SettingsDialog(QDialog):
@@ -59,9 +62,40 @@ class SettingsDialog(QDialog):
         line.setStyleSheet("color: #3d3d3d;")
         layout.addWidget(line)
 
-        title2 = QLabel("更新")
+        title2 = QLabel("自动识别")
         title2.setStyleSheet("color: #F06292; font-weight: bold; font-size: 13px;")
         layout.addWidget(title2)
+
+        row_min = QHBoxLayout()
+        row_min.addWidget(QLabel("忽略小于"))
+        self.spin_min_area = QSpinBox()
+        self.spin_min_area.setRange(0, 10000)
+        self.spin_min_area.setSingleStep(1)
+        self.spin_min_area.setValue(detect_min_area())
+        self.spin_min_area.setFixedWidth(80)
+        self.spin_min_area.valueChanged.connect(self._on_min_area_changed)
+        row_min.addWidget(self.spin_min_area)
+        row_min.addWidget(QLabel("像素²的碎片"))
+        row_min.addStretch()
+        layout.addLayout(row_min)
+
+        hint_min = QLabel(
+            "自动识别图块时，面积小于此值的连通区域会被当作噪点忽略。\n"
+            "0 = 不过滤。改完对下次打开图片/重新识别生效。"
+        )
+        hint_min.setWordWrap(True)
+        hint_min.setStyleSheet("color: #9a9a9a; font-size: 11px;")
+        hint_min.setContentsMargins(22, 0, 0, 0)
+        layout.addWidget(hint_min)
+
+        line2 = QFrame()
+        line2.setFrameShape(QFrame.Shape.HLine)
+        line2.setStyleSheet("color: #3d3d3d;")
+        layout.addWidget(line2)
+
+        title3 = QLabel("更新")
+        title3.setStyleSheet("color: #F06292; font-weight: bold; font-size: 13px;")
+        layout.addWidget(title3)
 
         row = QHBoxLayout()
         self.btn_update = QPushButton("检查更新")
@@ -90,6 +124,9 @@ class SettingsDialog(QDialog):
 
     def _on_thumbnail_toggled(self, checked: bool) -> None:
         set_show_project_thumbnail(checked)
+
+    def _on_min_area_changed(self, value: int) -> None:
+        set_detect_min_area(value)
 
     def _on_check_update(self) -> None:
         if self._check_update is not None:
