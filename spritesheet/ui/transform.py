@@ -110,7 +110,8 @@ def _trim_transparent(pm: QPixmap) -> tuple[QPixmap, QRect]:
 
 
 def transform_frame_pixmap(pm: QPixmap, rotation: int, mirror_h: bool, mirror_v: bool,
-                           quad: tuple | None = None, rotation_pivot=None) -> QPixmap:
+                           quad: tuple | None = None, rotation_pivot=None,
+                           fast: bool = False) -> QPixmap:
     """把一帧按 镜像H → 镜像V → 旋转 → 自由四边形(quad) 顺序变换，返回新图（无变换时原样返回）。
 
     镜像与 90° 整数倍旋转使用 FastTransformation（精确像素、不插值），
@@ -118,6 +119,11 @@ def transform_frame_pixmap(pm: QPixmap, rotation: int, mirror_h: bool, mirror_v:
     quad 为归一化 (0-1) 四角坐标，相对"镜像+旋转后的帧"，
     缺省或等于 DEFAULT_QUAD 时不透视。
     预览、缩略图、GIF、图集/JSON 导出全部使用同一函数，保证所见即所得。
+
+    fast=True 用于交互拖动：跳过两次全像素透明裁剪（_alpha_bounds 对大图约
+    2.6ms/次，多帧整体拖动时每帧扫两遍会占满主线程导致卡顿），直接返回变换
+    包围盒像素；中心对称绘制下视觉与精算一致，松手后调用方再以 fast=False
+    精算并缓存（含裁剪），保证最终尺寸/导出精确。
     """
     if not pm or pm.isNull():
         return pm
@@ -136,7 +142,8 @@ def transform_frame_pixmap(pm: QPixmap, rotation: int, mirror_h: bool, mirror_v:
     # Normalize the content bounds before a quad transform. This makes the
     # quad coordinates describe the visible frame, not transparent source
     # padding, and ensures transformed frames do not carry old blank margins.
-    if transformed:
+    # 交互拖动(fast)跳过这次全像素扫描，直接用变换包围盒。
+    if transformed and not fast:
         pm, _ = _trim_transparent(pm)
     if quad is not None and tuple(quad) != DEFAULT_QUAD:
         w, h = pm.width(), pm.height()
@@ -146,12 +153,17 @@ def transform_frame_pixmap(pm: QPixmap, rotation: int, mirror_h: bool, mirror_v:
         m = QTransform()
         if QTransform.quadToQuad(src, dst, m) and m.isInvertible():
             pm = pm.transformed(m, Qt.TransformationMode.SmoothTransformation)
-        pm, _ = _trim_transparent(pm)
+        if not fast:
+            pm, _ = _trim_transparent(pm)
     return pm
 
 
-def action_frame_pixmap(action: Action, index: int) -> QPixmap:
-    """返回第 index 帧应用变换并收缩透明边界后的显示像素（带缓存）。"""
+def action_frame_pixmap(action: Action, index: int, fast: bool = False) -> QPixmap:
+    """返回第 index 帧应用变换并收缩透明边界后的显示像素（带缓存）。
+
+    fast=True（交互拖动）跳过透明裁剪、且结果不写入缓存，避免包围盒临时
+    结果污染精算缓存；fast=False 走完整管线并按变换键缓存。
+    """
     if not (0 <= index < len(action.frames)):
         return QPixmap()
     quad = action.frame_quads.get(index)
@@ -159,11 +171,14 @@ def action_frame_pixmap(action: Action, index: int) -> QPixmap:
     key = (index, action.frame_rotations.get(index, 0),
            index in action.frame_mirror_h, index in action.frame_mirror_v,
            tuple(pivot), quad)
-    cached = action._transform_cache.get(key)
-    if cached is not None:
-        return cached
-    pm = transform_frame_pixmap(action.frames[index], key[1], key[2], key[3], quad, pivot)
-    action._transform_cache[key] = pm
+    if not fast:
+        cached = action._transform_cache.get(key)
+        if cached is not None:
+            return cached
+    pm = transform_frame_pixmap(action.frames[index], key[1], key[2], key[3], quad, pivot,
+                                fast=fast)
+    if not fast:
+        action._transform_cache[key] = pm
     return pm
 
 

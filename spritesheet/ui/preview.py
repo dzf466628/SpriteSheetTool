@@ -268,6 +268,13 @@ class PreviewCanvas(QWidget):
     def _paint_layout(self):
         """绘制用的布局：冻结期间 = 冻结布局 + 当前帧的偏移增量。"""
         if self._frozen_layout is None:
+            # 整体(GIF级)变换手柄拖动期间复用拖动开始时的布局快照：否则每次
+            # 重绘都会 compute_preview_layout 对全部帧做精算（每帧透明裁剪，
+            # 18 帧上百 ms），是整体缩放/斜切卡顿的根因。拖动绘制以 _drag_whole
+            # 的固定中心为准、松手(_end_drag 清 _drag_layout)后再重算居中。
+            # 单帧路径(_whole_active False)保持每帧重算（仅一帧，不卡）。
+            if self._drag_layout is not None and self._whole_active():
+                return self._drag_layout
             return self._current_layout()
         canvas_w, canvas_h, positions, meta = self._frozen_layout
         idxs = self._frozen_indices or [self._frozen_index]
@@ -1104,10 +1111,13 @@ class PreviewCanvas(QWidget):
             ccx, ccy = fr[4], fr[5]
         opacity = self._action.frame_opacity
         main_rect = None
+        # 整体手柄拖动中每帧都要重绘：用 fast（跳过全像素透明裁剪）保证跟手；
+        # 松手(_drag_kind 清空)后自动回到精算路径并缓存。
+        fast = bool(self._drag_kind) and self._whole_active()
         for i in self._transform_indices:
             if not (0 <= i < len(self._action.frames)):
                 continue
-            pm = action_frame_pixmap(self._action, i)
+            pm = action_frame_pixmap(self._action, i, fast=fast)
             fw, fh = pm.width(), pm.height()
             rect = QRectF(cx + (ccx - fw / 2.0) * scale,
                           cy + (ccy - fh / 2.0) * scale,
@@ -1121,7 +1131,7 @@ class PreviewCanvas(QWidget):
         if main_rect is None and self._transform_indices:
             # 当前帧不在目标集合（理论不会）：用第一个目标帧占位居中
             i = self._transform_indices[0]
-            pm = action_frame_pixmap(self._action, i)
+            pm = action_frame_pixmap(self._action, i, fast=fast)
             main_rect = QRectF(cx + (ccx - pm.width() / 2.0) * scale,
                                cy + (ccy - pm.height() / 2.0) * scale,
                                pm.width() * scale, pm.height() * scale)
@@ -2200,6 +2210,8 @@ class ActionPreviewWidget(QWidget):
         # 参照帧模式下鼠标拖动当前帧：同步右侧偏移控件显示
         self.canvas.frame_offset_dragged.connect(self._on_canvas_frame_dragged)
         self.adjust_panel.changed.connect(self._on_adjust_changed)
+        # 变换手柄松手后补刷拖动期间挂起的缩略图
+        self.canvas.transform_edit_finished.connect(self._on_transform_edit_finished)
         scroll.setWidget(self.adjust_panel)
         lower_layout.addWidget(scroll, 1)
 
@@ -2512,11 +2524,34 @@ class ActionPreviewWidget(QWidget):
                 # 拖动变换手柄期间保持视图缩放稳定，避免每帧重新自适应导致跳动
                 self.canvas._apply_fit()
             self.canvas.update()
-            self.adjust_panel._refresh_canvas_label()
-            # 旋转/镜像变化后同步帧缩略图
+            if self.canvas._drag_kind is not None:
+                # 变换手柄拖动中 _refresh_canvas_label 会 compute_preview_layout
+                # 对全部帧做精算（每帧透明裁剪），仅为刷新一个尺寸文本，每帧跑会
+                # 拖垮交互；这里只标脏，松手(_on_transform_edit_finished)再补刷。
+                # 注意：整体平移走 _frame_drag_active 而非 _drag_kind，不受影响，
+                # 偏移数值仍实时跟随。
+                self._label_dirty = True
+            else:
+                self.adjust_panel._refresh_canvas_label()
+            # 旋转/镜像/四边形变化后同步帧缩略图。但拖动手柄期间每次 mouseMove
+            # 都会走到这里，重建全部缩略图（每帧全分辨率精算+透明裁剪，18 帧约
+            # 上百 ms）会把拖动卡死；拖动中只标脏、松手(_on_transform_edit_finished)
+            # 后补刷一次即可。
             if getattr(self.adjust_panel, "_transform_changed", False):
                 self.adjust_panel._transform_changed = False
-                self._refresh_thumbs()
+                if self.canvas._drag_kind is not None:
+                    self._thumbs_dirty = True
+                else:
+                    self._refresh_thumbs()
+
+    def _on_transform_edit_finished(self) -> None:
+        """变换手柄松手：补刷拖动期间挂起的帧缩略图与画布尺寸标签。"""
+        if getattr(self, "_thumbs_dirty", False):
+            self._thumbs_dirty = False
+            self._refresh_thumbs()
+        if getattr(self, "_label_dirty", False):
+            self._label_dirty = False
+            self.adjust_panel._refresh_canvas_label()
 
     def _on_export_clicked(self) -> None:
         # 导出产物以当前标签页的工程名开头（也用于"超过两个文件就装进同名文件夹"）

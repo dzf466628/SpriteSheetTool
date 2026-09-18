@@ -159,11 +159,29 @@ print("=== 拖动稳定性：all 缩放拖动中不弹起 ===")
 ab["scale"].click(); wait(20)
 pts = canvas._handles_canvas(canvas._current_mo())
 p0 = canvas._logical_to_screen(pts[0]).toPoint()
+# 计数缩略图重建（性能回归：拖动中不得重建，松手补刷一次）
+pv = win.preview
+_calls = {"n": 0}
+_orig_populate = pv._populate_thumbs
+def _counting_populate(*a, **k):
+    _calls["n"] += 1
+    return _orig_populate(*a, **k)
+pv._populate_thumbs = _counting_populate
 QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=p0)
 QTest.mouseMove(canvas, pos=p0 + QPoint(-20, -12))
 check("拖动中模式保持", canvas.transform_mode() == "scale" and canvas._drag_kind == "corner")
-QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=p0 + QPoint(-20, -12))
+# 性能：整体手柄拖动中绘制必须复用拖动布局快照（否则每帧对全部帧透明裁剪，卡顿）
+check("拖动中布局冻结（不全帧重算）",
+      canvas._drag_layout is not None and canvas._paint_layout() is canvas._drag_layout)
+QTest.mouseMove(canvas, pos=p0 + QPoint(-30, -18))
+check("拖动中不重建缩略图", _calls["n"] == 0, f"rebuild={_calls['n']}")
+check("拖动中画布尺寸标签挂起", getattr(pv, "_label_dirty", False) is True)
+QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=p0 + QPoint(-30, -18))
 check("松手后模式保持", canvas.transform_mode() == "scale")
+wait(80)
+check("松手后补刷一次缩略图", _calls["n"] == 1, f"rebuild={_calls['n']}")
+check("松手后画布尺寸标签已补刷", getattr(pv, "_label_dirty", False) is False)
+pv._populate_thumbs = _orig_populate
 reset_all_transforms()
 
 print("=== all 整体平移：所有帧一起移动、拖动/松手一致、入账 ===")
