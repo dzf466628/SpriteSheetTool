@@ -443,6 +443,12 @@ class MainWindow(QMainWindow):
             self._last_selection_state = None
             self._offset_snap_before = None
             self._snapshot_before = None
+            # unblock 后重建帧图并刷新预览
+            cur = self.image_viewer.current_action
+            if cur in self.actions:
+                self.image_viewer.crop_frames_for_action(cur)
+                self.preview.set_action(cur)
+                self.preview.canvas.update()
 
     def _begin_transform_history(self) -> None:
         self._suppress_selection_snapshot = True
