@@ -681,6 +681,9 @@ class MainWindow(QMainWindow):
         snap = {
             "current_only": current_only,
             "current_index": cur_idx,
+            # 改名/改色等 current_only 快照记录焦点动作的对象 id：
+            # 恢复时按 id 定位动作，避免添加/删除动作导致索引漂移后错位。
+            "focus_action_id": id(cur) if current_only and cur_idx >= 0 else None,
             "actions": actions,
             "viewer": {
                 "frames": [list(r) for r in viewer._frames],
@@ -748,11 +751,22 @@ class MainWindow(QMainWindow):
             cur_idx = snap.get("current_index", -1)
             raw_list = snap.get("actions", [])
 
-            if current_only and cur_idx >= 0 and cur_idx < len(self.actions):
-                # 只恢复当前动作，不动其他动作（该动作自己的 undo 栈原样保留）
+            if current_only and cur_idx >= 0:
+                # 只恢复焦点动作，不动其他动作（该动作自己的 undo 栈原样保留）。
+                # 优先按快照里的动作 id 定位：改名/改色后若添加/删除了其他动作，
+                # 索引会漂移，按 cur_idx 会恢复到错误的动作上（别的动作被改名变色）。
+                target = None
+                focus_id = snap.get("focus_action_id")
+                if focus_id is not None:
+                    for candidate in self.actions:
+                        if id(candidate) == focus_id:
+                            target = candidate
+                            break
+                if target is None and cur_idx < len(self.actions):
+                    target = self.actions[cur_idx]
                 raw = raw_list[cur_idx] if cur_idx < len(raw_list) else None
-                if raw:
-                    action = self.actions[cur_idx]
+                if target is not None and raw:
+                    action = target
                     self._apply_action_data(action, raw)
                     viewer.crop_frames_for_action(action)
                     # 刷新左侧动作卡片（名字/颜色）
@@ -2148,9 +2162,28 @@ class MainWindow(QMainWindow):
             self.preview.set_action(None)
 
         total_frames = 0
+        # 动作名/颜色在工程内唯一：导入的 JSON 可能带重名/同色动作，
+        # append 模式下还要避开已有动作；否则卡片无法区分、导出语义混乱。
+        used_names = {a.name for a in self.actions}
+        used_colors = {a.color for a in self.actions}
         for ai, imported in enumerate(project.actions):
-            color = imported.color or MACARON_COLORS[ai % len(MACARON_COLORS)]
-            action = Action(imported.name, color)
+            color = imported.color or ""
+            if color in used_colors or not color:
+                for c in MACARON_COLORS:
+                    if c not in used_colors:
+                        color = c
+                        break
+            if not color:
+                color = "#E91E63"
+            name = imported.name
+            if name in used_names:
+                n2 = 2
+                while f"{name}{n2}" in used_names:
+                    n2 += 1
+                name = f"{name}{n2}"
+            action = Action(name, color)
+            used_names.add(name)
+            used_colors.add(color)
             # 导入的动作也要有自己的独立 undo 栈：否则它的选择/变换/偏移会被
             # 记到全局栈上（归属错乱），历史面板也不会有它的分组
             action.undo_stack = QUndoStack(self)
@@ -2443,6 +2476,13 @@ class MainWindow(QMainWindow):
         self._history_panel.rebuild()
 
     def _on_action_color_changed(self, action: Action, color: str):
+        # 颜色在工程内唯一：撞色时自动换成未使用的色板颜色
+        used = {a.color for a in self.actions if a is not action}
+        if color in used:
+            for c in MACARON_COLORS:
+                if c not in used:
+                    color = c
+                    break
         self._push_snapshot(f"改动作颜色「{action.name}」→ {color}", focus_action=action)
         action.color = color
         if self.image_viewer.current_action is action:
@@ -2452,6 +2492,13 @@ class MainWindow(QMainWindow):
         self._push_snapshot_done()
 
     def _on_action_name_changed(self, action: Action, name: str):
+        # 动作名在工程内唯一：改成重名时自动跳号（保持其它动作名字不动）
+        used = {a.name for a in self.actions if a is not action}
+        if name in used:
+            n2 = 2
+            while f"{name}{n2}" in used:
+                n2 += 1
+            name = f"{name}{n2}"
         self._push_snapshot(f"改动作名「{action.name}」→「{name}」", focus_action=action)
         action.name = name
         self._mark_project_dirty()
