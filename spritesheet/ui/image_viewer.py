@@ -562,6 +562,9 @@ class _Canvas(QWidget):
         )
         n_sel = len(action.selected_indices) if action else 0
         n_frames = len(action.frames) if action else 0
+        # 右键所指的那个元素：「取消选中」只取消它，保留其他选中
+        hit_index = self._viewer._frame_at_point(event.position()) if action else -1
+        hit_selected = hit_index >= 0 and hit_index in set(action.selected_indices)
 
         act_actual = menu.addAction("实际像素 (100%)")
         menu.addSeparator()
@@ -581,7 +584,7 @@ class _Canvas(QWidget):
         act_merge_one.setEnabled(n_sel >= 2)
         act_ignore.setEnabled(n_sel >= 1)
         act_clear.setEnabled(n_sel >= 1)
-        act_remove.setEnabled(n_sel >= 1)
+        act_remove.setEnabled(hit_selected)
         act_export.setEnabled(n_frames >= 1)
 
         chosen = menu.exec(event.globalPos())
@@ -600,7 +603,7 @@ class _Canvas(QWidget):
         elif chosen is act_clear:
             self._viewer.menu_clear_selection()
         elif chosen is act_remove:
-            self._viewer.menu_remove_selected_elements()
+            self._viewer.menu_remove_selected_elements(hit_index)
         elif chosen is act_export:
             self._viewer.menu_export_selected_png()
 
@@ -1286,12 +1289,17 @@ class ImageViewer(QWidget):
         self.frames_updated.emit()
         self.action_performed.emit("清空选择")
 
-    def menu_remove_selected_elements(self) -> None:
-        """取消选中：从当前动作移除（不从工程删除，以后还能选回）。"""
+    def menu_remove_selected_elements(self, only_index: int | None = None) -> None:
+        """取消选中：只把右键所指的那个元素移出当前动作（不从工程删除，以后还能选回）。
+
+        只取消鼠标当前对着的单个元素，保留其他选中；与「清空选择」区分。
+        """
         action = self.current_action
         if action is None or not action.selected_indices:
             return
-        ignored = set(action.selected_indices)
+        if only_index is None or only_index not in action.selected_indices:
+            return
+        ignored = {only_index}
         action.selected_indices = [i for i in action.selected_indices if i not in ignored]
         action.composite_groups = [
             [i for i in g if i not in ignored] for g in action.composite_groups

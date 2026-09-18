@@ -179,15 +179,20 @@ def main() -> int:
           f"实际: {canvas.transform_mode()!r}")
     check("空白点击后底部按钮弹回", not ab["rotate"].isChecked())
 
-    print("=== 需求4: 取消选中 ===")
+    print("=== 需求4: 取消选中（只取消鼠标所指单个）===")
     seen = []
     win.image_viewer.action_performed.connect(seen.append)
-    sel = [i for i in range(n) if i not in win.image_viewer._ignored_frames]
-    action.selected_indices = sel[:2]
-    win.image_viewer.menu_remove_selected_elements()
+    action.selected_indices = [0, 1]
+    win.image_viewer.crop_frames_for_action(action)
+    win.image_viewer.menu_remove_selected_elements(0)
     check("历史记录文字为「取消选中」", seen and seen[-1] == "取消选中",
           f"实际: {seen}")
-    check("取消选中后当前动作移除选中", not action.selected_indices)
+    check("只取消所指元素0、元素1保留", action.selected_indices == [1],
+          f"实际: {action.selected_indices}")
+    before = list(action.selected_indices)
+    win.image_viewer.menu_remove_selected_elements(5)  # 未选中/越界 = no-op
+    check("取消未命中元素为 no-op", action.selected_indices == before,
+          f"实际: {action.selected_indices}")
 
     print("=== 需求5: 忽略选中区域 ===")
     viewer = win.image_viewer
