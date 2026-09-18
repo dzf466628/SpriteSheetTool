@@ -144,15 +144,24 @@ check("quad 围绕中心对称", is_centered(q0), f"q0={q0}")
 check("未选中帧 3 无 quad", action.frame_quads.get(3) is None)
 reset_all_transforms()
 
-print("=== 单帧缩放：保持对角锚定（原行为）===")
+print("=== 单帧缩放：默认以红色锚点为不动点；Alt = 对角固定（原行为）===")
 win.preview.thumb_list.clearSelection()
 wait(30)
 drag_corner(lambda: panel._on_mode_button("scale", True), dx=-40, dy=-24)
 q = action.frame_quads.get(0)
 check("单帧 quad 已写入", q is not None, f"{q}")
-# 对角锚定：被拖的左上移动，对角右下≈(1,1) 固定，不要求中心对称
-check("单帧为对角锚定（右下近似固定）", q is not None and abs(q[4] - 1.0) < 0.02 and abs(q[5] - 1.0) < 0.02,
-      f"q={q}")
+# 锚点默认在正中心 -> 缩放围绕中心，四角等量内收/外扩（Aseprite / PS 参考点行为）
+check("单帧缩放围绕红色锚点（中心对称）", q is not None and is_centered(q), f"q={q}")
+reset_all_transforms()
+
+# 按住 Alt（无头环境直接关掉开关）= 老手感：对角固定
+canvas._scale_uses_pivot = lambda kind: False
+drag_corner(lambda: panel._on_mode_button("scale", True), dx=-40, dy=-24)
+q_alt = action.frame_quads.get(0)
+check("Alt 时保留对角锚定（右下近似固定）",
+      q_alt is not None and abs(q_alt[4] - 1.0) < 0.02 and abs(q_alt[5] - 1.0) < 0.02,
+      f"q={q_alt}")
+del canvas._scale_uses_pivot
 reset_all_transforms()
 
 print("=== 拖动稳定性：all 缩放拖动中不弹起 ===")

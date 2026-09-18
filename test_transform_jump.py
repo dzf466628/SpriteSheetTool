@@ -57,13 +57,15 @@ def check(name, cond, detail=""):
 # ---------------- 素材与接线 ----------------
 
 def make_pm(w=W, h=H, inset=0, marks=()):
-    """蓝块 + 品红标记；标记像素就是"源图里的旋转中心"。"""
+    """蓝块 + 品红标记；标记**中心精确等于** (mx,my)（4x4 块跨 [mx-2,mx+2)），
+    这样它才能当"锚点所在点"的精确探针 —— 5x5 块的中心会偏 0.5px，
+    被非等比缩放放大后能差好几个像素，把测试自己带偏。"""
     pm = QPixmap(w, h)
     pm.fill(QColor(0, 0, 0, 0))
     qp = QPainter(pm)
     qp.fillRect(QRectF(inset, inset, w - 2 * inset, h - 2 * inset), QColor(60, 120, 220, 255))
     for mx, my in marks:
-        qp.fillRect(QRectF(mx - 2, my - 2, 5, 5), QColor(255, 0, 255, 255))
+        qp.fillRect(QRectF(mx - 2, my - 2, 4, 4), QColor(255, 0, 255, 255))
     qp.end()
     return pm
 
@@ -514,6 +516,80 @@ check("地面线偏移数值同样左对齐",
       bool(bar.lbl_ground_offset.alignment() & Qt.AlignmentFlag.AlignLeft) and
       bar.lbl_ground_offset.maximumWidth() > 25,
       f"alignment={int(bar.lbl_ground_offset.alignment())} max={bar.lbl_ground_offset.maximumWidth()}")
+
+# ================= 11. 变换必须真的绕红色锚点 =================
+# 做法：在源图"锚点像素"处画一个品红标记；变换前后这个标记的屏幕位置必须
+# 基本不动（它是旋转/缩放的不动点），否则就是"没按锚点来"。
+print("11. 旋转/缩放必须以红色锚点为不动点（标记点不动）：")
+
+
+def anchor_case(nframes, mode, act):
+    """返回 (标记点位移, 红点位移)。act(c, a) 里执行一次真实拖动。"""
+    wd = ActionPreviewWidget()
+    wd.resize(1000, 800)
+    a = Action("anchor")
+    a.frames = [make_pm(marks=[(60, 78)]) for _ in range(nframes)]
+    a.padding = 14
+    a.bg_mode = "white"
+    for i in range(nframes):
+        a.frame_rotation_pivots[i] = (60 / W, 78 / H)      # 锚点在脚底
+    wd.set_actions([a])
+    wd.set_action(a)
+    c = wd.canvas
+    c.setMinimumWidth(640)
+    c.setMinimumHeight(520)
+    c.setMaximumHeight(520)
+    app.processEvents()
+    c._apply_fit()
+    wire(c, a)
+    if nframes > 1:
+        wd.adjust_panel.enter_transform_mode_all(mode)
+    else:
+        wd.adjust_panel._on_mode_button(mode, True)
+    assert c.transform_mode() == mode, f"没进变换模式: {c.transform_mode()}"
+    m0, x0 = measure(c)[1], measure(c)[2]
+    act(c, a)
+    m1, x1 = measure(c)[1], measure(c)[2]
+    if m0 is None or m1 is None or x0 is None or x1 is None:
+        return None, None
+    return (math.hypot(m1["bx"] - m0["bx"], m1["by"] - m0["by"]),
+            math.hypot(x1["bx"] - x0["bx"], x1["by"] - x0["by"]))
+
+
+def drag_rotate_at(c, deg):
+    cs, rs = rotate_ref(c)
+    c._begin_drag("rotate", -1, QPointF(cs.x(), cs.y() - rs))
+    c._update_drag(QPointF(cs.x() + rs * math.sin(math.radians(deg)),
+                           cs.y() - rs * math.cos(math.radians(deg))))
+
+
+def drag_corner_at(c, k, dx, dy):
+    ht = c._whole_handles() if c._whole_active() else c._handles_canvas(c._current_mo())
+    s = c._logical_to_screen(ht[k])
+    c._begin_drag("corner", k, s)
+    c._update_drag(s + QPointF(dx * c._zoom, dy * c._zoom))
+
+
+for frames, tag in ((1, "单帧"), (3, "整体3帧")):
+    md, xd = anchor_case(frames, "rotate", lambda c, a: drag_rotate_at(c, 45))
+    check(f"{tag} 旋转 45°：锚点处的内容不动(<2px)", md is not None and md < 2.0,
+          f"标记位移={None if md is None else round(md, 2)}px")
+    md, xd = anchor_case(frames, "scale", lambda c, a: drag_corner_at(c, 2, 40, 30))
+    check(f"{tag} 缩放拖角：锚点处的内容不动(<2px)", md is not None and md < 2.0,
+          f"标记位移={None if md is None else round(md, 2)}px")
+
+# Alt = 老行为（对角固定）：锚点会跟着动，这里只确认这条路还在、可用
+def _alt_case(c, a):
+    ht = c._handles_canvas(c._current_mo())
+    s = c._logical_to_screen(ht[2])
+    c._scale_uses_pivot = lambda kind: False     # 等价于按住 Alt（无头环境读不到修饰键）
+    c._begin_drag("corner", 2, s)
+    c._update_drag(s + QPointF(40 * c._zoom, 30 * c._zoom))
+
+
+md_alt, _ = anchor_case(1, "scale", _alt_case)
+check("Alt(对角固定)路径仍可用（锚点会动）", md_alt is not None and md_alt > 3.0,
+      f"标记位移={None if md_alt is None else round(md_alt, 2)}px（预期明显移动）")
 
 print(f"\n结果: {PASS} passed, {FAIL} failed")
 sys.exit(0 if FAIL == 0 else 1)

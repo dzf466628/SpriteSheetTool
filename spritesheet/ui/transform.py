@@ -201,6 +201,92 @@ def transform_frame_pixmap(pm: QPixmap, rotation: int, mirror_h: bool, mirror_v:
     return pm
 
 
+def frame_pivot_output(action: Action, index: int) -> tuple[float, float]:
+    """第 index 帧：旋转中心在该帧"镜像+旋转并裁剪后"基图里的坐标。
+
+    必须与 ``transform_frame_pixmap`` 逐像素同管线，否则红色锚点画的位置和实际
+    旋转围绕的点不一致，旋转/缩放就会"不按锚点来"。
+
+    两个历史坑：
+    ① 无旋转无镜像时 ``transform_frame_pixmap`` 的 ``transformed=False``，
+       **不裁剪**透明边；这里若额外裁剪，锚点会偏出一圈透明边（约 2px）。
+    ② 任意角度旋转时 ``QPixmap.transformed`` 输出图的平移量是
+       ``-floor(映射外接矩形左上)``（整数），不是理论浮点 min_pt。
+
+    结果按 (帧号, 角度, 镜像, 旋转中心) 缓存在 action 上，``invalidate_transforms``
+    一起失效 —— 整体变换绘制要对每一帧求它，不能每次重绘都重算。
+    """
+    if not (0 <= index < len(action.frames)):
+        return (0.0, 0.0)
+    src = action.frames[index]
+    src_w, src_h = src.width(), src.height()
+    pivot = action.frame_rotation_pivots.get(index, DEFAULT_ROTATION_PIVOT)
+    angle = int(action.frame_rotations.get(index, 0)) % 360
+    mh = index in action.frame_mirror_h
+    mv = index in action.frame_mirror_v
+    transformed = bool(mh or mv or angle)
+    cache = getattr(action, "_pivot_out_cache", None)
+    ckey = (index, angle, mh, mv, tuple(pivot))
+    if cache is not None:
+        hit = cache.get(ckey)
+        if hit is not None:
+            return hit
+
+    pm = src
+    if mh:
+        pm = pm.transformed(QTransform().scale(-1.0, 1.0), Qt.TransformationMode.FastTransformation)
+    if mv:
+        pm = pm.transformed(QTransform().scale(1.0, -1.0), Qt.TransformationMode.FastTransformation)
+    # 镜像不改 raster 尺寸；旋转 matrix 与 transform_frame_pixmap 一样用原始
+    # 归一化 pivot 在镜像后 raster 上重新定位，所以追踪点初始 = pivot*(w,h)。
+    pin = QPointF(pivot[0] * src_w, pivot[1] * src_h)
+    if angle:
+        mode = (Qt.TransformationMode.FastTransformation if angle % 90 == 0
+                else Qt.TransformationMode.SmoothTransformation)
+        matrix, _pivot_px, _min_pt = _rotation_transform(src_w, src_h, angle, pivot)
+        corners = [matrix.map(QPointF(0, 0)), matrix.map(QPointF(src_w, 0)),
+                   matrix.map(QPointF(src_w, src_h)), matrix.map(QPointF(0, src_h))]
+        br = QPolygonF(corners).boundingRect()
+        # Qt QImage/QPixmap.transformed 的实际整数平移
+        ox, oy = math.floor(br.left()), math.floor(br.top())
+        pm = pm.transformed(matrix, mode)
+        pin = matrix.map(pin) - QPointF(ox, oy)
+    if transformed:
+        bounds = _alpha_bounds(pm)
+        if bounds is not None:
+            pin = QPointF(pin.x() - bounds.x(), pin.y() - bounds.y())
+    out = (pin.x(), pin.y())
+    if cache is not None:
+        cache[ckey] = out
+    return out
+
+
+def frame_pivot_in_pixmap(action: Action, index: int) -> tuple[float, float]:
+    """第 index 帧：旋转中心在该帧**最终绘制用的 pixmap** 里的像素坐标。
+
+    = ``frame_pivot_output`` 再走一遍该帧的 quad（与 ``action_frame_pixmap`` 的
+    变换管线一致），并以 quad 包围盒最小角为原点 —— 绘制时 pixmap 就是贴在这个
+    原点上的。
+    """
+    px, py = frame_pivot_output(action, index)
+    quad = action.frame_quads.get(index, DEFAULT_QUAD)
+    if quad is None or tuple(quad) == DEFAULT_QUAD:
+        return px, py
+    w, h = frame_base_size(action, index)
+    if w <= 0 or h <= 0:
+        return px, py
+    src_poly = QPolygonF([QPointF(0, 0), QPointF(w, 0), QPointF(w, h), QPointF(0, h)])
+    dst = [QPointF(quad[0] * w, quad[1] * h), QPointF(quad[2] * w, quad[3] * h),
+           QPointF(quad[4] * w, quad[5] * h), QPointF(quad[6] * w, quad[7] * h)]
+    mo_x = min(p.x() for p in dst)
+    mo_y = min(p.y() for p in dst)
+    matrix = QTransform()
+    if not QTransform.quadToQuad(src_poly, QPolygonF(dst), matrix):
+        return px - mo_x, py - mo_y
+    pt = matrix.map(QPointF(px, py))
+    return pt.x() - mo_x, pt.y() - mo_y
+
+
 def action_frame_pixmap(action: Action, index: int, fast: bool = False) -> QPixmap:
     """返回第 index 帧应用变换并收缩透明边界后的显示像素（带缓存）。
 

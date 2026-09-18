@@ -33,7 +33,7 @@ from .transform import (
     DEFAULT_QUAD, DEFAULT_ROTATION_PIVOT, _alpha_bounds, _normalized_rotation_pivot,
     _rotation_transform, action_anchor_pixels, action_frame_pixmap, action_frame_size,
     compute_preview_layout, distribute_whole_quad, frame_base_size,
-    transform_ratio_limit, whole_reference,
+    frame_pivot_in_pixmap, frame_pivot_output, transform_ratio_limit, whole_reference,
 )
 from .widgets import (
     CompactComboBox, CompactSpinBox, EditableNumberLabel, HintToast, HoverIconButton,
@@ -193,6 +193,7 @@ class PreviewCanvas(QWidget):
         self._drag_pivot_canvas = QPointF(0, 0)
         self._drag_pivot_screen = QPointF(0, 0)
         self._drag_ratio_limit = 8.0
+        self._drag_use_pivot = False     # 缩放是否以红色锚点为不动点
         # ---- 视图锚定：变换拖动期间把「不动点」钉死在屏幕上 ----
         # 布局 compute_preview_layout 只按"变换后的内容包围盒"给每帧定位，帧的
         # 绝对落点信息会被丢掉。于是旋转时被钉住的是内容包围盒的左上角、不是旋转
@@ -637,49 +638,8 @@ class PreviewCanvas(QWidget):
         """
         if not self._action or not self._action.frames:
             return QPointF(0, 0)
-        idx = self._frame_index
-        src = self._action.frames[idx]
-        src_w, src_h = src.width(), src.height()
-        pivot = self._action.frame_rotation_pivots.get(idx, DEFAULT_ROTATION_PIVOT)
-        angle = int(self._action.frame_rotations.get(idx, 0)) % 360
-        mh = idx in self._action.frame_mirror_h
-        mv = idx in self._action.frame_mirror_v
-        transformed = bool(mh or mv or angle)
-        # 交互路径每次重绘/命中判定都要用（视图锚定让调用次数翻倍），
-        # 按与 action_frame_pixmap 同源的键缓存，invalidate_transforms 一起失效。
-        cache = getattr(self._action, "_pivot_out_cache", None)
-        ckey = (idx, angle, mh, mv, tuple(pivot))
-        if cache is not None:
-            hit = cache.get(ckey)
-            if hit is not None:
-                return QPointF(hit[0], hit[1])
-
-        pm = src
-        if mh:
-            pm = pm.transformed(QTransform().scale(-1.0, 1.0), Qt.TransformationMode.FastTransformation)
-        if mv:
-            pm = pm.transformed(QTransform().scale(1.0, -1.0), Qt.TransformationMode.FastTransformation)
-        # 镜像不改 raster 尺寸；旋转 matrix 与 transform_frame_pixmap 一样用原始
-        # 归一化 pivot 在镜像后 raster 上重新定位，所以追踪点初始 = pivot*(w,h)。
-        pin = QPointF(pivot[0] * src_w, pivot[1] * src_h)
-        if angle:
-            mode = (Qt.TransformationMode.FastTransformation if angle % 90 == 0
-                    else Qt.TransformationMode.SmoothTransformation)
-            matrix, _pivot_px, _min_pt = _rotation_transform(src_w, src_h, angle, pivot)
-            corners = [matrix.map(QPointF(0, 0)), matrix.map(QPointF(src_w, 0)),
-                       matrix.map(QPointF(src_w, src_h)), matrix.map(QPointF(0, src_h))]
-            br = QPolygonF(corners).boundingRect()
-            # Qt QImage/QPixmap.transformed 的实际整数平移
-            ox, oy = math.floor(br.left()), math.floor(br.top())
-            pm = pm.transformed(matrix, mode)
-            pin = matrix.map(pin) - QPointF(ox, oy)
-        if transformed:
-            bounds = _alpha_bounds(pm)
-            if bounds is not None:
-                pin = QPointF(pin.x() - bounds.x(), pin.y() - bounds.y())
-        if cache is not None:
-            cache[ckey] = (pin.x(), pin.y())
-        return pin
+        px, py = frame_pivot_output(self._action, self._frame_index)
+        return QPointF(px, py)
 
     def _whole_pivot_ref(self) -> tuple[float, float]:
         """整体变换的旋转中心在参考框里的归一化位置（由代表帧的 pivot 反推）。
@@ -709,6 +669,22 @@ class PreviewCanvas(QWidget):
                 px, py = pt.x(), pt.y()
         return ((ox + px) / W, (oy + py) / H)
 
+    def _whole_anchor_canvas(self, layout=None) -> QPointF | None:
+        """整体变换里"各帧旋转中心重合的那个点"的画布坐标（= 红色锚点该画的位置）。
+
+        拖动中必须用冻结的 _drag_whole 参考框：否则每帧变换都会让参考框尺寸变化，
+        锚点会跟着漂。
+        """
+        if self._drag_layout is not None and self._drag_whole is not None:
+            x0, y0, W, H = self._drag_whole
+        else:
+            fr = self._whole_frame(layout)
+            if fr is None:
+                return None
+            x0, y0, _x1, _y1, _cx, _cy, W, H = fr
+        rx, ry = self._whole_pivot_ref()
+        return QPointF(x0 + rx * W, y0 + ry * H)
+
     def _rotation_pivot_canvas(self, layout=None, mo=None) -> QPointF:
         if not self._action or not self._action.frames:
             return QPointF(0, 0)
@@ -716,12 +692,8 @@ class PreviewCanvas(QWidget):
         if layout is None:
             return QPointF(0, 0)
         if self._whole_active():
-            fr = self._whole_frame(layout)
-            if fr is None:
-                return QPointF(0, 0)
-            x0, y0, _x1, _y1, _cx, _cy, W, H = fr
-            rx, ry = self._whole_pivot_ref()
-            return QPointF(x0 + rx * W, y0 + ry * H)
+            pt = self._whole_anchor_canvas(layout)
+            return pt if pt is not None else QPointF(0, 0)
         _, _, positions, _ = layout
         tx, ty, _, _ = positions[self._frame_index]
         quad = self._action.frame_quads.get(self._frame_index, DEFAULT_QUAD)
@@ -779,6 +751,13 @@ class PreviewCanvas(QWidget):
                        (pt.y() - self._offset.y() - self._view_shift.y()) / self._zoom)
 
     # ---- 视图锚定：本次变换的「不动点」 ----
+    def _scale_uses_pivot(self, kind: str) -> bool:
+        """缩放以谁为不动点：默认 = 红色锚点（Aseprite/PS 的参考点），Alt = 老行为对角固定。"""
+        if kind != "corner" or self._transform_mode != "scale":
+            return False
+        mods = QApplication.keyboardModifiers()
+        return not bool(mods & Qt.KeyboardModifier.AltModifier)
+
     def _anchor_spec_for_drag(self, kind: str, index: int):
         """拖动期间应该钉住不动的那个点。
 
@@ -793,8 +772,11 @@ class PreviewCanvas(QWidget):
         if kind == "rotate":
             # 旋转：钉住旋转中心（整体 GIF 级也是那个点，红点可偏心）
             return ("pivot",)
+        if kind == "corner" and self._drag_use_pivot:
+            # 以红色锚点为不动点缩放：屏幕上也把它钉住（否则画布重排会让它漂）
+            return ("pivot",)
         if self._whole_active():
-            # 整体缩放/斜切：钉目标帧共同中心
+            # 整体斜切：钉目标帧共同中心
             return ("frac", 0.5, 0.5)
         k = int(index) if int(index) >= 0 else 0
         if kind == "corner":
@@ -943,6 +925,7 @@ class PreviewCanvas(QWidget):
         self._drag_layout = self._current_layout()
         self._axis_lock = None          # Shift 锁轴的状态，每次拖拽重新判定
         # 本次交互的不动点：拖动期间钉死在屏幕上，动的只有灰色画布框。
+        self._drag_use_pivot = self._scale_uses_pivot(kind)
         self._set_view_anchor(self._anchor_spec_for_drag(kind, index))
         if self._whole_active():
             # 整体(GIF 级)变换：手柄/基准全部围绕目标帧整体参考框
@@ -953,7 +936,8 @@ class PreviewCanvas(QWidget):
             self._drag_mo = QPointF(0, 0)
             self._drag_orig_c = [QPointF(p) for p in self._whole_handles(self._drag_layout)]
             self._drag_center = QPointF(cx, cy)
-            self._drag_pivot_canvas = QPointF(cx, cy)
+            # 整体模式的"不动点"= 各帧旋转中心重合的那个点（红点），不是参考框中心
+            self._drag_pivot_canvas = self._whole_anchor_canvas(self._drag_layout) or QPointF(cx, cy)
             _W, _H, wentry = self._whole_master_entry()
             master = wentry[0]
             self._drag_orig = tuple(self._action.frame_quads.get(master, DEFAULT_QUAD))
@@ -1171,8 +1155,12 @@ class PreviewCanvas(QWidget):
                 new[horizontal_neighbor].setX(orig_c[horizontal_neighbor].x() - dx)
                 new[vertical_neighbor].setY(orig_c[vertical_neighbor].y() - dy)
             elif mode == "scale":
-                if self._whole_active():
-                    # 整体(GIF 级)缩放围绕整体中心（不是对角），多帧才会保持重叠
+                if self._drag_use_pivot:
+                    # 不动点 = 红色锚点（Aseprite / PS 参考点）：四角一起按比例走，
+                    # 锚点原地不动 —— 用户要的"缩放按锚点位置来"。
+                    anchor = QPointF(self._drag_pivot_canvas)
+                elif self._whole_active():
+                    # Alt（老行为）下的整体缩放：围绕整体中心，多帧才保持重叠
                     anchor = QPointF(sum(p.x() for p in orig_c) / 4.0,
                                      sum(p.y() for p in orig_c) / 4.0)
                 else:
@@ -1224,11 +1212,13 @@ class PreviewCanvas(QWidget):
         had_drag = self._drag_kind is not None
         self._drag_kind = None
         self._drag_layout = None
+        self._drag_use_pivot = False
         if had_drag:
             self.transform_edit_finished.emit()
         self.update()
 
     def _advance_handle_hover(self) -> None:
+
         if self._hover_kind is not None and self._transform_mode:
             self._hover_phase = (self._hover_phase + 0.32) % (math.pi * 2.0)
             self.update()
@@ -1344,22 +1334,24 @@ class PreviewCanvas(QWidget):
             self._end_drag()
 
     def _paint_whole_frames(self, p: QPainter, cx: float, cy: float, scale: float, layout=None):
-        """整体(GIF 级)变换：把所有目标帧围绕共同中心叠合绘制。
+        """整体(GIF 级)变换：把所有目标帧叠合绘制。
 
-        主帧不透明、其余半透明（看出多帧是否重合）；拖动中中心取锁定参考框，
-        非拖动复用 paintEvent 已算布局，各帧按实时尺寸居中 -> 围绕整体中心、不跳位。
-        返回主帧的屏幕矩形（供参照帧高亮边框复用）。
+        主帧不透明、其余半透明（看出多帧是否重合）。叠合基准分两种：
+
+        · 锚点在正中心（没调过红点）：按各帧包围盒中心对齐 —— 与原来完全一致；
+        · 红点被挪到偏心位置：**按各帧自己的锚点像素对齐到那个点**。若仍按包围盒
+          居中，偏心旋转下各帧的锚点会各跑各的（实测内容偏离红点 149px），
+          看起来就是"旋转没绕红点"。
         """
         if not self._action or not self._transform_indices:
             return None
-        if self._drag_layout is not None and self._drag_whole is not None:
-            x0, y0, W, H = self._drag_whole
-            ccx, ccy = x0 + W / 2.0, y0 + H / 2.0
-        else:
-            fr = self._whole_frame(layout)
-            if fr is None:
-                return None
-            ccx, ccy = fr[4], fr[5]
+        anchor = self._whole_anchor_canvas(layout)
+        if anchor is None:
+            return None
+        rx, ry = self._whole_pivot_ref()
+        off_center = bool(rx != DEFAULT_ROTATION_PIVOT[0] or ry != DEFAULT_ROTATION_PIVOT[1])
+        if not off_center:
+            anchor = None      # 走原来的"包围盒居中"路径
         opacity = self._action.frame_opacity
         main_rect = None
         # 整体手柄拖动中每帧都要重绘：用 fast（跳过全像素透明裁剪）保证跟手；
@@ -1370,9 +1362,22 @@ class PreviewCanvas(QWidget):
                 continue
             pm = action_frame_pixmap(self._action, i, fast=fast)
             fw, fh = pm.width(), pm.height()
-            rect = QRectF(cx + (ccx - fw / 2.0) * scale,
-                          cy + (ccy - fh / 2.0) * scale,
-                          fw * scale, fh * scale)
+            if anchor is None:
+                # 包围盒中心对齐（锚点在正中心时的等价做法，保持既有行为）
+                if self._drag_layout is not None and self._drag_whole is not None:
+                    x0, y0, W, H = self._drag_whole
+                    gx, gy = x0 + W / 2.0, y0 + H / 2.0
+                else:
+                    fr = self._whole_frame(layout)
+                    if fr is None:
+                        return None
+                    gx, gy = fr[4], fr[5]
+                ox, oy = gx - fw / 2.0, gy - fh / 2.0
+            else:
+                # 锚点对齐：把该帧的锚点像素放到整体锚点上
+                px, py = frame_pivot_in_pixmap(self._action, i)
+                ox, oy = anchor.x() - px, anchor.y() - py
+            rect = QRectF(cx + ox * scale, cy + oy * scale, fw * scale, fh * scale)
             is_main = (i == self._frame_index)
             p.setOpacity(opacity if is_main else 0.4)
             p.drawPixmap(rect, pm, QRectF(pm.rect()))
@@ -1380,11 +1385,17 @@ class PreviewCanvas(QWidget):
                 main_rect = rect
         p.setOpacity(1.0)
         if main_rect is None and self._transform_indices:
-            # 当前帧不在目标集合（理论不会）：用第一个目标帧占位居中
+            # 当前帧不在目标集合（理论不会）：用第一个目标帧占位
             i = self._transform_indices[0]
             pm = action_frame_pixmap(self._action, i, fast=fast)
-            main_rect = QRectF(cx + (ccx - pm.width() / 2.0) * scale,
-                               cy + (ccy - pm.height() / 2.0) * scale,
+            if anchor is None:
+                fr = self._whole_frame(layout)
+                gx, gy = (fr[4], fr[5]) if fr is not None else (0.0, 0.0)
+                ox, oy = gx - pm.width() / 2.0, gy - pm.height() / 2.0
+            else:
+                px, py = frame_pivot_in_pixmap(self._action, i)
+                ox, oy = anchor.x() - px, anchor.y() - py
+            main_rect = QRectF(cx + ox * scale, cy + oy * scale,
                                pm.width() * scale, pm.height() * scale)
         return main_rect
 
@@ -1663,7 +1674,7 @@ class AnimAdjustPanel(QWidget):
         trans_v.setContentsMargins(0, 0, 0, 0)
         trans_v.setSpacing(5)
         self.btn_mode_rotate = self._small_btn("旋转", "旋转：点击后在预览上拖圆形旋转手柄或旋转中心；按住 Shift 吸附 15°", "rotate")
-        self.btn_mode_scale = self._small_btn("缩放", "缩放：点击后在预览上拖角点（对角固定）；按住 Shift 等比缩放", "scale")
+        self.btn_mode_scale = self._small_btn("缩放", "缩放：拖角点以红色锚点为中心缩放（锚点原地不动）；按住 Alt = 对角固定（老手感）；按住 Shift = 等比", "scale")
         self.btn_mode_skew = self._small_btn("斜切", "斜切：点击后在预览上拖边中点；按住 Shift = 居中剪切（对边反向）", "skew")
         self.btn_mode_perspective = self._small_btn("透视", "透视：点击后在预览上拖角点（对边反向收放 → 梯形）；按住 Shift 锁横/竖", "perspective")
         self.btn_mode_distort = self._small_btn("扭曲", "扭曲：点击后在预览上拖角点（单角自由）；按住 Shift 锁横/竖", "distort")
