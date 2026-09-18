@@ -8,7 +8,7 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QPixmap, QColor, QPainter
-from PyQt6.QtCore import QRectF
+from PyQt6.QtCore import QPointF, QRectF
 
 from spritesheet.ui.models import Action
 from spritesheet.ui.preview import PreviewCanvas
@@ -35,14 +35,21 @@ for mode in ("rotate", "scale", "skew", "perspective", "distort"):
     if kind != "pivot": ok = False
     print(f"  [{status}] mode={mode:12s} hit_test at pivot -> kind={kind}")
 
-# 整体模式 pivot 不可调（固定中心）
+# 整体(GIF 级)模式的 pivot 同样可命中、可拖（用户要求：红点在任何变换模式都能自由移动）
 c.set_transform_mode("scale", owner="test"); c.set_transform_targets([0,1])
 c._apply_fit()
 pivot = c._rotation_pivot_canvas(); ps = c._logical_to_screen(pivot)
 kind, idx = c._hit_test(ps)
-status = "OK" if kind != "pivot" else "FAIL"
-if kind == "pivot": ok = False
-print(f"  [{status}] 整体模式 pivot 应不可命中 -> kind={kind}")
+status = "OK" if kind == "pivot" else "FAIL"
+if kind != "pivot": ok = False
+print(f"  [{status}] 整体模式 pivot 应可命中（可自由移动） -> kind={kind}")
+
+# 整体模式：红点外侧 30px 必须还给"框内拖动=整体平移"，不能被红点吃掉
+far = ps + QPointF(0, 30)
+kind_far, _ = c._hit_test(far)
+status = "OK" if kind_far != "pivot" else "FAIL"
+if kind_far == "pivot": ok = False
+print(f"  [{status}] 整体模式 红点外侧仍可整体平移 -> kind={kind_far}")
 
 # pivot 位置必须在手柄中心（无变换时）
 c.set_transform_mode("scale", owner="test"); c.set_transform_targets([0])

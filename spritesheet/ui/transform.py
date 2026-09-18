@@ -18,6 +18,47 @@ from .models import Action
 DEFAULT_QUAD = (0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0)
 DEFAULT_ROTATION_PIVOT = (0.5, 0.5)
 
+# 自由变换的尺寸上界。
+# 交互拖动时鼠标一旦划出窗口很远，quad 会被放大到几万像素：120x90 的帧拖到
+# 10000px 外就是 10120x10090（约 102MP、400MB），多帧整体变换时每帧都是这个
+# 量级 → 每动一下鼠标都要重新渲染几十上百 MB 的 pixmap，界面直接卡死。
+# 这两个上限同时约束"交互（拖动时夹住倍数）"和"渲染（兜底历史工程里的超大 quad）"。
+MAX_TRANSFORM_RATIO = 8.0          # 相对原始帧尺寸的最大放大倍数
+MAX_TRANSFORM_PIXELS = 32_000_000  # 单帧变换后像素数上限（约 5657x5657）
+
+
+def transform_ratio_limit(width: int, height: int) -> float:
+    """当前帧尺寸下允许的最大放大倍数（倍数上限与像素预算取小）。"""
+    area = float(max(1, int(width))) * float(max(1, int(height)))
+    return max(1.0, min(MAX_TRANSFORM_RATIO, math.sqrt(MAX_TRANSFORM_PIXELS / area)))
+
+
+def clamp_quad_span(quad, width: int, height: int):
+    """把超出尺寸预算的 quad 绕自身中心等比缩回预算内（形状与中心不变）。
+
+    正常交互路径已经在上游把倍数夹住了，这里只做兜底：防的是历史工程/手工 JSON
+    里存了超大 quad，一打开就卡死。
+    """
+    if quad is None:
+        return quad
+    w = float(max(1, int(width)))
+    h = float(max(1, int(height)))
+    xs = [float(quad[0]) * w, float(quad[2]) * w, float(quad[4]) * w, float(quad[6]) * w]
+    ys = [float(quad[1]) * h, float(quad[3]) * h, float(quad[5]) * h, float(quad[7]) * h]
+    span = max(max(xs) - min(xs), max(ys) - min(ys))
+    # 与交互侧的夹法对齐（留一点余量，别把刚夹到上限的结果又削一刀）
+    limit = max(w, h) * transform_ratio_limit(width, height) * 1.001
+    if span <= limit or span <= 0.0:
+        return quad
+    k = limit / span
+    cx = (max(xs) + min(xs)) / 2.0
+    cy = (max(ys) + min(ys)) / 2.0
+    out = []
+    for i in range(4):
+        out.append((cx + (xs[i] - cx) * k) / w)
+        out.append((cy + (ys[i] - cy) * k) / h)
+    return tuple(out)
+
 
 def _normalized_rotation_pivot(pivot) -> tuple[float, float]:
     """Return a finite, bounded normalized rotation pivot."""
@@ -146,6 +187,8 @@ def transform_frame_pixmap(pm: QPixmap, rotation: int, mirror_h: bool, mirror_v:
     if transformed and not fast:
         pm, _ = _trim_transparent(pm)
     if quad is not None and tuple(quad) != DEFAULT_QUAD:
+        # 兜底：历史工程里可能存着超大 quad（会把 pixmap 撑到几百 MB）
+        quad = clamp_quad_span(tuple(quad), pm.width(), pm.height())
         w, h = pm.width(), pm.height()
         src = QPolygonF([QPointF(0, 0), QPointF(w, 0), QPointF(w, h), QPointF(0, h)])
         dst = QPolygonF([QPointF(quad[0] * w, quad[1] * h), QPointF(quad[2] * w, quad[3] * h),

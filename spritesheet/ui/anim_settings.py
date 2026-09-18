@@ -209,13 +209,14 @@ class AnimSettingsBar(QWidget):
         lbl_speed.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         speed_layout.addWidget(lbl_speed)
         self.slider_speed = self._slider(10, 1, 100, max_width=None)
-        self.slider_speed.setFixedWidth(137)
+        # 滑块交给布局伸展（原来固定 137px，右边数值被挤到行尾、中间空一大截）
+        self.slider_speed.setMinimumWidth(137)
         self.lbl_speed_value = QLabel("10")
         self.lbl_speed_value.setFixedWidth(20)
         self.lbl_speed_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.slider_speed.valueChanged.connect(self._on_speed_changed)
         self.slider_speed.valueChanged.connect(lambda v: self.lbl_speed_value.setText(str(v)))
-        speed_layout.addWidget(self.slider_speed)
+        speed_layout.addWidget(self.slider_speed, 1)
         speed_layout.addWidget(self.lbl_speed_value)
 
         l_speed = QHBoxLayout()

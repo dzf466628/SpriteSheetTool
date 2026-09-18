@@ -191,13 +191,16 @@ pts = canvas._whole_handles()
 ccx = sum(p.x() for p in pts) / 4
 ccy = sum(p.y() for p in pts) / 4
 center = canvas._logical_to_screen(QPointF(ccx, ccy)).toPoint()
+# 注意：整体框正中现在压着红色旋转中心（10px 内是"拖红点"），所以整体平移
+# 从中心偏下 40px 起拖 —— 框内其它位置仍然是整体平移。
+grab = center + QPoint(0, 40)
 stack_before = len(action.undo_stack)
-QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=center)
-QTest.mouseMove(canvas, pos=center + QPoint(30, 20))
+QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=grab)
+QTest.mouseMove(canvas, pos=grab + QPoint(30, 20))
 _, _, pos_drag, _ = canvas._paint_layout()
 drag_centers = [pos_drag[i][0] + pos_drag[i][2] / 2 for i in range(n)]
 offs_drag = {i: action.frame_offsets.get(i, (0, 0)) for i in range(n)}
-QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=center + QPoint(30, 20))
+QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=grab + QPoint(30, 20))
 wait(50)
 _, _, pos_rel, _ = canvas._paint_layout()
 rel_centers = [pos_rel[i][0] + pos_rel[i][2] / 2 for i in range(n)]

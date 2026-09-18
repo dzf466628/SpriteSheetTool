@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import sys
 import math
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 if sys.platform == "win32":
@@ -32,7 +33,9 @@ from PyQt6.QtWidgets import QApplication
 
 from spritesheet.ui.models import Action
 from spritesheet.ui.preview import ActionPreviewWidget, PreviewCanvas
-from spritesheet.ui.transform import DEFAULT_QUAD, DEFAULT_ROTATION_PIVOT
+from spritesheet.ui.transform import (
+    DEFAULT_QUAD, DEFAULT_ROTATION_PIVOT, action_frame_size,
+)
 
 app = QApplication([])
 
@@ -397,6 +400,100 @@ for k in range(4):
     rel = measure(canvas)
     check(f"端到端 corner{k} 松手不跳(<2px)", diff(mid[0], rel[0]) < 2.0,
           f"{fmt(mid[0])} -> {fmt(rel[0])}")
+
+# ================= 7. 红点在所有模式都看得见（含整体 GIF 级） =================
+print("7. 红色旋转中心：单帧/整体、各变换模式都必须画出来：")
+for frames in (1, 3):
+    for mode in ("rotate", "scale", "perspective"):
+        a, c = new_canvas(frames, mode)
+        _, _, cross = measure(c)
+        exp = c._logical_to_screen(c._rotation_pivot_canvas())
+        ok = cross is not None and math.hypot(cross["bx"] - exp.x(), cross["by"] - exp.y()) < 2.0
+        check(f"{frames}帧 {mode:11s} 红点可见", ok,
+              f"画在={fmt(cross)} 应为=({exp.x():.1f},{exp.y():.1f})")
+
+
+# ================= 8. 拖出窗口很远：不再卡死 =================
+print("8. 变换鼠标划出窗口很远：帧尺寸与耗时必须被夹住：")
+for frames in (1, 18):
+    a, c = new_canvas(frames, "scale")
+    ht = c._whole_handles() if frames > 1 else c._handles_canvas(c._current_mo())
+    c._begin_drag("corner", 2, c._logical_to_screen(ht[2]))
+    c._update_drag(c._logical_to_screen(QPointF(ht[2].x() + 10000, ht[2].y() + 10000)))
+    w0, h0 = action_frame_size(a, 0)
+    t0 = time.perf_counter()
+    render(c)
+    dt = time.perf_counter() - t0
+    check(f"{frames}帧 拖到 10000px 外：单帧 {w0}x{h0} ≤32MP", w0 * h0 <= 33_000_000,
+          f"{w0 * h0 / 1e6:.1f}MP")
+    check(f"{frames}帧 拖到 10000px 外：一帧绘制 {dt * 1000:.0f}ms 不卡死", dt < 1.5,
+          f"{dt * 1000:.0f}ms")
+
+
+# ================= 9. 整体模式拖红点：端到端 =================
+print("9. 整体(GIF 级)拖红点：真鼠标事件 → 各帧 pivot 一致、红点跟手：")
+wd = ActionPreviewWidget()
+wd.resize(1000, 800)
+whole = Action("whole")
+whole.frames = [make_pm() for _ in range(3)]
+whole.padding = 14
+whole.bg_mode = "white"
+wd.set_actions([whole])
+wd.set_action(whole)
+canvas2 = wd.canvas
+canvas2.setMinimumWidth(640)
+canvas2.setMinimumHeight(520)
+canvas2.setMaximumHeight(520)
+app.processEvents()
+canvas2._apply_fit()
+wd.adjust_panel.enter_transform_mode_all("rotate")
+check("进入整体旋转模式", canvas2.transform_mode() == "rotate" and canvas2._whole_active(),
+      f"mode={canvas2.transform_mode()} whole={canvas2._whole_active()}")
+p0 = canvas2._logical_to_screen(canvas2._rotation_pivot_canvas())
+
+
+def send2(kind, pos, buttons=Qt.MouseButton.LeftButton):
+    ev = QMouseEvent(kind, pos, canvas2.mapToGlobal(pos.toPoint()).toPointF(),
+                     Qt.MouseButton.LeftButton, buttons, Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(canvas2, ev)
+
+
+send2(QEvent.Type.MouseButtonPress, p0)
+check("按下红点进入 pivot 拖动（不是整体平移）", canvas2._drag_kind == "pivot",
+      f"kind={canvas2._drag_kind}")
+target = p0 + QPointF(0, 70)
+send2(QEvent.Type.MouseMove, target)
+_, _, cross2 = measure(canvas2)
+send2(QEvent.Type.MouseButtonRelease, target, Qt.MouseButton.NoButton)
+pivs = [whole.frame_rotation_pivots.get(i) for i in range(3)]
+check("整体拖红点：三帧都写入了 pivot", all(p is not None for p in pivs), f"{pivs}")
+check("整体拖红点：三帧 pivot 一致（同一视觉点）",
+      len({tuple(round(v, 3) for v in p) for p in pivs if p}) == 1, f"{pivs}")
+check("整体拖红点：红点跟到鼠标附近(<4px)",
+      cross2 is not None and math.hypot(cross2["bx"] - target.x(), cross2["by"] - target.y()) < 4.0,
+      f"红点={fmt(cross2)} 鼠标=({target.x():.1f},{target.y():.1f})")
+check("整体拖红点：红点确实离开了内容中心", pivs and pivs[0][1] > 0.55, f"{pivs[0] if pivs else None}")
+
+
+# ================= 10. 面板读数与动画设置行距 =================
+print("10. 「当前变换」角度位数不抖 + 速度滑块紧贴数值：")
+lbl = wd.adjust_panel.lbl_transform_summary
+widths = set()
+for ang in (5, 45, 180, 359):
+    whole.frame_rotations[0] = ang
+    wd.adjust_panel._sync_transform_widgets()
+    widths.add(lbl.sizeHint().width())
+check("5°~359° 标签宽度恒定", len(widths) == 1, f"宽度={sorted(widths)}")
+
+from spritesheet.ui.anim_settings import AnimSettingsBar
+bar = AnimSettingsBar()
+bar.resize(900, 200)
+bar.show()
+bar.set_action(Action("t"))
+app.processEvents()
+sg, vg = bar.slider_speed.geometry(), bar.lbl_speed_value.geometry()
+gap = vg.x() - (sg.x() + sg.width())
+check("速度滑块右缘与数值间距 ≤6px", gap <= 6, f"gap={gap}px")
 
 print(f"\n结果: {PASS} passed, {FAIL} failed")
 sys.exit(0 if FAIL == 0 else 1)
