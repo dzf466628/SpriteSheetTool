@@ -291,6 +291,19 @@ class PreviewCanvas(QWidget):
         self._overlay_frames = list(indices)
         self.update()
 
+    def _drag_target_indices(self) -> list[int]:
+        """画布拖动帧偏移的目标帧：Ctrl 多选时 = 全部选中帧，否则 = 当前帧。"""
+        get_rows = getattr(self, "_get_selected_rows", None)
+        if get_rows is not None:
+            try:
+                rows = get_rows()
+            except Exception:
+                rows = []
+            valid = [r for r in rows if 0 <= r < len(self._action.frames)]
+            if valid:
+                return valid
+        return [self._frame_index]
+
     def set_frame(self, idx: int):
         if self._action and 0 <= idx < len(self._action.frames):
             # 换帧时丢弃冻结布局：冻结里的"当前帧偏移增量"只对冻结时的帧有意义
@@ -877,14 +890,18 @@ class PreviewCanvas(QWidget):
             dx = int(round(delta.x() / scale))
             dy = int(round(delta.y() / scale))
             if dx or dy:
-                idx = self._frame_index
-                cur = self._action.frame_offsets.get(idx, (0, 0))
-                nx, ny = cur[0] + dx, cur[1] + dy
-                if nx == 0 and ny == 0:
-                    self._action.frame_offsets.pop(idx, None)
-                else:
-                    self._action.frame_offsets[idx] = (nx, ny)
-                self.frame_offset_dragged.emit(idx, nx, ny)
+                # Ctrl 多选时所有选中帧一起移动（与右侧偏移控件一致）
+                indices = self._drag_target_indices()
+                for idx in indices:
+                    cur = self._action.frame_offsets.get(idx, (0, 0))
+                    nx, ny = cur[0] + dx, cur[1] + dy
+                    if nx == 0 and ny == 0:
+                        self._action.frame_offsets.pop(idx, None)
+                    else:
+                        self._action.frame_offsets[idx] = (nx, ny)
+                main = self._frame_index
+                mnx, mny = self._action.frame_offsets.get(main, (0, 0))
+                self.frame_offset_dragged.emit(main, mnx, mny)
                 self.update()
             return
         if self._drag_kind and self._transform_mode:
@@ -1445,10 +1462,17 @@ class AnimAdjustPanel(QWidget):
         ny = cur[1] if dy is None else int(dy)
         if (nx, ny) == cur:
             return
-        if nx == 0 and ny == 0:
-            self._action.frame_offsets.pop(idx, None)
-        else:
-            self._action.frame_offsets[idx] = (nx, ny)
+        # 增量 = 目标值 - 当前帧旧值；Ctrl 多选时所有选中帧按各自旧值加同一增量，
+        # 保持各帧原有偏移差（"整组一起动"，而不是把每帧偏移统一成同一个值）。
+        delta = (nx - cur[0], ny - cur[1])
+        for act, indices in self._transform_targets():
+            for i in indices:
+                ci = act.frame_offsets.get(i, (0, 0))
+                tnx, tny = ci[0] + delta[0], ci[1] + delta[1]
+                if tnx == 0 and tny == 0:
+                    act.frame_offsets.pop(i, None)
+                else:
+                    act.frame_offsets[i] = (tnx, tny)
         if self._offset_drag:
             # 拖动中：画布区域冻结（用户要求"松手以后再计算区域"），
             # 只同步控件显示；区域尺寸留到 _end_offset_drag 再算。
@@ -1483,9 +1507,9 @@ class AnimAdjustPanel(QWidget):
         if not self._action:
             self._hint_no_action()
             return
-        idx = getattr(self, "_current_frame", 0)
-        if idx in self._action.frame_offsets:
-            del self._action.frame_offsets[idx]
+        for act, indices in self._transform_targets():
+            for i in indices:
+                act.frame_offsets.pop(i, None)
         self._sync_offset_widgets(0, 0)
         self._refresh_canvas_label()
         self.changed.emit()
@@ -1921,6 +1945,7 @@ class ActionPreviewWidget(QWidget):
         self.adjust_panel = AnimAdjustPanel()
         self.adjust_panel.set_canvas(self.canvas)
         self.adjust_panel._get_selected_rows = self._selected_rows
+        self.canvas._get_selected_rows = self._selected_rows
         # 预览画布 ↔ 帧设置面板：变换模式按钮、拖转/拖四边形互相同步
         self.canvas.transform_mode_changed.connect(self.adjust_panel._on_canvas_mode_changed)
         self.canvas.transform_rotated.connect(self.adjust_panel._apply_rotation)
@@ -2063,13 +2088,22 @@ class ActionPreviewWidget(QWidget):
         self.thumb_list.setCurrentRow(0)
 
     def _refresh_thumbs(self):
-        """重建缩略图但保持当前选中帧（旋转/镜像变化后同步）。"""
+        """重建缩略图但保持当前选中帧与多选状态（旋转/镜像变化后同步）。
+
+        之前只恢复了 currentRow（主帧）：一次变换触发重建后，Ctrl 多选的
+        其余帧全部被 clear() 丢掉，导致"第一次变换生效、第二次只作用于主帧"。
+        """
         if not self._action:
             return
         row = self.thumb_list.currentRow()
+        selected = self._selected_rows()
         self._populate_thumbs()
+        n = len(self._action.frames)
         if row >= 0:
-            self.thumb_list.setCurrentRow(min(row, len(self._action.frames) - 1))
+            self.thumb_list.setCurrentRow(min(row, n - 1))
+        for i in selected:
+            if i < n:
+                self.thumb_list.item(i).setSelected(True)
 
     def _update_frame_label(self):
         if self._action and self._action.frames:
