@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QFontMetrics
 from PyQt6.QtWidgets import (
     QButtonGroup, QCheckBox, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
     QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget,
@@ -212,8 +213,13 @@ class AnimSettingsBar(QWidget):
         # 滑块交给布局伸展（原来固定 137px，右边数值被挤到行尾、中间空一大截）
         self.slider_speed.setMinimumWidth(137)
         self.lbl_speed_value = QLabel("10")
-        self.lbl_speed_value.setFixedWidth(20)
-        self.lbl_speed_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        # 宽度按最长值("100")实测：够放 3 位数，又不会随位数变化把滑块挤得忽长忽短。
+        # 原来写死 20px —— 连 "10"（22px）都放不下，数字会被截掉一块。
+        self.lbl_speed_value.setFixedWidth(
+            QFontMetrics(self.lbl_speed_value.font()).horizontalAdvance("100") + 2)
+        # 左对齐：数字紧贴滑块右缘，且 5 / 10 / 100 的左边缘对齐；
+        # 右对齐会往里缩、在滑块和数字之间留出一块空隙，各数值也对不齐。
+        self.lbl_speed_value.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.slider_speed.valueChanged.connect(self._on_speed_changed)
         self.slider_speed.valueChanged.connect(lambda v: self.lbl_speed_value.setText(str(v)))
         speed_layout.addWidget(self.slider_speed, 1)
@@ -246,8 +252,9 @@ class AnimSettingsBar(QWidget):
         l_anchor.addWidget(self.btn_ground_up)
         l_anchor.addWidget(self.btn_ground_down)
         self.lbl_ground_offset = QLabel("0")
-        self.lbl_ground_offset.setFixedWidth(25)
-        self.lbl_ground_offset.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        # 地面线偏移可以是 -123 这种：不写死宽度（原来 25px 会被截），
+        # 左对齐紧贴左边的下移按钮（右对齐会在按钮和数字之间留一块空隙）。
+        self.lbl_ground_offset.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         l_anchor.addWidget(self.lbl_ground_offset)
         l_anchor.addStretch(1)
         g1.addLayout(l_anchor)

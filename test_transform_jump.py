@@ -28,7 +28,7 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
 
 from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt
-from PyQt6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPixmap
+from PyQt6.QtGui import QColor, QFontMetrics, QImage, QMouseEvent, QPainter, QPixmap
 from PyQt6.QtWidgets import QApplication
 
 from spritesheet.ui.models import Action
@@ -494,6 +494,26 @@ app.processEvents()
 sg, vg = bar.slider_speed.geometry(), bar.lbl_speed_value.geometry()
 gap = vg.x() - (sg.x() + sg.width())
 check("速度滑块右缘与数值间距 ≤6px", gap <= 6, f"gap={gap}px")
+# 数值必须左对齐（数字紧贴滑块）且放得下 3 位数：原来写死 20px + 右对齐，
+# 连 "10"(22px) 都会被截掉一块，还会在滑块与数字之间留出空隙。
+fm = QFontMetrics(bar.lbl_speed_value.font())
+check("速度数值左对齐（紧贴滑块）",
+      bool(bar.lbl_speed_value.alignment() & Qt.AlignmentFlag.AlignLeft),
+      f"alignment={int(bar.lbl_speed_value.alignment())}")
+widths, clipped = set(), False
+for v in ("1", "10", "100"):
+    bar.lbl_speed_value.setText(v)
+    app.processEvents()
+    widths.add(bar.lbl_speed_value.width())
+    if fm.horizontalAdvance(v) > bar.lbl_speed_value.width():
+        clipped = True
+check("速度数值 1/10/100 都不被截断", not clipped,
+      f"标签宽={sorted(widths)} 需要宽={fm.horizontalAdvance('100')}")
+check("速度数值标签宽度不随位数变化（滑块不忽长忽短）", len(widths) == 1, f"宽度={sorted(widths)}")
+check("地面线偏移数值同样左对齐",
+      bool(bar.lbl_ground_offset.alignment() & Qt.AlignmentFlag.AlignLeft) and
+      bar.lbl_ground_offset.maximumWidth() > 25,
+      f"alignment={int(bar.lbl_ground_offset.alignment())} max={bar.lbl_ground_offset.maximumWidth()}")
 
 print(f"\n结果: {PASS} passed, {FAIL} failed")
 sys.exit(0 if FAIL == 0 else 1)
