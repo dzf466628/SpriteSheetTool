@@ -589,45 +589,54 @@ class PreviewCanvas(QWidget):
                  QPointF(quad[4] * w, quad[5] * h), QPointF(quad[6] * w, quad[7] * h)], w, h)
 
     def _rotation_pivot_output(self) -> QPointF:
-        """旋转中心在旋转后基础图像中的坐标（未应用 quad）。
+        """旋转中心在"旋转/镜像后、未应用 quad"的基础图像中的坐标。
 
-        坐标系必须与 ``frame_base_size`` 完全一致：``transform_frame_pixmap`` 在
-        无旋转/无镜像时 ``transformed=False``，**不会**裁剪透明边，直接返回原图；
-        只有发生实际旋转/镜像时才会裁剪。此前这里无论有无变换都额外做一次
-        ``_alpha_bounds`` 裁剪，导致无变换时 pivot 比真实中心偏出一圈透明边的
-        距离（典型 2px），表现为"手柄锚点偏、旋转/缩放松手闪跳"。
+        必须与 ``transform_frame_pixmap`` / ``frame_base_size`` **逐像素同管线**，
+        否则红色锚点画的位置和实际旋转围绕的点不一致，旋转/缩放时就会"歪、闪"。
+
+        两处历史坑：
+        ① 无旋转无镜像时 ``transform_frame_pixmap`` 的 ``transformed=False``，
+           **不裁剪**透明边；这里若额外裁剪，pivot 会偏出一圈透明边（约 2px）。
+        ② 任意角度旋转时，``QPixmap.transformed`` 输出图的平移量是
+           ``-floor(映射外接矩形左上)``（整数），不是理论浮点 ``-min_pt``；
+           用浮点 min_pt 推算 pivot 会再偏 0.5~1.7px。这里直接复刻 Qt 的 floor
+           平移，并使用与渲染一致的 Fast/Smooth 模式求 alpha 包围盒。
         """
         if not self._action or not self._action.frames:
             return QPointF(0, 0)
-        src = self._action.frames[self._frame_index]
+        idx = self._frame_index
+        src = self._action.frames[idx]
         src_w, src_h = src.width(), src.height()
-        pivot = self._action.frame_rotation_pivots.get(
-            self._frame_index, DEFAULT_ROTATION_PIVOT
-        )
-        angle = self._action.frame_rotations.get(self._frame_index, 0)
-        has_mirror = (self._frame_index in self._action.frame_mirror_h
-                      or self._frame_index in self._action.frame_mirror_v)
-        # 与 frame_base_size 同口径：无旋转无镜像时不裁剪，pivot 直接在原图坐标系。
-        if angle % 360 == 0 and not has_mirror:
-            return QPointF(pivot[0] * src_w, pivot[1] * src_h)
-        # Mirroring keeps the raster size; the pivot is defined in that space.
-        matrix, pivot_px, min_pt = _rotation_transform(
-            src_w, src_h, angle, pivot
-        )
-        mapped = matrix.map(pivot_px)
-        rotated = src
-        if has_mirror:
-            if self._frame_index in self._action.frame_mirror_h:
-                rotated = rotated.transformed(QTransform().scale(-1.0, 1.0), Qt.TransformationMode.FastTransformation)
-            if self._frame_index in self._action.frame_mirror_v:
-                rotated = rotated.transformed(QTransform().scale(1.0, -1.0), Qt.TransformationMode.FastTransformation)
-        if angle % 360:
-            rotated = rotated.transformed(matrix, Qt.TransformationMode.FastTransformation)
-        content = _alpha_bounds(rotated)
-        trim_x = content.x() if content else 0
-        trim_y = content.y() if content else 0
-        return QPointF(mapped.x() - min_pt.x() - trim_x,
-                       mapped.y() - min_pt.y() - trim_y)
+        pivot = self._action.frame_rotation_pivots.get(idx, DEFAULT_ROTATION_PIVOT)
+        angle = int(self._action.frame_rotations.get(idx, 0)) % 360
+        mh = idx in self._action.frame_mirror_h
+        mv = idx in self._action.frame_mirror_v
+        transformed = bool(mh or mv or angle)
+
+        pm = src
+        if mh:
+            pm = pm.transformed(QTransform().scale(-1.0, 1.0), Qt.TransformationMode.FastTransformation)
+        if mv:
+            pm = pm.transformed(QTransform().scale(1.0, -1.0), Qt.TransformationMode.FastTransformation)
+        # 镜像不改 raster 尺寸；旋转 matrix 与 transform_frame_pixmap 一样用原始
+        # 归一化 pivot 在镜像后 raster 上重新定位，所以追踪点初始 = pivot*(w,h)。
+        pin = QPointF(pivot[0] * src_w, pivot[1] * src_h)
+        if angle:
+            mode = (Qt.TransformationMode.FastTransformation if angle % 90 == 0
+                    else Qt.TransformationMode.SmoothTransformation)
+            matrix, _pivot_px, _min_pt = _rotation_transform(src_w, src_h, angle, pivot)
+            corners = [matrix.map(QPointF(0, 0)), matrix.map(QPointF(src_w, 0)),
+                       matrix.map(QPointF(src_w, src_h)), matrix.map(QPointF(0, src_h))]
+            br = QPolygonF(corners).boundingRect()
+            # Qt QImage/QPixmap.transformed 的实际整数平移
+            ox, oy = math.floor(br.left()), math.floor(br.top())
+            pm = pm.transformed(matrix, mode)
+            pin = matrix.map(pin) - QPointF(ox, oy)
+        if transformed:
+            bounds = _alpha_bounds(pm)
+            if bounds is not None:
+                pin = QPointF(pin.x() - bounds.x(), pin.y() - bounds.y())
+        return pin
 
     def _rotation_pivot_canvas(self, layout=None, mo=None) -> QPointF:
         if not self._action or not self._action.frames:
@@ -806,41 +815,62 @@ class PreviewCanvas(QWidget):
             ))
 
     def _emit_pivot_from_canvas(self, canvas_point: QPointF) -> None:
-        """Convert a displayed pivot point back to pre-rotation normalized space."""
+        """把画布上的 pivot 点反算回原图归一化坐标（``_rotation_pivot_output`` 的逆）。
+
+        必须与正向严格互逆（同样的镜像/旋转顺序、Qt floor 平移、alpha 裁剪口径），
+        否则拖动红色锚点时手到点不到、松手锚点回弹。
+        """
         if not self._action or self._drag_layout is None:
             return
+        idx = self._frame_index
         _, _, positions, _ = self._drag_layout
-        tx, ty, _, _ = positions[self._frame_index]
-        quad = self._action.frame_quads.get(self._frame_index, DEFAULT_QUAD)
+        tx, ty, _, _ = positions[idx]
+        quad = self._action.frame_quads.get(idx, DEFAULT_QUAD)
         dst, w, h = self._quad_dst(quad)
         mo = self._drag_mo
-        point = QPointF(canvas_point.x() - tx + mo.x(), canvas_point.y() - ty + mo.y())
+        point = QPointF(canvas_point.x() - tx + mo.x(),
+                        canvas_point.y() - ty + mo.y())
         if tuple(quad) != DEFAULT_QUAD:
             src_poly = QPolygonF([QPointF(0, 0), QPointF(w, 0), QPointF(w, h), QPointF(0, h)])
-            matrix = QTransform()
-            if not QTransform.quadToQuad(src_poly, QPolygonF(dst), matrix) or not matrix.isInvertible():
+            qm = QTransform()
+            if not QTransform.quadToQuad(src_poly, QPolygonF(dst), qm) or not qm.isInvertible():
                 return
-            point = matrix.inverted()[0].map(point)
-        src = self._action.frames[self._frame_index]
-        angle = self._action.frame_rotations.get(self._frame_index, 0)
-        current = self._action.frame_rotation_pivots.get(self._frame_index, DEFAULT_ROTATION_PIVOT)
-        matrix, _, min_pt = _rotation_transform(src.width(), src.height(), angle, current)
-        rotated = src
-        if self._frame_index in self._action.frame_mirror_h:
-            rotated = rotated.transformed(QTransform().scale(-1.0, 1.0), Qt.TransformationMode.FastTransformation)
-        if self._frame_index in self._action.frame_mirror_v:
-            rotated = rotated.transformed(QTransform().scale(1.0, -1.0), Qt.TransformationMode.FastTransformation)
-        if angle % 360:
-            rotated = rotated.transformed(matrix, Qt.TransformationMode.FastTransformation)
-        content = _alpha_bounds(rotated)
-        trim_x = content.x() if content else 0
-        trim_y = content.y() if content else 0
-        point = QPointF(point.x() + min_pt.x() + trim_x,
-                        point.y() + min_pt.y() + trim_y)
-        if matrix.isInvertible():
-            point = matrix.inverted()[0].map(point)
-        pivot = (max(-2.0, min(3.0, point.x() / max(1, src.width()))),
-                 max(-2.0, min(3.0, point.y() / max(1, src.height()))))
+            point = qm.inverted()[0].map(point)
+        # 至此 point 在"旋转/镜像裁剪后、未应用 quad"的坐标系
+        src = self._action.frames[idx]
+        sw, sh = src.width(), src.height()
+        angle = int(self._action.frame_rotations.get(idx, 0)) % 360
+        mh = idx in self._action.frame_mirror_h
+        mv = idx in self._action.frame_mirror_v
+        transformed = bool(mh or mv or angle)
+        current = self._action.frame_rotation_pivots.get(idx, DEFAULT_ROTATION_PIVOT)
+
+        pm = src
+        if mh:
+            pm = pm.transformed(QTransform().scale(-1.0, 1.0), Qt.TransformationMode.FastTransformation)
+        if mv:
+            pm = pm.transformed(QTransform().scale(1.0, -1.0), Qt.TransformationMode.FastTransformation)
+        matrix = None
+        ox = oy = 0.0
+        if angle:
+            mode = (Qt.TransformationMode.FastTransformation if angle % 90 == 0
+                    else Qt.TransformationMode.SmoothTransformation)
+            matrix, _pp, _mp = _rotation_transform(sw, sh, angle, current)
+            corners = [matrix.map(QPointF(0, 0)), matrix.map(QPointF(sw, 0)),
+                       matrix.map(QPointF(sw, sh)), matrix.map(QPointF(0, sh))]
+            br = QPolygonF(corners).boundingRect()
+            ox, oy = math.floor(br.left()), math.floor(br.top())
+            pm = pm.transformed(matrix, mode)
+        if transformed:
+            bounds = _alpha_bounds(pm)
+            if bounds is not None:
+                point = QPointF(point.x() + bounds.x(), point.y() + bounds.y())
+        if angle and matrix is not None:
+            point = QPointF(point.x() + ox, point.y() + oy)
+            if matrix.isInvertible():
+                point = matrix.inverted()[0].map(point)
+        pivot = (max(-2.0, min(3.0, point.x() / max(1, sw))),
+                 max(-2.0, min(3.0, point.y() / max(1, sh))))
         self.transform_pivot_moved.emit(tuple(round(v, 6) for v in pivot))
 
     def _emit_quad_from_canvas(self, canvas_pts) -> None:
@@ -1155,6 +1185,24 @@ class PreviewCanvas(QWidget):
                                pm.width() * scale, pm.height() * scale)
         return main_rect
 
+    def _dragging_frame_rect(self, cx: float, cy: float, scale: float) -> QRectF:
+        """单帧变换拖动期间当前帧的屏幕矩形（与松手后布局同口径，避免闪跳）。
+
+        锁定拖动开始时的快照布局，按 quad 包围盒最小角的位移做平移补偿，尺寸取
+        当前变换（旋转/quad）裁剪后的实时结果；旋转无 quad 时补偿为 0，单帧左上
+        角恒为 padding，因此拖动中与松手后的位置/尺寸一致，不会回弹。
+        """
+        idx = self._frame_index
+        _, _, pos_drag, _ = self._drag_layout
+        tx, ty, _, _ = pos_drag[idx]
+        mo0 = self._drag_mo
+        mo_new = self._current_mo()
+        offx = mo_new.x() - mo0.x()
+        offy = mo_new.y() - mo0.y()
+        fw, fh = action_frame_size(self._action, idx)
+        return QRectF(cx + (tx + offx) * scale, cy + (ty + offy) * scale,
+                      fw * scale, fh * scale)
+
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
@@ -1224,15 +1272,8 @@ class PreviewCanvas(QWidget):
 
             # 当前帧（始终显示一帧，居中显示）
             if self._transform_mode and self._drag_layout is not None:
-                # 拖动期间锁定布局位置，并用 quad 包围盒最小角变化补偿，避免帧跳动
-                _, _, pos_drag, _ = self._drag_layout
-                tx, ty, _, _ = pos_drag[self._frame_index]
-                mo0 = self._drag_mo
-                mo_new = self._current_mo()
-                offx = mo_new.x() - mo0.x()
-                offy = mo_new.y() - mo0.y()
-                fw, fh = action_frame_size(self._action, self._frame_index)
-                frame_rect = QRectF(cx + (tx + offx) * scale, cy + (ty + offy) * scale, fw * scale, fh * scale)
+                # 拖动期间锁定快照布局、按 quad 包围盒最小角补偿，尺寸取实时变换结果
+                frame_rect = self._dragging_frame_rect(cx, cy, scale)
             else:
                 tx, ty, fw, fh = positions[self._frame_index]
                 frame_rect = QRectF(cx + tx * scale, cy + ty * scale, fw * scale, fh * scale)
@@ -1270,10 +1311,11 @@ class PreviewCanvas(QWidget):
         p.end()
 
     def _draw_transform_handles(self, p: QPainter) -> None:
+        # 拖动中帧/手柄框/红点/圆圈统一用快照布局几何，不做额外平移补偿
+        # （旧 anchor_override 会让手柄框在旋转拖动时脱离帧内容、松手弹回=闪跳）。
         pts = self._handles_canvas(
             self._drag_mo if self._drag_kind else self._current_mo(),
             layout=self._drag_layout if self._drag_kind else None,
-            anchor_override=self._drag_pivot_canvas if self._drag_kind and self._transform_mode == "rotate" else None,
         )
         if not pts:
             return
