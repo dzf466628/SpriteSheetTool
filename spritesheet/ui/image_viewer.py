@@ -570,7 +570,7 @@ class _Canvas(QWidget):
         act_invert = menu.addAction("反选")
         act_select_all = menu.addAction("全选")
         act_clear = menu.addAction("清空选择")
-        act_remove = menu.addAction("删除选中元素")
+        act_remove = menu.addAction("忽略选中元素")
         menu.addSeparator()
         act_export = menu.addAction("导出选中为单独 PNG…")
         chosen = menu.exec(event.globalPos())
@@ -1251,42 +1251,17 @@ class ImageViewer(QWidget):
         self.selection_changed.emit()
 
     def menu_remove_selected_elements(self) -> None:
-        """从工程彻底删除选中元素（不合并）。"""
+        """忽略选中元素：从当前动作移除（不从工程删除，以后还能选回）。"""
         action = self.current_action
         if action is None or not action.selected_indices:
             return
-        removed = set(action.selected_indices)
-        mapping = {}
-        ni = 0
-        for old_i in range(len(self._frames)):
-            if old_i in removed:
-                continue
-            mapping[old_i] = ni
-            ni += 1
-        old_logical = self._frame_logical
-        new_frames = []
-        self._frame_logical = {}
-        for old_i in range(len(self._frames)):
-            if old_i in removed:
-                continue
-            new_frames.append(self._frames[old_i])
-            if old_i in old_logical:
-                self._frame_logical[mapping[old_i]] = old_logical[old_i]
-        self._frames = new_frames
-        for act in self._all_actions():
-            act.selected_indices = [mapping[i] for i in act.selected_indices if i in mapping]
-            act.composite_groups = [
-                [mapping[i] for i in g if i in mapping] for g in act.composite_groups
-            ]
-            act.composite_groups = [g for g in act.composite_groups if g]
-            if act.frame_layouts:
-                new_layouts = []
-                for layout in act.frame_layouts:
-                    nl = [(mapping[i], rx, ry) for i, rx, ry in layout if i in mapping]
-                    if nl:
-                        new_layouts.append(nl)
-                act.frame_layouts = new_layouts or None
-            self.crop_frames_for_action(act)
+        ignored = set(action.selected_indices)
+        action.selected_indices = [i for i in action.selected_indices if i not in ignored]
+        action.composite_groups = [
+            [i for i in g if i not in ignored] for g in action.composite_groups
+        ]
+        action.composite_groups = [g for g in action.composite_groups if g]
+        self.crop_frames_for_action(action)
         self.frames_updated.emit()
         self.selection_changed.emit()
 
