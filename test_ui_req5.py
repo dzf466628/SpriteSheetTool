@@ -182,10 +182,39 @@ def main() -> int:
     check("退出后底部 rotate 弹回", not ab["rotate"].isChecked())
 
     # 点画布空白 → 自动退出 + 发起方弹回
+    # 空白点必须"明显远离控制框"：手柄方块是跨在框线上画的，框外 26px 内算"没瞄准
+    # 手柄"，点它不该退出（那是用户明确要的手感）。所以这里从画布四角里挑一个离
+    # 控制框最远的点来点，而不是写死 (2,2) —— 控制框会随帧尺寸/裁剪变化而移动，
+    # 写死坐标会让测试在"框刚好贴近左上角"时误报。
+    def far_blank_point(cv):
+        pts = [cv._logical_to_screen(p) for p in cv._handles_canvas(cv._current_mo())]
+        if not pts:
+            return QPoint(2, 2)
+        bx0, bx1 = min(p.x() for p in pts), max(p.x() for p in pts)
+        by0, by1 = min(p.y() for p in pts), max(p.y() for p in pts)
+
+        def dist(q):
+            dx = max(bx0 - q.x(), 0, q.x() - bx1)
+            dy = max(by0 - q.y(), 0, q.y() - by1)
+            return (dx * dx + dy * dy) ** 0.5
+
+        cands = [QPoint(3, 3), QPoint(cv.width() - 4, 3),
+                 QPoint(3, cv.height() - 4), QPoint(cv.width() - 4, cv.height() - 4)]
+        return max(cands, key=dist)
+
     ab["rotate"].click()
     check("空白点击前已激活 rotate", canvas.transform_mode() == "rotate"
           and ab["rotate"].isChecked())
-    QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(2, 2))
+    # 先把预览区放大并缩小到 0.5 倍：控制框会随帧尺寸变化，若画布刚好被框铺满，
+    # 就根本不存在"空白处"（那时点哪都在框内 26px 的手柄容差里，本来就**不该**退出）。
+    canvas.resize(720, 560)
+    canvas._fit = False
+    canvas._zoom = 0.5
+    canvas._offset = QPointF(180, 130)
+    app.processEvents()
+
+    blank = far_blank_point(canvas)
+    QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=blank)
     check("点画布空白自动退出变换模式", canvas.transform_mode() is None,
           f"实际: {canvas.transform_mode()!r}")
     check("空白点击后底部按钮弹回", not ab["rotate"].isChecked())

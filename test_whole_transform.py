@@ -179,9 +179,16 @@ pv._populate_thumbs = _counting_populate
 QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=p0)
 QTest.mouseMove(canvas, pos=p0 + QPoint(-20, -12))
 check("拖动中模式保持", canvas.transform_mode() == "scale" and canvas._drag_kind == "corner")
-# 性能：整体手柄拖动中绘制必须复用拖动布局快照（否则每帧对全部帧透明裁剪，卡顿）
-check("拖动中布局冻结（不全帧重算）",
-      canvas._drag_layout is not None and canvas._paint_layout() is canvas._drag_layout)
+# 落位口径：整体模式拖动中每一帧都按**实时布局**画（== 松手后/播放的落位），
+# 所以拖动中看到的相对位置就是导出/播放里的相对位置。
+# （旧实现是"拖动中冻结布局快照 + 松手重排"，那正是"其它帧位置变了又回去"的闪。）
+_live = compute_preview_layout(action, canvas._frame_index)
+_paint = canvas._paint_layout()
+check("拖动中按实时布局落位（与松手后同口径）",
+      canvas._drag_layout is not None and _paint is not None
+      and [[round(v, 3) for v in _paint[2][i]] for i in range(len(_paint[2]))]
+      == [[round(v, 3) for v in _live[2][i]] for i in range(len(_live[2]))],
+      f"paint={_paint[2] if _paint else None} live={_live[2]}")
 QTest.mouseMove(canvas, pos=p0 + QPoint(-30, -18))
 check("拖动中不重建缩略图", _calls["n"] == 0, f"rebuild={_calls['n']}")
 check("拖动中画布尺寸标签挂起", getattr(pv, "_label_dirty", False) is True)

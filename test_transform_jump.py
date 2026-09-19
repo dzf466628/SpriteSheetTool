@@ -832,14 +832,22 @@ def whole_pivot_spread(c):
 
     = 整体旋转是否还绕同一个点（各帧 pivot 画布位置必须重合）。改完锚点后这个必须
     仍然是 0 —— 否则"之后的操作"就不对了。
+
+    口径（与实现一致）：**实时布局的落位 + 该帧自己 pixmap 里的 pivot 像素**
+    —— 动作编辑 == 单帧模式全选所有帧，各帧按播放/导出的落位摆，而不是被强行
+    对齐到同一个点（那正是"坐标不统一、有上有下"的老毛病）。
     """
-    _anchor, targets = c._whole_place_targets()
+    layout = c._paint_layout()
+    if layout is None:
+        return 99.0
+    positions = layout[2]
     pts = []
     for i in c._transform_indices:
+        tx, ty, _w, _h = positions[i]
         px, py = frame_pivot_in_pixmap(c._action, i)
-        sx, sy = frame_pivot_in_pixmap(c._action, i, c._whole_place_pivot(i))
-        t = targets[i]
-        pts.append((t.x() + (px - sx), t.y() + (py - sy)))
+        pts.append((tx + px, ty + py))
+    if not pts:
+        return 99.0
     return max(math.hypot(p[0] - pts[0][0], p[1] - pts[0][1]) for p in pts)
 
 
