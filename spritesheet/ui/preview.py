@@ -1833,16 +1833,17 @@ class AnimAdjustPanel(QWidget):
         trans_v.addWidget(self._transform_grid)
         # 当前变换摘要：单独一行、占满宽度
         self.lbl_transform_summary = QLabel("当前变换：无变换")
-        self.lbl_transform_summary.setMinimumHeight(28)
+        self.lbl_transform_summary.setMinimumHeight(48)
         self.lbl_transform_summary.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.lbl_transform_summary.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.lbl_transform_summary.setWordWrap(True)
+        self.lbl_transform_summary.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.lbl_transform_summary.setStyleSheet(
             "QLabel { color: #bdbdbd; background: #252525; border: 1px solid #3d3d3d; "
             "border-radius: 3px; padding: 0 7px; }"
         )
         self.lbl_transform_summary.setToolTip("当前帧的全部变换状态；旋转角度只读")
         trans_v.addWidget(self.lbl_transform_summary)
-        f1.addRow("变换", trans_wrap)
+        f1.addRow(trans_wrap)
 
         layout.addWidget(g1)
 

@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 from PyQt6.QtWidgets import (
-    QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout,
+    QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout,
 )
 
 from spritesheet.settings import (
@@ -21,6 +21,7 @@ from spritesheet.settings import (
     set_show_project_thumbnail, show_project_thumbnail,
     set_undo_limit, undo_limit,
 )
+from spritesheet.ui.widgets import CompactSpinBox
 
 
 class SettingsDialog(QDialog):
@@ -69,11 +70,12 @@ class SettingsDialog(QDialog):
 
         row_min = QHBoxLayout()
         row_min.addWidget(QLabel("去除最长边不超过"))
-        self.spin_min_area = QSpinBox()
+        self.spin_min_area = CompactSpinBox()
         self.spin_min_area.setRange(0, 256)
         self.spin_min_area.setSingleStep(1)
         self.spin_min_area.setValue(detect_min_area())
         self.spin_min_area.setFixedWidth(80)
+        self.spin_min_area.setFixedHeight(24)
         self.spin_min_area.valueChanged.connect(self._on_min_area_changed)
         row_min.addWidget(self.spin_min_area)
         row_min.addWidget(QLabel("像素的碎片"))
@@ -102,11 +104,12 @@ class SettingsDialog(QDialog):
 
         row_hist = QHBoxLayout()
         row_hist.addWidget(QLabel("保留最近"))
-        self.spin_undo_limit = QSpinBox()
+        self.spin_undo_limit = CompactSpinBox()
         self.spin_undo_limit.setRange(0, 500)
         self.spin_undo_limit.setSingleStep(1)
         self.spin_undo_limit.setValue(undo_limit())
         self.spin_undo_limit.setFixedWidth(80)
+        self.spin_undo_limit.setFixedHeight(24)
         self.spin_undo_limit.valueChanged.connect(self._on_undo_limit_changed)
         row_hist.addWidget(self.spin_undo_limit)
         row_hist.addWidget(QLabel("步操作（0-500，默认100）"))
