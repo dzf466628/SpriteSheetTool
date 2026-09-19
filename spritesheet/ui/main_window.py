@@ -1733,6 +1733,18 @@ class MainWindow(QMainWindow):
                 ("预览", pv.preview_box),
                 ("帧编辑", pv.edit_box))
 
+    def _preview_float_size(self, remembered: QSize) -> QSize:
+        """预览悬浮窗的**默认**尺寸 = 画布方形（用户要求"默认方形"）。
+
+        = 宽取默认窗口里的宽度 W，高 = W + 控制条 + 缩略图 + 间距，
+        这样刚脱出来时中间那块画布是 W×W 的正方形；之后用户可以拖边框随意改大小。
+        """
+        pv = self.preview
+        extra = (pv.ctrl_widget.height() + pv.thumb_list.height()
+                 + 2 * pv.preview_box.layout().spacing())
+        side = max(240, remembered.width())
+        return QSize(side, side + max(0, extra))
+
     def _remember_panel_sizes(self) -> None:
         """窗口处于默认大小时，记下三块区域的尺寸（悬浮窗要沿用它们）。"""
         if self._panels_floating or self.isMaximized() or self.isFullScreen():
@@ -1769,12 +1781,15 @@ class MainWindow(QMainWindow):
         self._splitter_sizes_normal = self.splitter.sizes()
         records = []
         for title, w, put_back in self._float_targets():
-            remembered = self._panel_sizes_normal.get(title)
+            remembered = self._panel_sizes_normal.get(title) or QSize(w.width(), w.height())
+            is_preview = (w is pv.preview_box)
             records.append({
                 "w": w,
                 "title": title,
-                # ★ 尺寸原样沿用"默认窗口"里记下的那一份，绝不重算
-                "size": remembered or QSize(w.width(), w.height()),
+                # ★ 尺寸沿用"默认窗口"里记下的那一份；预览窗按"画布方形"给默认尺寸
+                "size": self._preview_float_size(remembered) if is_preview else remembered,
+                # 预览窗：可移动 + 可拖边框改大小；另两块：锁住尺寸（内部布局不许被拉乱）
+                "fixed": not is_preview,
                 "pos": w.mapToGlobal(QPoint(0, 0)),
                 "parent": w.parentWidget(),
                 "put_back": put_back,
@@ -1791,7 +1806,13 @@ class MainWindow(QMainWindow):
             w.setParent(None)
             w.setWindowFlags(Qt.WindowType.Window)
             w.setWindowTitle(rec["title"])
-            w.setFixedSize(rec["size"])        # ★ 固定住：大小不会被拉变、内部布局不乱
+            if rec["fixed"]:
+                w.setFixedSize(rec["size"])     # ★ 锁住：大小不会被拉变、内部布局不乱
+            else:
+                # 预览窗：给一个能用的最小尺寸，其余随意拖（拖边框改大小）
+                w.setMinimumSize(240, 200)
+                w.setMaximumSize(16777215, 16777215)
+                w.resize(rec["size"])
             w.move(rec["pos"])
             w.show()
             w.raise_()

@@ -104,13 +104,37 @@ wait(300)
 floated = sizes()
 check("三个都变成独立窗口", all(w.isWindow() for _n, w in panels) and win._panels_floating,
       f"{[(n, w.isWindow()) for n, w in panels]}")
-check("尺寸与默认窗口完全一致（★大小不变）", floated == docked, f"默认={docked} 悬浮={floated}")
-check("内部结构比例不变（画布/控制条/缩略图/面板）", inner() == docked_inner,
-      f"默认={docked_inner} 悬浮={inner()}")
+# 预览窗例外：按用户要求"默认画布方形" —— 宽不变，高 = 宽 + 控制条 + 缩略图
+pw, ph = floated["预览"]
+check("预览窗默认=画布方形（宽不变、高=宽+控制条+缩略图）",
+      pw == docked["预览"][0] and ph == pw + 92 and pv.canvas.width() == pv.canvas.height() == pw,
+      f"窗口={floated['预览']} 画布={pv.canvas.width()}x{pv.canvas.height()}")
+check("另两块尺寸与默认窗口完全一致（★大小不变）",
+      floated["动作编辑"] == docked["动作编辑"] and floated["帧编辑"] == docked["帧编辑"],
+      f"默认={docked} 悬浮={floated}")
+check("预览窗可拖边框改大小（没被锁死）",
+      pv.preview_box.maximumWidth() > 10000 and pv.preview_box.minimumWidth() < 300,
+      f"min={pv.preview_box.minimumSize()} max={pv.preview_box.maximumSize()}")
+check("另两块锁住尺寸（内部布局不许被拉乱）",
+      win.anim_bar.minimumSize() == win.anim_bar.maximumSize()
+      and pv.edit_box.minimumSize() == pv.edit_box.maximumSize(),
+      f"动作编辑 min={win.anim_bar.minimumSize()} max={win.anim_bar.maximumSize()}")
 check("预览整块隐藏（宽高让给原图区）", not pv.isVisible())
 check("原图区拿到全部宽度",
       win.splitter.sizes()[1] == 0 and win.splitter.sizes()[0] > 0,
       f"splitter={win.splitter.sizes()}")
+
+print("\n2b. 悬浮的预览窗随便拖大小：")
+pv.preview_box.move(pv.preview_box.x() + 40, pv.preview_box.y() + 30)
+pv.preview_box.resize(520, 360)
+wait(200)
+check("拖边框改大小后画布跟着变（不崩、不缩错）",
+      pv.canvas.width() == 520 and pv.canvas.height() == 360 - 32 - 52 - 8,
+      f"窗口={pv.preview_box.width()}x{pv.preview_box.height()} "
+      f"画布={pv.canvas.width()}x{pv.canvas.height()}")
+check("窗口位置可以移动", pv.preview_box.isWindow())
+pv.preview_box.resize(*floated["预览"])     # 拖回默认方形，后面按默认值还原
+wait(120)
 
 print("\n3. 还原窗口 → 三块塞回原布局，比例复位：")
 win.setWindowState(Qt.WindowState.WindowNoState)
@@ -133,7 +157,10 @@ ok = True
 for _ in range(2):
     win.setWindowState(Qt.WindowState.WindowMaximized)
     wait(150)
-    ok = ok and sizes() == docked and all(w.isWindow() for _n, w in panels)
+    s = sizes()
+    ok = ok and s["动作编辑"] == docked["动作编辑"] and s["帧编辑"] == docked["帧编辑"] \
+        and s["预览"] == (docked["预览"][0], docked["预览"][0] + 92) \
+        and all(w.isWindow() for _n, w in panels)
     win.setWindowState(Qt.WindowState.WindowNoState)
     wait(250)
     ok = ok and sizes() == docked and all(not w.isWindow() for _n, w in panels)
