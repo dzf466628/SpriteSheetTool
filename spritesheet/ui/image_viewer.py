@@ -684,8 +684,8 @@ class _DragGrip(QWidget):
 
     LINES = 3
     LINE_H = 18          # 竖线长度（用户再次要求"再长 4 像素"：14 → 18）
-    GAP = 0              # 三根线完全贴紧（间距 1 → 0，连成 3px 实条）
-    SHIFT_RIGHT = 8      # 左侧留白 8px：三根线在 11px 控件里右对齐，最右一根距工具条右边 1px
+    GAP = 1              # 三根线间距 1px（0 会糊成一条，用户要求向左分散）
+    SHIFT_RIGHT = 6      # 左侧留白 6px：三根线在 11px 控件里右对齐，最右一根距工具条右边 1px
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)

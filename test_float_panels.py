@@ -151,6 +151,14 @@ def card_pixels(card, pt):
     px = img.pixel(pt)
     return ((px >> 16) & 255, (px >> 8) & 255, px & 255, (px >> 24) & 255)
 
+def card_region_ok(card):
+    """圆角外形：区域非空、中心在内、两个底角被挖空。"""
+    r = card._card_region()
+    return (not r.isEmpty()
+            and r.contains(QPoint(card.width() // 2, card.height() // 2))
+            and not r.contains(QPoint(0, card.height() - 1))
+            and not r.contains(QPoint(card.width() - 1, card.height() - 1)))
+
 
 for name in ("动作编辑", "帧编辑", "预览"):
     card = win._float_cards.get(name)
@@ -172,9 +180,16 @@ for name in ("动作编辑", "帧编辑", "预览"):
     check(f"{name}：面板内容在卡片里", panel.parent() is card.body,
           f"parent={panel.parent().__class__.__name__ if panel.parent() else None}")
     check(f"{name}：圆角（四角是透明的）", corner[3] == 0, f"左上角像素={corner}")
+    check(f"{name}：圆角遮罩生效（方角内容盖不住圆角描边）",
+          card is not None and card_region_ok(card),
+          f"mask_empty={card._card_region().isEmpty() if card else None}")
 
 check("历史卡片同样没有关闭按钮（最大化时不能关掉）",
       win._history_card is not None and not hasattr(win._history_card, "btn_close"))
+check("动作编辑/帧编辑内部重复标题条悬浮时隐藏",
+      not win.anim_bar._bar_title.isVisible() and not pv.panel_title.isVisible(),
+      f"动作标题可见={win.anim_bar._bar_title.isVisible()} "
+      f"帧标题可见={pv.panel_title.isVisible()}")
 
 print("\n2b. 预览卡片：画布方形 + 尺寸固定 + 拖动标题栏可移动：")
 card_pv = win._float_cards.get("预览")
@@ -200,6 +215,19 @@ QTest.mouseRelease(card_pv, Qt.MouseButton.LeftButton, pos=QPoint(20 + 60, 8 + 4
 wait(80)
 check("拖标题栏能移动（四块都可拖）", card_pv.pos() != pos0,
       f"{pos0.x()},{pos0.y()} -> {card_pv.pos().x()},{card_pv.pos().y()}")
+card_pv._restore_edge_cursor()
+corner_in_panel = pv.preview_box.mapFrom(card_pv, QPoint(card_pv.width() - 3, card_pv.height() - 3))
+QTest.mouseMove(pv.preview_box, pos=corner_in_panel)
+wait(60)
+_oc = QApplication.overrideCursor()
+check("预览窗右下角悬停（含落在子控件上）光标=斜双箭头",
+      _oc is not None and _oc.shape() == Qt.CursorShape.SizeFDiagCursor,
+      f"override={_oc.shape() if _oc else None}")
+mid_in_panel = pv.preview_box.mapFrom(card_pv, QPoint(card_pv.width() // 2, card_pv.height() // 2))
+QTest.mouseMove(pv.preview_box, pos=mid_in_panel)
+wait(40)
+check("鼠标移到窗口中间后缩放光标复位", QApplication.overrideCursor() is None,
+      f"override={QApplication.overrideCursor()}")
 
 print("\n3. 还原窗口 → 三块塞回原布局，比例复位：")
 win.setWindowState(Qt.WindowState.WindowNoState)
@@ -220,6 +248,16 @@ check("左列顺序仍是 原图区 → 动作编辑",
       [win.left_layout.itemAt(i).widget().__class__.__name__
        for i in range(win.left_layout.count())] == ["ImageViewer", "AnimSettingsBar"],
       f"{[win.left_layout.itemAt(i).widget().__class__.__name__ for i in range(win.left_layout.count())]}")
+check("还原后动作编辑/帧编辑内部标题条恢复显示",
+      win.anim_bar._bar_title.isVisible() and pv.panel_title.isVisible(),
+      f"动作={win.anim_bar._bar_title.isVisible()} 帧={pv.panel_title.isVisible()}")
+
+# 还原停靠后卡片隐藏，残留在内容子树上的事件过滤器必须放行：
+# 悬停停靠面板的边缘不能换缩放光标、不能进入缩放态（否则会吞掉正常点击）
+QTest.mouseMove(pv.preview_box, pos=QPoint(2, 2))
+check("还原停靠后悬停预览面板边缘不触发缩放（隐藏卡片的残留过滤器放行）",
+      QApplication.overrideCursor() is None and card_pv._resize_edge is None,
+      f"override={QApplication.overrideCursor()} edge={card_pv._resize_edge}")
 
 print("\n4. 可以反复最大化/还原：")
 ok = True
@@ -254,9 +292,9 @@ check("画布缩放后不再被强行搬回右上角", tb.pos() == moved,
       f"{moved.x()},{moved.y()} -> {tb.pos().x()},{tb.pos().y()}")
 grip = win.image_viewer._toolbar.grip
 tb = win.image_viewer._toolbar
-check("原图工具条把手：3 根 18px 长、间距 0 贴紧、最右一根距工具条右边 1px",
-      grip.LINES == 3 and grip.LINE_H == 18 and grip.GAP == 0
-      and grip.width() == 3 + grip.SHIFT_RIGHT == 11
+check("原图工具条把手：3 根 18px 长、间距 1px、最右一根距工具条右边 1px",
+      grip.LINES == 3 and grip.LINE_H == 18 and grip.GAP == 1
+      and grip.width() == 3 + 2 + grip.SHIFT_RIGHT == 11
       and grip.mapTo(tb, QPoint(grip.width() - 1, 0)).x() == tb.width() - 2,
       f"grip={grip.width()}x{grip.height()} LINE_H={grip.LINE_H} GAP={grip.GAP} "
       f"右边缘x={grip.mapTo(tb, QPoint(grip.width(), 0)).x()} toolbar宽={tb.width()}")
@@ -292,6 +330,7 @@ _h_corner = card_pixels(card_h, QPoint(1, card_h.height() - 1))
 check("历史卡片底色不透明（数像素：不是透明弹窗）",
       _h_body[3] == 255 and _h_corner[3] == 0,
       f"卡片内像素={_h_body} 圆角外={_h_corner}")
+check("历史卡片圆角遮罩生效", card_region_ok(card_h))
 win.setWindowState(Qt.WindowState.WindowMaximized)
 wait(250)
 check("最大化后历史卡片依然显示、依然是独立窗口",

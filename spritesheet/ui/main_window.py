@@ -17,9 +17,10 @@ import sys
 import weakref
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import (
-    QAction, QColor, QKeySequence, QPainter, QPen, QPixmap, QUndoCommand, QUndoStack,
+    QAction, QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QRegion,
+    QUndoCommand, QUndoStack,
 )
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel,
@@ -429,6 +430,7 @@ class _FloatCard(QWidget):
     RADIUS = 10.0
 
     EDGE = 6                    # 拖边框改大小的感应宽度（像素）
+    _corner_cache = None       # 圆角四角的 QRegion 模板（只与 RADIUS 有关，类级缓存）
 
     def __init__(self, title: str, parent=None, resizable: bool = False) -> None:
         super().__init__(parent, Qt.WindowType.Tool)
@@ -441,6 +443,9 @@ class _FloatCard(QWidget):
         self._resize_edge = None        # 拖边框改大小时记的方向（'r'/'b'/'br'…）
         self._resize_origin = None
         self.resizable = bool(resizable)
+        self.setMouseTracking(True)
+        self._edge_cursor_on = False    # 边缘缩放光标是否正由 overrideCursor 接管
+        self._did_grab = False          # 本次拖边是否由卡片 grabMouse（offscreen 不抓）
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(1, 1, 1, 1)        # 给 1px 边框留位置
@@ -499,6 +504,82 @@ class _FloatCard(QWidget):
     def set_content(self, w: QWidget) -> None:
         """把面板塞进卡片内容区。"""
         self.body_layout.addWidget(w)
+        if self.resizable:
+            self._install_edge_filters(w)
+
+    def _install_edge_filters(self, w: QWidget) -> None:
+        """内容子控件铺满边缘，卡片自己收不到边缘的鼠标事件；递归装过滤器，
+        保证在子控件上也能①显示缩放双向箭头 ②按下开始拖边。"""
+        w.setMouseTracking(True)
+        w.installEventFilter(self)
+        for child in w.findChildren(QWidget):
+            child.setMouseTracking(True)
+            child.installEventFilter(self)
+
+    @classmethod
+    def _corner_regions(cls):
+        """渲染一张 4R×4R 圆角瓦片（与 paintEvent 同路径），取四个角的 R×R
+        卡片**完全不透明**的像素逐行收成 QRegion，作为四角模板。
+        遮罩边界与真实绘制逐像素一致：方角内容不可能露到圆角外，
+        也不会误裁实心描边。只依赖 RADIUS/BORDER_W，全程类级只算一次。"""
+        if cls._corner_cache is not None:
+            return cls._corner_cache
+        rad = int(round(cls.RADIUS))
+        span = 4 * rad     # 瓦片足够大，圆角的栅格化才与真实大卡片一致
+        tile = QImage(span, span, QImage.Format.Format_ARGB32)
+        tile.fill(QColor(0, 0, 0, 0))
+        p = QPainter(tile)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        half = cls.BORDER_W / 2.0
+        p.setPen(QPen(QColor(cls.BORDER_COLOR), float(cls.BORDER_W)))
+        p.setBrush(QColor(255, 255, 255))
+        p.drawRoundedRect(QRectF(0, 0, span, span).adjusted(half, half, -half, -half),
+                          cls.RADIUS, cls.RADIUS)
+        p.end()
+        # 瓦片四个角的 R×R 即四个角模板：(左上, 右上, 左下, 右下)
+        origins = {(0, 0): (0, 0), (1, 0): (3 * rad, 0),
+                   (0, 1): (0, 3 * rad), (1, 1): (3 * rad, 3 * rad)}
+        quads = {}
+        for (qx, qy), (ox, oy) in origins.items():
+            reg = QRegion()
+            for y in range(oy, oy + rad):
+                x0 = None
+                for x in range(ox, ox + rad):
+                    opaque = (tile.pixel(x, y) >> 24) & 255 == 255
+                    if opaque and x0 is None:
+                        x0 = x
+                    if not opaque and x0 is not None:
+                        reg = reg.united(QRect(x0 - ox, y - oy, x - x0, 1))
+                        x0 = None
+                if x0 is not None:
+                    reg = reg.united(QRect(x0 - ox, y - oy, ox + rad - x0, 1))
+            quads[(qx, qy)] = reg
+        cls._corner_cache = quads
+        return quads
+
+    def _card_region(self) -> QRegion:
+        """圆角外形：中间矩形带 + 四个与实际绘制一致的圆角模板。"""
+        rad = int(round(self.RADIUS))
+        w, h = self.width(), self.height()
+        quads = self._corner_regions()
+        region = QRegion(QRect(0, rad, w, h - 2 * rad))          # 中间整条
+        region = region.united(QRect(rad, 0, w - 2 * rad, rad))  # 顶部直边
+        region = region.united(QRect(rad, h - rad, w - 2 * rad, rad))  # 底部直边
+        region = region.united(quads[(0, 0)].translated(0, 0))
+        region = region.united(quads[(1, 0)].translated(w - rad, 0))
+        region = region.united(quads[(0, 1)].translated(0, h - rad))
+        region = region.united(quads[(1, 1)].translated(w - rad, h - rad))
+        return region
+
+    def resizeEvent(self, event):
+        """圆角遮罩：内部面板是方角不透明底，不挖掉四角会把卡片圆角描边盖住。"""
+        if QApplication.platformName() != 'offscreen':
+            self.setMask(self._card_region())
+        super().resizeEvent(event)
+
+    def hideEvent(self, event):
+        self._restore_edge_cursor()
+        super().hideEvent(event)
 
     def take_content(self):
         item = self.body_layout.takeAt(0)
@@ -529,22 +610,117 @@ class _FloatCard(QWidget):
             return "t"
         return ""
 
-    def _update_cursor(self, edge: str) -> None:
-        cursors = {
-            "r": Qt.CursorShape.SizeHorCursor, "l": Qt.CursorShape.SizeHorCursor,
-            "b": Qt.CursorShape.SizeVerCursor, "t": Qt.CursorShape.SizeVerCursor,
-            "br": Qt.CursorShape.SizeFDiagCursor, "tl": Qt.CursorShape.SizeFDiagCursor,
-            "bl": Qt.CursorShape.SizeBDiagCursor, "tr": Qt.CursorShape.SizeBDiagCursor,
-        }
-        self.setCursor(cursors.get(edge, Qt.CursorShape.SizeAllCursor))
+    # 每条边/角对应的缩放光标：角上必须是斜双箭头，不能是十字移动光标
+    _EDGE_CURSORS = {
+        "r": Qt.CursorShape.SizeHorCursor, "l": Qt.CursorShape.SizeHorCursor,
+        "b": Qt.CursorShape.SizeVerCursor, "t": Qt.CursorShape.SizeVerCursor,
+        "br": Qt.CursorShape.SizeFDiagCursor, "tl": Qt.CursorShape.SizeFDiagCursor,
+        "bl": Qt.CursorShape.SizeBDiagCursor, "tr": Qt.CursorShape.SizeBDiagCursor,
+    }
+
+    def _set_edge_cursor(self, edge: str) -> None:
+        cur = self._EDGE_CURSORS.get(edge, Qt.CursorShape.SizeAllCursor)
+        if self._edge_cursor_on:
+            QApplication.changeOverrideCursor(cur)
+        else:
+            QApplication.setOverrideCursor(cur)
+            self._edge_cursor_on = True
+
+    def _restore_edge_cursor(self) -> None:
+        if self._edge_cursor_on:
+            QApplication.restoreOverrideCursor()
+            self._edge_cursor_on = False
+
+    def _begin_resize(self, global_pos) -> bool:
+        """在卡片坐标里判断落在哪条边；命中就进入缩放（光标换箭头、抓取鼠标）。"""
+        edge = self._edge_at(self.mapFromGlobal(global_pos)) if self.resizable else ""
+        if not edge:
+            return False
+        self._resize_edge = edge
+        self._resize_origin = (QPoint(global_pos), self.geometry())
+        self._set_edge_cursor(edge)
+        self._did_grab = False
+        if QApplication.platformName() != 'offscreen':
+            try:
+                self.grabMouse()   # 拖出窗口外也不断拖（offscreen 平台会崩，跳过）
+                self._did_grab = True
+            except Exception:
+                pass
+        return True
+
+    def _apply_resize(self, global_pos) -> None:
+        if self._resize_edge is None or self._resize_origin is None:
+            return
+        start, geo = self._resize_origin
+        now = QPoint(global_pos)
+        dx, dy = now.x() - start.x(), now.y() - start.y()
+        min_w, min_h = max(200, self.minimumWidth()), max(150, self.minimumHeight())
+        rect = QRectF(geo)
+        if "r" in self._resize_edge:
+            rect.setWidth(max(min_w, geo.width() + dx))
+        if "l" in self._resize_edge:
+            new_w = max(min_w, geo.width() - dx)
+            rect.setLeft(geo.right() - new_w + 1)
+            rect.setWidth(new_w)
+        if "b" in self._resize_edge:
+            rect.setHeight(max(min_h, geo.height() + dy))
+        if "t" in self._resize_edge:
+            new_h = max(min_h, geo.height() - dy)
+            rect.setTop(geo.bottom() - new_h + 1)
+            rect.setHeight(new_h)
+        self.setGeometry(rect.toRect())
+
+    def _end_resize(self) -> None:
+        if self._did_grab:
+            try:
+                self.releaseMouse()
+            except Exception:
+                pass
+        self._did_grab = False
+        self._resize_edge = None
+        self._resize_origin = None
+        self._restore_edge_cursor()
+
+    def eventFilter(self, obj, event):
+        """穿透到内容子控件：边缘悬停换缩放光标、在子控件上按下也能开始拖边。
+        只在悬浮可见时工作；内容还原停靠后卡片隐藏，残留过滤器必须放行。"""
+        if self.resizable and self.isVisible():
+            t = event.type()
+            if t == QEvent.Type.MouseMove:
+                gp = event.globalPosition().toPoint()
+                if self._resize_edge is not None:
+                    self._apply_resize(gp)
+                    return True
+                edge = self._edge_at(self.mapFromGlobal(gp))
+                if edge:
+                    self._set_edge_cursor(edge)
+                else:
+                    self._restore_edge_cursor()
+            elif (t == QEvent.Type.MouseButtonPress
+                  and event.button() == Qt.MouseButton.LeftButton):
+                if self._begin_resize(event.globalPosition().toPoint()):
+                    event.accept()
+                    return True
+            elif (t == QEvent.Type.MouseButtonRelease
+                  and event.button() == Qt.MouseButton.LeftButton
+                  and self._resize_edge is not None):
+                self._apply_resize(event.globalPosition().toPoint())
+                self._end_resize()
+                event.accept()
+                return True
+            elif t == QEvent.Type.Leave and self._resize_edge is None:
+                self._restore_edge_cursor()
+            elif t == QEvent.Type.ChildPolished:
+                child = event.child()
+                if isinstance(child, QWidget):
+                    child.setMouseTracking(True)
+                    child.installEventFilter(self)
+        return super().eventFilter(obj, event)
 
     def mousePressEvent(self, event):
         pos = event.position().toPoint()
         if event.button() == Qt.MouseButton.LeftButton:
-            edge = self._edge_at(pos)
-            if edge:
-                self._resize_edge = edge
-                self._resize_origin = (event.globalPosition().toPoint(), self.geometry())
+            if self._begin_resize(event.globalPosition().toPoint()):
                 event.accept()
                 return
             if pos.y() <= self.TITLE_H + 1:      # 标题栏 = 拖窗口
@@ -555,25 +731,8 @@ class _FloatCard(QWidget):
 
     def mouseMoveEvent(self, event):
         pos = event.position().toPoint()
-        if self._resize_edge is not None and self._resize_origin is not None:
-            start, geo = self._resize_origin
-            now = event.globalPosition().toPoint()
-            dx, dy = now.x() - start.x(), now.y() - start.y()
-            min_w, min_h = max(200, self.minimumWidth()), max(150, self.minimumHeight())
-            rect = QRectF(geo)
-            if "r" in self._resize_edge:
-                rect.setWidth(max(min_w, geo.width() + dx))
-            if "l" in self._resize_edge:
-                new_w = max(min_w, geo.width() - dx)
-                rect.setLeft(geo.right() - new_w + 1)
-                rect.setWidth(new_w)
-            if "b" in self._resize_edge:
-                rect.setHeight(max(min_h, geo.height() + dy))
-            if "t" in self._resize_edge:
-                new_h = max(min_h, geo.height() - dy)
-                rect.setTop(geo.bottom() - new_h + 1)
-                rect.setHeight(new_h)
-            self.setGeometry(rect.toRect())
+        if self._resize_edge is not None:
+            self._apply_resize(event.globalPosition().toPoint())
             event.accept()
             return
         if self._drag_offset is not None:
@@ -581,13 +740,20 @@ class _FloatCard(QWidget):
             event.accept()
             return
         if self.resizable:
-            self._update_cursor(self._edge_at(pos))
+            edge = self._edge_at(pos)
+            if edge:
+                self._set_edge_cursor(edge)
+            else:
+                self._restore_edge_cursor()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._resize_edge is not None:
+            self._apply_resize(event.globalPosition().toPoint())
+            self._end_resize()
+            event.accept()
+            return
         self._drag_offset = None
-        self._resize_edge = None
-        self._resize_origin = None
         super().mouseReleaseEvent(event)
 
 
@@ -2003,6 +2169,10 @@ class MainWindow(QMainWindow):
         self._float_records = records
         self._panels_floating = True
 
+        # 卡片自己已有标题栏：两块面板内部的标题条重复了，悬浮时隐藏，还原时恢复
+        self.anim_bar._bar_title.setVisible(False)
+        pv.panel_title.setVisible(False)
+
         # 三块都飞走后，预览整块隐藏，腾出来的宽高全给原图区
         pv.hide()
         self.splitter.setSizes([max(1, sum(self._splitter_sizes_normal)), 0])
@@ -2056,6 +2226,9 @@ class MainWindow(QMainWindow):
             rec["put_back"](w)                  # 再插回原来的位置（保序）
             w.show()
         self._float_records = []
+        # 回到停靠布局：面板内部标题条恢复显示
+        self.anim_bar._bar_title.setVisible(True)
+        self.preview.panel_title.setVisible(True)
         self.preview.show()
         if self._splitter_sizes_normal:
             self.splitter.setSizes(self._splitter_sizes_normal)
