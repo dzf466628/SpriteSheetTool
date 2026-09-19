@@ -473,6 +473,9 @@ class MainWindow(QMainWindow):
         self._history_dock.setMinimumWidth(180)
         self._history_dock.setMaximumWidth(340)
         self._history_dock.setMinimumHeight(300)
+        # 历史记录本来就是个"有主窗口做 owner 的浮动窗口"，天然显示在主窗口前面；
+        # 这里只额外挂上"贴屏幕边缘"。注意：QDockWidget 不要手动改 windowFlags
+        # （加 Qt.Tool 会在 show 时崩，实测 0xC0000409）。
         # 放在主窗口右侧
         self._history_dock.move(self.x() + self.width() + 10, self.y() + 80)
         self._history_dock.show()
@@ -1714,6 +1717,8 @@ class MainWindow(QMainWindow):
         #   ③ 预览窗口（画布 + 播放控制条 + 缩略图）
         self._panels_floating = False
         self._float_records: list[dict] = []
+        # 预览悬浮窗默认尺寸 = 画布方形再缩 30%（用户："有点大了，再缩小 30%"）
+        self.PREVIEW_FLOAT_SCALE = 0.7
         # ★ "默认窗口"里三块各自的尺寸：最大化脱出时**按这个尺寸**做悬浮窗。
         # 必须在窗口还没最大化时记（最大化时 Qt 会先按新窗口重排一次布局，
         # 那时量到的就不是默认尺寸了）。见 _remember_panel_sizes。
@@ -1723,6 +1728,10 @@ class MainWindow(QMainWindow):
         self._panel_size_timer.setSingleShot(True)
         self._panel_size_timer.setInterval(250)
         self._panel_size_timer.timeout.connect(self._remember_panel_sizes)
+        # 贴边缘：浮着的时候每 350ms 检查一次（不放在 Move 事件里，见 _snap_floating_to_edge）
+        self._snap_timer = QTimer(self)
+        self._snap_timer.setInterval(350)
+        self._snap_timer.timeout.connect(self._snap_all_floating)
 
     def _schedule_panel_size_memory(self) -> None:
         self._panel_size_timer.start()
@@ -1738,11 +1747,12 @@ class MainWindow(QMainWindow):
 
         = 宽取默认窗口里的宽度 W，高 = W + 控制条 + 缩略图 + 间距，
         这样刚脱出来时中间那块画布是 W×W 的正方形；之后用户可以拖边框随意改大小。
+        用户后来反馈"有点大" → 默认再缩 30%（PREVIEW_FLOAT_SCALE）。
         """
         pv = self.preview
         extra = (pv.ctrl_widget.height() + pv.thumb_list.height()
                  + 2 * pv.preview_box.layout().spacing())
-        side = max(240, remembered.width())
+        side = max(200, int(round(remembered.width() * self.PREVIEW_FLOAT_SCALE)))
         return QSize(side, side + max(0, extra))
 
     def _remember_panel_sizes(self) -> None:
@@ -1796,6 +1806,7 @@ class MainWindow(QMainWindow):
             })
         self._float_records = records
         self._panels_floating = True
+        self._snap_timer.start()
 
         # 三块都飞走后，预览整块隐藏，腾出来的宽高全给原图区
         pv.hide()
@@ -1803,14 +1814,16 @@ class MainWindow(QMainWindow):
 
         for rec in records:
             w = rec["w"]
-            w.setParent(None)
-            w.setWindowFlags(Qt.WindowType.Window)
+            # ★ 归属主窗口的 Tool 窗口：永远显示在主窗口前面，不会被主页面遮挡；
+            #   也不进任务栏。不给关闭按钮，免得用户误关导致面板"丢了"。
+            w.setParent(self, Qt.WindowType.Tool)
             w.setWindowTitle(rec["title"])
+            w.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
             if rec["fixed"]:
                 w.setFixedSize(rec["size"])     # ★ 锁住：大小不会被拉变、内部布局不乱
             else:
                 # 预览窗：给一个能用的最小尺寸，其余随意拖（拖边框改大小）
-                w.setMinimumSize(240, 200)
+                w.setMinimumSize(200, 170)
                 w.setMaximumSize(16777215, 16777215)
                 w.resize(rec["size"])
             w.move(rec["pos"])
@@ -1822,6 +1835,7 @@ class MainWindow(QMainWindow):
         if not self._panels_floating:
             return
         self._panels_floating = False
+        self._snap_timer.stop()
         for rec in self._float_records:
             w = rec["w"]
             w.hide()
@@ -2789,6 +2803,60 @@ class MainWindow(QMainWindow):
         if event.type() == QEvent.Type.MouseButtonPress:
             self._exit_preview_transform()
         return super().eventFilter(obj, event)
+
+    # 贴边缘磁吸范围（像素）：只在"朝边缘靠近"时吸，避免贴住以后拉不出来
+    EDGE_SNAP = 8
+
+    def _snap_floating_to_edge(self, w) -> None:
+        """悬浮窗靠近屏幕（可用区域）边缘时自动贴边。
+
+        用定时器轮询（`_snap_all_floating`）而不是在 Move 事件里再 move：
+        QDockWidget（历史记录）在 Move 事件处理里再 move 会递归到崩（实测 0xC0000409）。
+        """
+        try:
+            fg = w.frameGeometry()
+        except RuntimeError:       # 底层对象已销毁（关窗过程中的兜底）
+            return
+        scr = QApplication.screenAt(fg.center()) or QApplication.primaryScreen()
+        if scr is None:
+            return
+        area = scr.availableGeometry()
+        # 贴边要贴**外框**：换回客户区坐标再 move（有标题栏时偏移是负的）
+        off = fg.topLeft() - w.pos()
+        left_gap = fg.x() - area.left()
+        right_gap = (area.right() + 1) - (fg.x() + fg.width())
+        top_gap = fg.y() - area.top()
+        bottom_gap = (area.bottom() + 1) - (fg.y() + fg.height())
+        gaps = (min(left_gap, right_gap), min(top_gap, bottom_gap))
+        prev = getattr(w, "_dsh_snap_gaps", None)
+        approaching = (prev is None
+                       or gaps[0] < prev[0] or gaps[1] < prev[1]
+                       or prev[0] > self.EDGE_SNAP or prev[1] > self.EDGE_SNAP)
+        if not approaching:
+            w._dsh_snap_gaps = gaps
+            return
+        dx = dy = 0
+        if gaps[0] <= self.EDGE_SNAP:
+            dx = left_gap if left_gap <= right_gap else right_gap
+        if gaps[1] <= self.EDGE_SNAP:
+            dy = top_gap if top_gap <= bottom_gap else bottom_gap
+        if dx or dy:
+            w.move(w.pos().x() - (dx + off.x()), w.pos().y() - (dy + off.y()))
+        # 记**贴完之后的**间距：否则下一次轮询拿"贴之前"的值比较，看起来又在靠近，
+        # 于是贴住之后就拉不出来了（这个坑实测踩到过）
+        fg2 = w.frameGeometry()
+        w._dsh_snap_gaps = (
+            min(fg2.x() - area.left(), (area.right() + 1) - (fg2.x() + fg2.width())),
+            min(fg2.y() - area.top(), (area.bottom() + 1) - (fg2.y() + fg2.height())),
+        )
+
+    def _snap_all_floating(self) -> None:
+        """定时器回调：三块悬浮窗 + 历史记录窗口都检查一次贴边。"""
+        for rec in self._float_records:
+            self._snap_floating_to_edge(rec["w"])
+        dock = getattr(self, "_history_dock", None)
+        if dock is not None and dock.isFloating() and dock.isVisible():
+            self._snap_floating_to_edge(dock)
 
     def _on_action_performed(self, text: str):
         """右键菜单操作：用具体文字记录到当前动作栈。"""

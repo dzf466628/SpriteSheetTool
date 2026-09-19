@@ -208,7 +208,12 @@ class _Canvas(QWidget):
     def resizeEvent(self, event):
         toolbar = getattr(self._viewer, "_toolbar", None)
         if toolbar is not None:
-            toolbar.move(self.width() - toolbar.width() - 6, 6)
+            if toolbar.moved_by_user():
+                # 用户自己拖过：只保证不跑出画布，不再强行搬回右上角
+                toolbar.move(max(0, min(toolbar.x(), self.width() - toolbar.width())),
+                             max(0, min(toolbar.y(), self.height() - toolbar.height())))
+            else:
+                toolbar.move(self.width() - toolbar.width() - 6, 6)
         badge = getattr(self._viewer, "_json_badge", None)
         if badge is not None:
             badge.move(6, 6)
@@ -689,6 +694,12 @@ class FloatingToolBar(QWidget):
         self.setFixedSize(326, 32)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._bg_mode = "checker"
+        # 工具条可以自己拖（空白处按下拖动）：用户要求"原图的悬浮工具也能拖动，
+        # 自己挪到悬浮预览窗口左边、不被遮挡"。按钮在子控件上，按下不会走到这里。
+        self._drag_offset = None
+        self._moved_by_user = False
+        self.setToolTip("拖动空白处可移动工具条")
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
@@ -788,6 +799,37 @@ class FloatingToolBar(QWidget):
                 make_tool_icon("compose", 16) if checked else make_tool_icon("compose_red", 16)
             ))
         return btn
+
+    # ---- 拖动工具条（空白处按下拖）----
+    def moved_by_user(self) -> bool:
+        """用户是否自己挪过位置（挪过之后就不再被强行搬回右上角）。"""
+        return self._moved_by_user
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = event.position().toPoint()
+            self.raise_()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_offset is None:
+            super().mouseMoveEvent(event)
+            return
+        parent = self.parentWidget()
+        want = self.mapToParent(event.position().toPoint() - self._drag_offset)
+        if parent is not None:
+            # 只限制在画布范围内，别被拖到看不见的地方
+            want.setX(max(0, min(parent.width() - self.width(), want.x())))
+            want.setY(max(0, min(parent.height() - self.height(), want.y())))
+        self.move(want)
+        self._moved_by_user = True
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
 
 
 class JsonBadge(QWidget):

@@ -21,8 +21,9 @@ if sys.platform == "win32":
 
 from pathlib import Path
 
-from PyQt6.QtCore import QEventLoop, QTimer, Qt
+from PyQt6.QtCore import QEventLoop, QPoint, QTimer, Qt
 from PyQt6.QtGui import QPixmap
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
 app = QApplication(sys.argv)
@@ -104,14 +105,20 @@ wait(300)
 floated = sizes()
 check("三个都变成独立窗口", all(w.isWindow() for _n, w in panels) and win._panels_floating,
       f"{[(n, w.isWindow()) for n, w in panels]}")
-# 预览窗例外：按用户要求"默认画布方形" —— 宽不变，高 = 宽 + 控制条 + 缩略图
-pw, ph = floated["预览"]
-check("预览窗默认=画布方形（宽不变、高=宽+控制条+缩略图）",
-      pw == docked["预览"][0] and ph == pw + 92 and pv.canvas.width() == pv.canvas.height() == pw,
-      f"窗口={floated['预览']} 画布={pv.canvas.width()}x{pv.canvas.height()}")
+# 预览窗例外：按用户要求"默认画布方形"，并再缩 30%
+exp_side = max(200, int(round(docked["预览"][0] * 0.7)))
+check("预览窗默认=画布方形(缩30%)",
+      floated["预览"] == (exp_side, exp_side + 92)
+      and pv.canvas.width() == pv.canvas.height() == exp_side,
+      f"窗口={floated['预览']} 画布={pv.canvas.width()}x{pv.canvas.height()} 期望={exp_side}")
 check("另两块尺寸与默认窗口完全一致（★大小不变）",
       floated["动作编辑"] == docked["动作编辑"] and floated["帧编辑"] == docked["帧编辑"],
       f"默认={docked} 悬浮={floated}")
+check("四块悬浮窗都是归属主窗口的 Tool 窗口（永远在主页面之前、不被遮挡）",
+      all(bool(w.windowFlags() & Qt.WindowType.Tool) and w.parent() is win for _n, w in panels)
+      and win._history_dock.isFloating(),
+      f"{[(n, bool(w.windowFlags() & Qt.WindowType.Tool), w.parent() is win) for n, w in panels]} "
+      f"历史记录 floating={win._history_dock.isFloating()}")
 check("预览窗可拖边框改大小（没被锁死）",
       pv.preview_box.maximumWidth() > 10000 and pv.preview_box.minimumWidth() < 300,
       f"min={pv.preview_box.minimumSize()} max={pv.preview_box.maximumSize()}")
@@ -126,15 +133,30 @@ check("原图区拿到全部宽度",
 
 print("\n2b. 悬浮的预览窗随便拖大小：")
 pv.preview_box.move(pv.preview_box.x() + 40, pv.preview_box.y() + 30)
-pv.preview_box.resize(520, 360)
+pv.preview_box.resize(420, 300)
 wait(200)
 check("拖边框改大小后画布跟着变（不崩、不缩错）",
-      pv.canvas.width() == 520 and pv.canvas.height() == 360 - 32 - 52 - 8,
+      pv.canvas.width() == 420 and pv.canvas.height() == 300 - 32 - 52 - 8,
       f"窗口={pv.preview_box.width()}x{pv.preview_box.height()} "
       f"画布={pv.canvas.width()}x{pv.canvas.height()}")
-check("窗口位置可以移动", pv.preview_box.isWindow())
 pv.preview_box.resize(*floated["预览"])     # 拖回默认方形，后面按默认值还原
 wait(120)
+
+print("\n2c. 贴屏幕边缘（磁吸）：")
+area = app.primaryScreen().availableGeometry()
+w0 = win.anim_bar
+w0.move(area.left() + 5, area.top() + 5)
+win._snap_floating_to_edge(w0)              # 等价于贴边轮询定时器做的动作
+check(f"靠近左/上边缘自动贴边 (left={area.left()}, top={area.top()})",
+      w0.x() == area.left() and w0.y() == area.top(),
+      f"实际=({w0.x()},{w0.y()})")
+w0.move(area.left() + 3, area.top() + 3)    # 贴边后再往外拖（下一次轮询）
+win._snap_floating_to_edge(w0)
+check("贴边后能拉出来（不会被粘住）", w0.x() > area.left() and w0.y() > area.top(),
+      f"实际=({w0.x()},{w0.y()})")
+w0.move(area.left() + 120, area.top() + 140)
+win._snap_floating_to_edge(w0)
+check("离边缘远时不动它", w0.x() == area.left() + 120, f"实际=({w0.x()},{w0.y()})")
 
 print("\n3. 还原窗口 → 三块塞回原布局，比例复位：")
 win.setWindowState(Qt.WindowState.WindowNoState)
@@ -159,12 +181,33 @@ for _ in range(2):
     wait(150)
     s = sizes()
     ok = ok and s["动作编辑"] == docked["动作编辑"] and s["帧编辑"] == docked["帧编辑"] \
-        and s["预览"] == (docked["预览"][0], docked["预览"][0] + 92) \
+        and s["预览"] == (exp_side, exp_side + 92) \
         and all(w.isWindow() for _n, w in panels)
     win.setWindowState(Qt.WindowState.WindowNoState)
     wait(250)
     ok = ok and sizes() == docked and all(not w.isWindow() for _n, w in panels)
 check("两轮来回尺寸都保持", ok, f"最后={sizes()}")
+
+print("\n5. 原图区悬浮工具条可以自己拖（用户要挪到悬浮预览窗左边）：")
+tb = win.image_viewer._toolbar
+canvas = win.image_viewer.canvas
+start = tb.pos()
+QTest.mousePress(tb, Qt.MouseButton.LeftButton, pos=QPoint(3, 3))
+QTest.mouseMove(tb, pos=QPoint(3 - 90, 3 + 60))
+QTest.mouseRelease(tb, Qt.MouseButton.LeftButton, pos=QPoint(3 - 90, 3 + 60))
+wait(80)
+check("拖动空白处工具条会移动", tb.pos() != start,
+      f"{start.x()},{start.y()} -> {tb.pos().x()},{tb.pos().y()}")
+check("工具条被标记为用户挪过", tb.moved_by_user())
+moved = tb.pos()
+canvas.resize(canvas.width() - 30, canvas.height() - 20)
+wait(80)
+check("画布缩放后不再被强行搬回右上角", tb.pos() == moved,
+      f"{moved.x()},{moved.y()} -> {tb.pos().x()},{tb.pos().y()}")
+check("工具条不会跑出画布",
+      0 <= tb.x() <= max(0, canvas.width() - tb.width())
+      and 0 <= tb.y() <= max(0, canvas.height() - tb.height()),
+      f"toolbar=({tb.x()},{tb.y()}) canvas={canvas.width()}x{canvas.height()}")
 
 win.close()
 print(f"\n结果：{PASS} 通过, {FAIL} 失败")
