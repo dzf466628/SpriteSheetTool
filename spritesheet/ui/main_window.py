@@ -2206,22 +2206,33 @@ class MainWindow(QMainWindow):
             else:
                 target.setFixedSize(size)
             sized[title] = (target, size)
-        # 按相对位置摆：动作编辑贴左边垂直居中；预览贴右上角；帧编辑贴右下角
+        # 按用户要求摆位置：
+        #  - 动作编辑：底部水平居中
+        #  - 预览：右上角，宽固定 250px
+        #  - 帧编辑：右下角，和预览同列垂直对齐
         anim_t, anim_s = sized["动作编辑"]
         pv_t, pv_s = sized["预览"]
         fe_t, fe_s = sized["帧编辑"]
-        # 动作编辑：左下角贴边（默认布局里 anim_bar 在左列底部）
-        anim_x = margin
+        # 动作编辑：底部水平居中
+        anim_x = (avail_w - anim_s.width()) // 2
         anim_y = avail_h - anim_s.height() - margin
         anim_t.move(anim_x, anim_y)
-        # 预览：右上角贴边
-        pv_x = avail_w - pv_s.width() - margin
+        # 预览：右上角，宽固定 250px
+        pv_w = 250
+        pv_t.resize(pv_w, pv_t.height())
+        pv_x = avail_w - pv_w - margin
         pv_y = margin
         pv_t.move(pv_x, pv_y)
-        # 帧编辑：右下角贴边
+        # 帧编辑：右下角，和预览同列（右对齐）
         fe_x = avail_w - fe_s.width() - margin
         fe_y = avail_h - fe_s.height() - margin
         fe_t.move(fe_x, fe_y)
+        # 原图悬浮工具栏：顶部水平居中（和底部动作编辑居中对齐）
+        toolbar = getattr(self.image_viewer, "_toolbar", None)
+        if toolbar is not None:
+            canvas = toolbar.parentWidget()
+            if canvas is not None:
+                toolbar.move((canvas.width() - toolbar.width()) // 2, 6)
         # 显示
         for title, (target, _s) in sized.items():
             target.show()
