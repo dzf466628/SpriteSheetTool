@@ -740,5 +740,26 @@ QTest.mouseClick(c, Qt.MouseButton.LeftButton, pos=QPoint(3, 3))
 check("点框外空白退出", c.transform_mode() is None,
       f"实际: {c.transform_mode()!r}")
 
+# ================= 15. 旋转模式：拖角点也能转，红点钉住 =================
+# 以前旋转模式只认圆柄，四个角点画成空心、点了没反应（用户："点击手柄拖动不了"）。
+print("15. 旋转模式下拖角点同样旋转，且红点钉住：")
+a, c = new_canvas(1, "rotate")
+ht = c._handles_canvas(c._current_mo())
+pos = c._logical_to_screen(ht[1])
+check("旋转模式角点可命中（不再是空心死点）", c._hit_test(pos)[0] == "corner",
+      f"命中={c._hit_test(pos)[0]}")
+c._begin_drag("corner", 1, pos)
+piv0 = c._logical_to_screen(c._rotation_pivot_canvas())
+c._update_drag(pos + QPointF(0, -60))
+ang = a.frame_rotations.get(0)
+render(c)
+piv1 = c._logical_to_screen(c._rotation_pivot_canvas())
+check("旋转模式拖角点确实转了", bool(ang), f"角度={ang}")
+check("拖角点时红点屏幕位置不动(<1px)",
+      math.hypot(piv1.x() - piv0.x(), piv1.y() - piv0.y()) < 1.0,
+      f"位移={math.hypot(piv1.x() - piv0.x(), piv1.y() - piv0.y()):.2f}px")
+c._end_drag()
+check("拖角点后模式保持", c.transform_mode() == "rotate", f"实际: {c.transform_mode()!r}")
+
 print(f"\n结果: {PASS} passed, {FAIL} failed")
 sys.exit(0 if FAIL == 0 else 1)

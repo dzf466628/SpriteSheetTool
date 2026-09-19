@@ -809,8 +809,9 @@ class PreviewCanvas(QWidget):
         if kind == "pivot":
             # 拖红点：图像和手柄框原地不动，只有红点在动
             return ("frac", 0.5, 0.5)
-        if kind == "rotate":
-            # 旋转：钉住旋转中心（整体 GIF 级也是那个点，红点可偏心）
+        if kind == "rotate" or self._transform_mode == "rotate":
+            # 旋转：钉住旋转中心（整体 GIF 级也是那个点，红点可偏心）；
+            # 旋转模式下拖角点也是旋转，同样钉红点。
             return ("pivot",)
         if kind == "corner" and self._drag_use_pivot:
             # 以红色锚点为不动点缩放：屏幕上也把它钉住（否则画布重排会让它漂）
@@ -965,6 +966,11 @@ class PreviewCanvas(QWidget):
             rot = self._rotate_handle_screen(pts, pivot)
             if rot is not None and (rot - screen_pos).manhattanLength() < 15:
                 return "rotate", -1
+            # 四角也接受：旋转模式下拖角点同样旋转（PS 里在框外/角上拖就是旋转）。
+            # 以前这里只认圆柄，角点画成空心、点了没反应，用户以为"手柄拖不动"。
+            for i, s in enumerate(screens):
+                if (s - screen_pos).manhattanLength() < 15:
+                    return "corner", i
             return None, -1
         if mode in ("scale", "perspective", "distort"):
             for i, s in enumerate(screens):
@@ -1019,7 +1025,7 @@ class PreviewCanvas(QWidget):
             self._drag_pivot_canvas = self._rotation_pivot_canvas(self._drag_layout, self._drag_mo)
         # 本次拖动允许的最大放大倍数（像素预算，防止拖出窗口后把 pixmap 撑爆）
         self._drag_ratio_limit = transform_ratio_limit(self._drag_wrot, self._drag_hrot)
-        if kind == "rotate":
+        if kind == "rotate" or self._transform_mode == "rotate":
             # 角度一律在**屏幕坐标**里量：锚定把旋转中心钉在固定屏幕点，
             # 用逻辑坐标会因为视图平移而变化，形成正反馈。
             self._drag_pivot_screen = self._logical_to_screen(self._drag_pivot_canvas)
@@ -1157,7 +1163,8 @@ class PreviewCanvas(QWidget):
                 self._emit_pivot_from_canvas(cur)
             return
         if mode == "rotate":
-            if self._drag_kind == "rotate":
+            if self._drag_kind in ("rotate", "corner"):
+                # 旋转模式下圆柄和角点都是"拖着转"（PS 手感）
                 piv = self._drag_pivot_screen
                 current_mouse_angle = math.degrees(math.atan2(
                     screen_pos.y() - piv.y(), screen_pos.x() - piv.x()))
@@ -1611,8 +1618,9 @@ class PreviewCanvas(QWidget):
                 p.setPen(QPen(QColor(255, 128, 171, 170), 1.0))
                 p.drawEllipse(center, half + 4.0, half + 4.0)
 
-        # 四角手柄：缩放/透视/扭曲用；边中点手柄：斜切用（斜切是唯一拖边的模式）
-        corner_control = mode in ("scale", "perspective", "distort")
+        # 四角手柄：缩放/透视/扭曲/**旋转**用（旋转模式下拖角点也是旋转）；
+        # 边中点手柄：斜切用（斜切是唯一拖边的模式）
+        corner_control = mode in ("scale", "perspective", "distort", "rotate")
         edge_control = mode == "skew"
         for i, s in enumerate(screens):
             draw_square(s, corner_control, "corner", i, 9.0)
