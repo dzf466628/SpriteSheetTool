@@ -213,7 +213,8 @@ class _Canvas(QWidget):
                 toolbar.move(max(0, min(toolbar.x(), self.width() - toolbar.width())),
                              max(0, min(toolbar.y(), self.height() - toolbar.height())))
             else:
-                toolbar.move(self.width() - toolbar.width() - 6, 6)
+                # 工具条向右加宽 3px 后保持左缘不动（右边距 6 → 3），把手才会真正右移
+                toolbar.move(self.width() - toolbar.width() - 3, 6)
         badge = getattr(self._viewer, "_json_badge", None)
         if badge is not None:
             badge.move(6, 6)
@@ -682,13 +683,13 @@ class _DragGrip(QWidget):
     """工具条右侧的拖动手柄：3 根**细短竖线**，一眼看出这里可以拖。"""
 
     LINES = 3
-    LINE_H = 14          # 竖线长度（用户要求"再长 4 像素"：10 → 14）
-    GAP = 1              # 三根线贴紧一些（原来 2）
-    SHIFT_RIGHT = 3      # 整体再向右挪 3 像素（左侧留白，线条在控件里右对齐）
+    LINE_H = 18          # 竖线长度（用户再次要求"再长 4 像素"：14 → 18）
+    GAP = 0              # 三根线完全贴紧（间距 1 → 0，连成 3px 实条）
+    SHIFT_RIGHT = 8      # 左侧留白 8px：三根线在 11px 控件里右对齐，最右一根距工具条右边 1px
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedSize(self.LINES + (self.LINES - 1) * self.GAP + self.SHIFT_RIGHT, 16)
+        self.setFixedSize(self.LINES + (self.LINES - 1) * self.GAP + self.SHIFT_RIGHT, 20)
         self.setToolTip("按住这里拖动工具条")
         self.setCursor(Qt.CursorShape.SizeAllCursor)
 
@@ -696,7 +697,7 @@ class _DragGrip(QWidget):
         p = QPainter(self)
         p.setPen(QPen(QColor("#a0a0a0"), 1.0))     # 1 像素细线
         y0 = max(0, (self.height() - self.LINE_H) // 2)
-        # 右对齐画：最右一根贴控件右边，于是整体比原来靠右 3 像素
+        # 右对齐画：最右一根贴控件右边（本轮整体再向右挪 3 像素）
         for i in range(self.LINES):
             x = self.width() - 1 - (self.LINES - 1 - i) * (1 + self.GAP)
             p.drawLine(x, y0, x, y0 + self.LINE_H)
@@ -717,8 +718,8 @@ class FloatingToolBar(QWidget):
         super().__init__(parent)
         # 宽度要容纳：合成(80) + 复用(80) + 放大/缩小(24×2) + 三种背景(24×3) + 历史(24) + 边距/间距
         # 右侧留一条"3 根细短竖线"的拖动把手（证明这里可以拖）
-        self.GRIP_W = 7
-        self.setFixedSize(331, 32)
+        self.GRIP_W = 11
+        self.setFixedSize(334, 32)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._bg_mode = "checker"
         # 工具条可以自己拖（空白处按下拖动）：用户要求"原图的悬浮工具也能拖动，

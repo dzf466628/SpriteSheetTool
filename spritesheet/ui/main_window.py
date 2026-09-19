@@ -424,7 +424,7 @@ class _FloatCard(QWidget):
     TITLE_H = 26
     # 用户要求：最大化后四个窗口用**和分界线同款的浅灰**（分隔线是 #3d3d3d）
     BG_COLOR = "#3d3d3d"
-    BORDER_COLOR = "#6e6e6e"    # 描边：#8a8a8a 太亮，用户要求再暗一点（保持 2px）
+    BORDER_COLOR = "#555555"    # 描边：#6e6e6e 仍偏亮，用户要求再暗一点（保持 2px）
     BORDER_W = 2                # 描边宽度（像素）
     RADIUS = 10.0
 
