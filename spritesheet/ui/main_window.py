@@ -1682,6 +1682,7 @@ class MainWindow(QMainWindow):
         self.preview.canvas.frame_offset_dragged.connect(self._on_frame_offset_dragged)
         self.image_viewer._toolbar.bg_changed.connect(lambda _mode: self._mark_project_dirty())
         self.image_viewer._toolbar.compose_toggled.connect(lambda _checked: self._mark_project_dirty())
+        self.image_viewer._toolbar.history_requested.connect(self._open_history)
         # 程序退出（含未走 close 的路径）也要收尾原图区与更新检查线程，
         # 否则线程/过滤器会悬空
         app = QApplication.instance()

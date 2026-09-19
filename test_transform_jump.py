@@ -761,5 +761,28 @@ check("拖角点时红点屏幕位置不动(<1px)",
 c._end_drag()
 check("拖角点后模式保持", c.transform_mode() == "rotate", f"实际: {c.transform_mode()!r}")
 
+# ================= 16. 落点外偏（没瞄准）也不许退出变换 =================
+# 手柄方块跨在框线上画（一半在框外），用户瞄准角点时经常落到框外那一半；
+# 老逻辑：曼哈顿菱形命中半径 + 只有 6px 的"框内"余量 —— 往外偏 16px 就被判成
+# "点空白"，于是"点手柄反而把手柄弹掉"。现在命中半径改圆 + 区域外扩 26px。
+print("16. 瞄准角点、落点外偏，不许退出变换：")
+bad_offsets = []
+for dx, dy in ((0, 0), (8, 8), (16, 16), (20, 20), (-12, 0), (0, -12), (-16, -16), (14, 0), (0, 14)):
+    a, c = new_canvas(1, "scale")
+    ht = c._handles_canvas(c._current_mo())
+    p = c._logical_to_screen(ht[0]) + QPointF(dx, dy)
+    QTest.mousePress(c, Qt.MouseButton.LeftButton, pos=p.toPoint())
+    QTest.mouseRelease(c, Qt.MouseButton.LeftButton, pos=p.toPoint())
+    if c.transform_mode() is None:
+        bad_offsets.append((dx, dy))
+check("角点外偏 20px 内都不退出", not bad_offsets, f"仍退出的偏移={bad_offsets}")
+a, c = new_canvas(1, "scale")
+ht = c._handles_canvas(c._current_mo())
+far = c._logical_to_screen(QPointF(ht[0].x() - 45, ht[0].y() - 45))
+QTest.mousePress(c, Qt.MouseButton.LeftButton, pos=far.toPoint())
+QTest.mouseRelease(c, Qt.MouseButton.LeftButton, pos=far.toPoint())
+check("明显远离控制框（45px 外）仍能退出", c.transform_mode() is None,
+      f"实际: {c.transform_mode()!r}")
+
 print(f"\n结果: {PASS} passed, {FAIL} failed")
 sys.exit(0 if FAIL == 0 else 1)

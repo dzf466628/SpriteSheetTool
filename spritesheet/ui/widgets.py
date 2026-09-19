@@ -49,8 +49,9 @@ _ICONS_DIR = _APP_ROOT / "icons"
 def make_tool_icon(kind: str, size: int = 18, color: str | None = None) -> QIcon:
     """从 icons/ 目录加载 SVG 图标。
 
-    染色：``color`` 指定时整枚图标染成该色（SourceIn）；不指定时
-    bg_black / bg_white 这两个按名字染黑/白（历史行为，别动）。
+    染色：``color`` 指定时整枚图标染成该色（SourceIn）；不指定时保留 SVG 原色。
+    注意 bg_black / bg_white 是双色/实心示意（黑块白边、全白块），SVG 已自带配色，
+    不要再整体染色，否则白色描边会被染没。
     """
     path = _ICONS_DIR / f"{kind}.svg"
     if not path.exists():
@@ -69,8 +70,6 @@ def make_tool_icon(kind: str, size: int = 18, color: str | None = None) -> QIcon
     renderer.render(p)
     p.end()
     tint = color
-    if tint is None and kind in ("bg_black", "bg_white"):
-        tint = "#000000" if kind == "bg_black" else "#FFFFFF"
     if tint:
         p3 = QPainter(pm)
         p3.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)

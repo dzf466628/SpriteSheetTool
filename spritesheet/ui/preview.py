@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+﻿#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """动作预览区（从 main_window.py 拆出，纯搬移，逻辑未改动）。
 
@@ -923,11 +923,13 @@ class PreviewCanvas(QWidget):
         lp = self._screen_to_logical(screen_pos)
         return QPolygonF(pts).containsPoint(lp, Qt.FillRule.OddEvenFill)
 
-    def _hit_inside_box(self, screen_pos, margin: float = 6.0) -> bool:
-        """屏幕点是否落在变换控制框内（含几像素余量）。
+    def _hit_inside_box(self, screen_pos, margin: float = 26.0) -> bool:
+        """屏幕点是否落在"变换 UI 区域"内（控制框 + 手柄外一圈）。
 
-        用途：判断"这一点是不是框外空白"。框内的点击即使没点到可拖控件（例如旋转模式下
-        的四个空心角点），也不该退出变换 —— 退出的条件只有"点框外空白"。
+        用途：判断"这一点是不是框外空白"。手柄方块是**跨在框线上**画的（一半在框外），
+        用户瞄准角点时经常落在框外那一半甚至再往外几像素 —— 这种点绝不能被当成
+        "点空白退出"，否则就是"点手柄反而把手柄弹掉了"。所以这里除了框内，
+        还把框外 26px 也算进来。
         """
         pts = self._handles_canvas(
             self._drag_mo if self._drag_kind else self._current_mo(),
@@ -943,7 +945,11 @@ class PreviewCanvas(QWidget):
         return poly.boundingRect().adjusted(-m, -m, m, m).contains(lp)
 
     def _hit_test(self, screen_pos):
-        """返回 (kind, index)，只让当前模式的玫红控件可命中。"""
+        """返回 (kind, index)，只让当前模式的玫红控件可命中。
+
+        命中半径用**圆**而不是曼哈顿菱形：菱形在斜方向只有半径的 1/√2，
+        正好是"瞄准角点往斜外偏一点就点不到"的元凶。
+        """
         if not self._transform_mode or not self._action or not self._action.frames:
             return None, -1
         self._sync_view_shift()      # 命中判定必须和上一帧画出来的位置一致
@@ -954,32 +960,32 @@ class PreviewCanvas(QWidget):
             return None, -1
         screens = [self._logical_to_screen(p) for p in pts]
         mode = self._transform_mode
+        near = lambda a, b, r: math.hypot(a.x() - b.x(), a.y() - b.y()) < r
         # 旋转中心（红色十字）：所有变换模式都显示、都可拖（含整体 GIF 级变换）。
-        # 整体模式下框内拖动=整体平移，所以红点的"抓手"收窄到 10px，把中间一小块
-        # 以外的区域都留给平移；单帧模式没有这个冲突，保持宽松的 15px。
+        # 整体模式下框内拖动=整体平移，所以红点的"抓手"收窄到 12px，把中间一小块
+        # 以外的区域都留给平移；单帧模式没有这个冲突，保持宽松的 16px。
         pivot = self._rotation_pivot_canvas(layout, mo)
         pivot_s = self._logical_to_screen(pivot)
-        if (pivot_s - screen_pos).manhattanLength() < (10 if self._whole_active() else 15):
+        if near(pivot_s, screen_pos, 12.0 if self._whole_active() else 16.0):
             return "pivot", -1
         if mode == "rotate":
-            pivot = self._rotation_pivot_canvas(layout, mo)
             rot = self._rotate_handle_screen(pts, pivot)
-            if rot is not None and (rot - screen_pos).manhattanLength() < 15:
+            if rot is not None and near(rot, screen_pos, 20.0):
                 return "rotate", -1
             # 四角也接受：旋转模式下拖角点同样旋转（PS 里在框外/角上拖就是旋转）。
             # 以前这里只认圆柄，角点画成空心、点了没反应，用户以为"手柄拖不动"。
             for i, s in enumerate(screens):
-                if (s - screen_pos).manhattanLength() < 15:
+                if near(s, screen_pos, 20.0):
                     return "corner", i
             return None, -1
         if mode in ("scale", "perspective", "distort"):
             for i, s in enumerate(screens):
-                if (s - screen_pos).manhattanLength() < 15:
+                if near(s, screen_pos, 20.0):
                     return "corner", i
         elif mode == "skew":
             for i in range(4):
                 mid = (screens[i] + screens[(i + 1) % 4]) / 2.0
-                if (mid - screen_pos).manhattanLength() < 15:
+                if near(mid, screen_pos, 18.0):
                     return "edge", i
         return None, -1
 

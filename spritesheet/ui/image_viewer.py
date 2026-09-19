@@ -677,11 +677,12 @@ class FloatingToolBar(QWidget):
     bg_changed = pyqtSignal(str)
     compose_toggled = pyqtSignal(bool)
     reuse_toggled = pyqtSignal(bool)
+    history_requested = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        # 宽度要容纳：合成(80) + 复用(80) + 放大/缩小(24×2) + 三种背景(24×3) + 边距/间距
-        self.setFixedSize(300, 32)
+        # 宽度要容纳：合成(80) + 复用(80) + 放大/缩小(24×2) + 三种背景(24×3) + 历史(24) + 边距/间距
+        self.setFixedSize(326, 32)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._bg_mode = "checker"
 
@@ -752,6 +753,11 @@ class FloatingToolBar(QWidget):
         layout.addWidget(self.btn_bg_checker)
         layout.addWidget(self.btn_bg_black)
         layout.addWidget(self.btn_bg_white)
+
+        # 历史记录面板开关（显示/隐藏右侧浮动历史窗口）
+        self.btn_history = self._make_button("history", "历史记录")
+        self.btn_history.clicked.connect(self.history_requested)
+        layout.addWidget(self.btn_history)
 
     def paintEvent(self, event):
         p = QPainter(self)
