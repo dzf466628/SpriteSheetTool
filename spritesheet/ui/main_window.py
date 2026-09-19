@@ -2531,14 +2531,21 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        # 默认大小状态下禁止手动拖拽调整：非最大化时强制保持 1000x1000
-        if not self.isMaximized() and not getattr(self, '_forcing_size', False):
-            if self.width() != 1000 or self.height() != 1000:
-                self._forcing_size = True
-                self.resize(1000, 1000)
-                self._forcing_size = False
+        # 延迟一帧再检查：最大化过程中 isMaximized() 还没更新，直接拦会把最大化打断
+        QTimer.singleShot(0, self._enforce_default_size)
         # 默认大小下的三块区域尺寸（最大化脱出成悬浮窗时沿用它们）
         self._schedule_panel_size_memory()
+
+    def _enforce_default_size(self) -> None:
+        """默认大小状态下禁止手动拖拽调整：非最大化时强制保持 1000x1000。"""
+        if self.isMaximized():
+            return  # 最大化状态不限制
+        if getattr(self, '_forcing_size', False):
+            return
+        if self.width() != 1000 or self.height() != 1000:
+            self._forcing_size = True
+            self.resize(1000, 1000)
+            self._forcing_size = False
 
     def closeEvent(self, event) -> None:
         """关闭窗口前：先处理未保存的标签，再收尾原图区。
