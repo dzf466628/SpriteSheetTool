@@ -591,5 +591,135 @@ md_alt, _ = anchor_case(1, "scale", _alt_case)
 check("Alt(对角固定)路径仍可用（锚点会动）", md_alt is not None and md_alt > 3.0,
       f"标记位移={None if md_alt is None else round(md_alt, 2)}px（预期明显移动）")
 
+# ================= 12. 动作编辑(全选所有帧)：帧不许相对红点漂 =================
+# 做法：每帧都在"锚点像素"处画一颗品红标记。整体变换时所有帧的锚点必须重合，
+# 于是标记会叠成一小块、正好压在红十字上；只要有帧摆错，这一块就会偏离/拉长。
+# （老代码：拖动中用未裁剪图、落位用裁剪口径，实测拖动中偏出 12~14px、松手又回 0。）
+print("12. 动作编辑(全选所有帧)拖动：每帧锚点必须压在红点上：")
+
+
+def whole_frames_with_marker(n=6, anchor_px=(60, 40)):
+    def mk():
+        pm = QPixmap(W, H)
+        pm.fill(QColor(0, 0, 0, 0))
+        q = QPainter(pm)
+        q.fillRect(QRectF(0, 0, W, H), QColor(128, 128, 128, 255))
+        q.fillRect(QRectF(anchor_px[0] - 2, anchor_px[1] - 2, 4, 4), QColor(255, 0, 255, 255))
+        q.end()
+        return pm
+
+    wd = ActionPreviewWidget()
+    wd.resize(1000, 800)
+    a = Action("whole")
+    a.frames = [mk() for _ in range(n)]
+    a.padding = 14
+    a.bg_mode = "white"
+    for i in range(n):
+        a.frame_rotation_pivots[i] = (anchor_px[0] / W, anchor_px[1] / H)
+    wd.set_actions([a])
+    wd.set_action(a)
+    c = wd.canvas
+    c.setMinimumWidth(640)
+    c.setMinimumHeight(520)
+    c.setMaximumHeight(520)
+    app.processEvents()
+    c._apply_fit()
+    wd.adjust_panel.enter_transform_mode_all("rotate")
+    return wd, a, c
+
+
+def find_blob(c, pred, window=None):
+    img = render(c)
+    xs, ys = [], []
+    x0, y0, x1, y1 = 0, 0, img.width(), img.height()
+    if window:
+        cx, cy, rr = window
+        x0, y0, x1, y1 = int(cx - rr), int(cy - rr), int(cx + rr), int(cy + rr)
+    for y in range(max(0, y0), min(img.height(), y1)):
+        for x in range(max(0, x0), min(img.width(), x1)):
+            p = img.pixel(x, y)
+            r, g, b = (p >> 16) & 255, (p >> 8) & 255, p & 255
+            if pred(r, g, b):
+                xs.append(x)
+                ys.append(y)
+    if not xs:
+        return None
+    return ((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0,
+            max(xs) - min(xs) + 1, max(ys) - min(ys) + 1)
+
+
+# 品红标记（主帧纯色、其余 0.4 混色都算）；红十字是 (255,23,68)，b 很低不会混进来
+blob_marker = lambda r, g, b: r > 150 and g < 110 and b > 150 and abs(r - b) < 40
+
+
+def anchor_err(c):
+    cross = find_blob(c, is_cross)
+    if not cross:
+        return None
+    mk = find_blob(c, blob_marker, window=(cross[0], cross[1], 70))
+    if not mk:
+        return None
+    return math.hypot(mk[0] - cross[0], mk[1] - cross[1])
+
+
+wd_w, act_w, cw = whole_frames_with_marker()
+cs_w, rs_w = rotate_ref(cw)
+cw._begin_drag("rotate", -1, QPointF(cs_w.x(), cs_w.y() - rs_w))
+errs = []
+for deg in (0, 15, 30, 45, 60):
+    cw._update_drag(QPointF(cs_w.x() + rs_w * math.sin(math.radians(deg)),
+                            cs_w.y() - rs_w * math.cos(math.radians(deg))))
+    errs.append(anchor_err(cw))
+during_err = anchor_err(cw)
+cw._end_drag()
+after_err = anchor_err(cw)
+worst = max([e for e in errs if e is not None] or [99])
+check("整体拖动中：各帧锚点都压在红点上(<1.5px)", worst < 1.5, f"worst={worst:.2f}px")
+check("整体拖动中 ↔ 松手后一致(<1.5px)",
+      during_err is not None and after_err is not None and abs(during_err - after_err) < 1.5,
+      f"拖动中={None if during_err is None else round(during_err, 2)} "
+      f"松手后={None if after_err is None else round(after_err, 2)}")
+
+# ================= 13. 播放与变换互斥 =================
+print("13. 播放不再拆掉正在进行的变换：")
+
+
+def play_case():
+    wd = ActionPreviewWidget()
+    wd.resize(1000, 800)
+    a = Action("play")
+    a.frames = [make_pm() for _ in range(4)]
+    a.padding = 14
+    a.bg_mode = "white"
+    wd.set_actions([a])
+    wd.set_action(a)
+    c = wd.canvas
+    c.setMinimumWidth(640)
+    c.setMinimumHeight(520)
+    c.setMaximumHeight(520)
+    app.processEvents()
+    c._apply_fit()
+    return wd, a, c
+
+
+wd_p, act_p, cp = play_case()
+wd_p.toggle_play()
+cp.set_transform_mode("rotate", owner="test")
+check("播放中进变换模式会自动暂停播放",
+      cp.transform_mode() == "rotate" and not wd_p._playing,
+      f"mode={cp.transform_mode()} playing={wd_p._playing}")
+cs_p, rs_p = rotate_ref(cp)
+cp._begin_drag("rotate", -1, QPointF(cs_p.x(), cs_p.y() - rs_p))
+angle_p = None
+for k in range(3):
+    cp._update_drag(QPointF(cs_p.x() + 20 * (k + 1), cs_p.y() - rs_p))
+    wd_p._playing = True          # 万一又播起来
+    wd_p._tick()
+    angle_p = act_p.frame_rotations.get(cp._frame_index)
+check("播放 tick 不再打断拖动（模式/拖动/角度都在）",
+      cp.transform_mode() == "rotate" and cp._drag_kind == "rotate" and bool(angle_p),
+      f"mode={cp.transform_mode()} drag={cp._drag_kind} 角度={angle_p}")
+check("播放 tick 会暂停播放", not wd_p._playing, f"playing={wd_p._playing}")
+
 print(f"\n结果: {PASS} passed, {FAIL} failed")
 sys.exit(0 if FAIL == 0 else 1)

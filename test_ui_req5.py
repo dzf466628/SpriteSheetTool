@@ -153,18 +153,29 @@ def main() -> int:
           f"实际: {canvas.transform_mode()!r}")
     panel._on_mode_button("scale", False)
 
-    print("=== 需求2c: 播放中切帧自动取消变换 ===")
+    print("=== 需求2c: 播放与变换互斥（进编辑就停播，播放不再拆编辑）===")
     ab["rotate"].click()
     check("激活 rotate", canvas.transform_mode() == "rotate")
     win.preview._playing = True
     win.preview._tick()  # 模拟播放定时器切帧
-    check("播放切帧自动退出变换模式", canvas.transform_mode() is None,
+    check("播放中 tick 不再拆掉变换模式（改为一旁暂停）",
+          canvas.transform_mode() == "rotate",
           f"实际: {canvas.transform_mode()!r}")
-    win.preview._playing = False
-
-    # 底部激活 rotate → 再点同按钮 = 退出
+    check("播放中 tick 会暂停播放", not win.preview._playing,
+          f"playing={win.preview._playing}")
+    # 反过来：正在播放时进变换模式 → 自动暂停播放、模式正常进入
+    panel._exit_transform_mode()
+    win.preview._playing = True
     ab["rotate"].click()
-    check("切帧后再点激活 rotate", canvas.transform_mode() == "rotate")
+    check("播放中进变换模式自动暂停播放",
+          canvas.transform_mode() == "rotate" and not win.preview._playing,
+          f"mode={canvas.transform_mode()!r} playing={win.preview._playing}")
+
+    # 底部激活 rotate → 再点同按钮 = 退出（先回到"未激活"的干净状态）
+    panel._exit_transform_mode()
+    win.preview._playing = False
+    ab["rotate"].click()
+    check("再点激活 rotate", canvas.transform_mode() == "rotate")
     ab["rotate"].click()
     check("底部激活 rotate 后再点同按钮退出",
           canvas.transform_mode() is None)

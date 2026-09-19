@@ -610,6 +610,62 @@ class PreviewCanvas(QWidget):
         ref = self._whole_current_ref()
         return [QPointF(x0 + ref[2 * k] * W, y0 + ref[2 * k + 1] * H) for k in range(4)]
 
+    def _whole_anchor_targets(self, layout=None):
+        """整体变换：每帧的"锚点像素"各应落在画布的哪个点；返回 (红点位置, {帧: 目标点})。
+
+        目标点 = 该帧 pivot 在参考框里的那个位置（若有整体 quad 就一起过一遍）——也就是
+        "同一个视觉点"。各帧 pivot 一致时它们全都相同（= 红点位置）；如果用户给某几帧
+        单独设过不同的旋转中心，就各按各的，帧不会因此错位。
+
+        为什么要有这个：整体变换必须"按锚点对齐"。以前是按"内容包围盒居中"，
+        而那个口径在 0°（不裁剪）和旋转后（裁剪）之间会变，且拖动用未裁剪图、
+        松手用裁剪图，导致其它帧在拖动中偏出十几像素、松手又弹回（实测 12.5px → 0）。
+        """
+        if not self._action or not self._transform_indices:
+            return None, {}
+        fr = self._whole_frame(layout)
+        if fr is None:
+            return None, {}
+        x0, y0, _x1, _y1, _cx, _cy, W, H = fr
+        Wr, Hr, entries = whole_reference(self._action, self._transform_indices)
+        if Wr <= 0 or Hr <= 0:
+            return None, {}
+        # 参考框 quad（与手柄同源）：无 quad 时是单位映射
+        ref = self._whole_current_ref()
+        matrix = None
+        if tuple(ref) != DEFAULT_QUAD:
+            src = QPolygonF([QPointF(0, 0), QPointF(Wr, 0), QPointF(Wr, Hr), QPointF(0, Hr)])
+            dst = QPolygonF([QPointF(ref[0] * Wr, ref[1] * Hr), QPointF(ref[2] * Wr, ref[3] * Hr),
+                             QPointF(ref[4] * Wr, ref[5] * Hr), QPointF(ref[6] * Wr, ref[7] * Hr)])
+            m = QTransform()
+            if QTransform.quadToQuad(src, dst, m):
+                matrix = m
+        targets = {}
+        for i, ox, oy, w, h in entries:
+            pv = self._action.frame_rotation_pivots.get(i, DEFAULT_ROTATION_PIVOT)
+            pt = QPointF(ox + pv[0] * w, oy + pv[1] * h)
+            if matrix is not None:
+                pt = matrix.map(pt)
+            targets[i] = QPointF(x0 + pt.x(), y0 + pt.y())
+        # 红点位置 = 代表帧的锚点目标（同一个来源，绝不能再各算一套 —— 之前红点用冻结
+        # 参考框、各帧用实时参考框，拖动中两者会分叉，帧就相对红点漂出去几像素）
+        try:
+            master = self._whole_master_entry()[2][0]
+        except (ValueError, TypeError, IndexError):
+            master = self._transform_indices[0]
+        anchor = targets.get(master)
+        if anchor is None:
+            anchor = next(iter(targets.values()), None)
+        return anchor, targets
+
+    def _whole_anchor_canvas(self, layout=None) -> QPointF | None:
+        """整体变换里"各帧旋转中心重合的那个点"的画布坐标（= 红色锚点该画的位置）。
+
+        实现放在 ``_whole_anchor_targets`` 里：红点位置与各帧的锚点目标必须同一个来源，
+        否则拖动中参考框一变，帧就会相对红点漂出去（实测漂了 12~14px）。
+        """
+        return self._whole_anchor_targets(layout)[0]
+
     def _current_layout(self):
         if not self._action or not self._action.frames:
             return None
@@ -668,22 +724,6 @@ class PreviewCanvas(QWidget):
                 pt = m.map(QPointF(px, py))
                 px, py = pt.x(), pt.y()
         return ((ox + px) / W, (oy + py) / H)
-
-    def _whole_anchor_canvas(self, layout=None) -> QPointF | None:
-        """整体变换里"各帧旋转中心重合的那个点"的画布坐标（= 红色锚点该画的位置）。
-
-        拖动中必须用冻结的 _drag_whole 参考框：否则每帧变换都会让参考框尺寸变化，
-        锚点会跟着漂。
-        """
-        if self._drag_layout is not None and self._drag_whole is not None:
-            x0, y0, W, H = self._drag_whole
-        else:
-            fr = self._whole_frame(layout)
-            if fr is None:
-                return None
-            x0, y0, _x1, _y1, _cx, _cy, W, H = fr
-        rx, ry = self._whole_pivot_ref()
-        return QPointF(x0 + rx * W, y0 + ry * H)
 
     def _rotation_pivot_canvas(self, layout=None, mo=None) -> QPointF:
         if not self._action or not self._action.frames:
@@ -1336,47 +1376,33 @@ class PreviewCanvas(QWidget):
     def _paint_whole_frames(self, p: QPainter, cx: float, cy: float, scale: float, layout=None):
         """整体(GIF 级)变换：把所有目标帧叠合绘制。
 
-        主帧不透明、其余半透明（看出多帧是否重合）。叠合基准分两种：
+        主帧不透明、其余半透明（看出多帧是否重合）。叠合口径只有一个：
+        **每帧按自己的"锚点像素"对齐到它在参考框里对应的那个点** —— 也就是
+        "动作编辑 = 单帧模式全选所有帧" 该有的规则：所有帧绕同一个点转，
+        而且这个口径与角度无关、与是否裁剪无关。
 
-        · 锚点在正中心（没调过红点）：按各帧包围盒中心对齐 —— 与原来完全一致；
-        · 红点被挪到偏心位置：**按各帧自己的锚点像素对齐到那个点**。若仍按包围盒
-          居中，偏心旋转下各帧的锚点会各跑各的（实测内容偏离红点 149px），
-          看起来就是"旋转没绕红点"。
+        两个历史坑（都已修）：
+        · 以前锚点在正中心时走"内容包围盒居中"，那个口径在 0°（不裁剪）和旋转后
+          （裁剪）之间会变，各帧内容位置相对锚点也不一样，旋转时帧间会互相漂；
+        · 以前拖动用 fast(不裁剪) 图、松手用精确图，两套口径不一致 —— 实测其它帧
+          在拖动中偏出 12.5px、松手又归 0，就是用户看到的"其它帧位置变了又回去"。
+          现在拖动与松手都用精确图（布局已冻结，拖动期间的开销可控）。
         """
         if not self._action or not self._transform_indices:
             return None
-        anchor = self._whole_anchor_canvas(layout)
+        anchor, targets = self._whole_anchor_targets(layout)
         if anchor is None:
             return None
-        rx, ry = self._whole_pivot_ref()
-        off_center = bool(rx != DEFAULT_ROTATION_PIVOT[0] or ry != DEFAULT_ROTATION_PIVOT[1])
-        if not off_center:
-            anchor = None      # 走原来的"包围盒居中"路径
         opacity = self._action.frame_opacity
         main_rect = None
-        # 整体手柄拖动中每帧都要重绘：用 fast（跳过全像素透明裁剪）保证跟手；
-        # 松手(_drag_kind 清空)后自动回到精算路径并缓存。
-        fast = bool(self._drag_kind) and self._whole_active()
         for i in self._transform_indices:
             if not (0 <= i < len(self._action.frames)):
                 continue
-            pm = action_frame_pixmap(self._action, i, fast=fast)
+            pm = action_frame_pixmap(self._action, i)
             fw, fh = pm.width(), pm.height()
-            if anchor is None:
-                # 包围盒中心对齐（锚点在正中心时的等价做法，保持既有行为）
-                if self._drag_layout is not None and self._drag_whole is not None:
-                    x0, y0, W, H = self._drag_whole
-                    gx, gy = x0 + W / 2.0, y0 + H / 2.0
-                else:
-                    fr = self._whole_frame(layout)
-                    if fr is None:
-                        return None
-                    gx, gy = fr[4], fr[5]
-                ox, oy = gx - fw / 2.0, gy - fh / 2.0
-            else:
-                # 锚点对齐：把该帧的锚点像素放到整体锚点上
-                px, py = frame_pivot_in_pixmap(self._action, i)
-                ox, oy = anchor.x() - px, anchor.y() - py
+            px, py = frame_pivot_in_pixmap(self._action, i)
+            tgt = targets.get(i, anchor)
+            ox, oy = tgt.x() - px, tgt.y() - py
             rect = QRectF(cx + ox * scale, cy + oy * scale, fw * scale, fh * scale)
             is_main = (i == self._frame_index)
             p.setOpacity(opacity if is_main else 0.4)
@@ -1387,14 +1413,10 @@ class PreviewCanvas(QWidget):
         if main_rect is None and self._transform_indices:
             # 当前帧不在目标集合（理论不会）：用第一个目标帧占位
             i = self._transform_indices[0]
-            pm = action_frame_pixmap(self._action, i, fast=fast)
-            if anchor is None:
-                fr = self._whole_frame(layout)
-                gx, gy = (fr[4], fr[5]) if fr is not None else (0.0, 0.0)
-                ox, oy = gx - pm.width() / 2.0, gy - pm.height() / 2.0
-            else:
-                px, py = frame_pivot_in_pixmap(self._action, i)
-                ox, oy = anchor.x() - px, anchor.y() - py
+            pm = action_frame_pixmap(self._action, i)
+            px, py = frame_pivot_in_pixmap(self._action, i)
+            tgt = targets.get(i, anchor)
+            ox, oy = tgt.x() - px, tgt.y() - py
             main_rect = QRectF(cx + ox * scale, cy + oy * scale,
                                pm.width() * scale, pm.height() * scale)
         return main_rect
@@ -2517,6 +2539,8 @@ class ActionPreviewWidget(QWidget):
         self.adjust_panel.changed.connect(self._on_adjust_changed)
         # 变换手柄松手后补刷拖动期间挂起的缩略图
         self.canvas.transform_edit_finished.connect(self._on_transform_edit_finished)
+        # 画布进入变换模式 → 暂停播放（播放每 tick 会切帧、打断编辑并清掉视图锚定）
+        self.canvas.transform_mode_changed.connect(self._on_canvas_transform_mode)
         scroll.setWidget(self.adjust_panel)
         lower_layout.addWidget(scroll, 1)
 
@@ -2696,9 +2720,14 @@ class ActionPreviewWidget(QWidget):
     def _tick(self):
         if not self._action or not self._action.frames:
             return
-        # 播放自动切帧与变换拖动冲突：正在变换时先退出变换模式
-        if getattr(self, "canvas", None) is not None and self.canvas._transform_mode:
-            self.canvas.set_transform_mode(None)
+        # 播放与变换互斥：正在变换就**暂停播放**，而不是把变换模式踢掉。
+        # （老代码在这里 set_transform_mode(None)：那会顺手清掉视图锚定、把正在进行的
+        #   拖动打断，播放中每 tick 闪一下 —— 实测一次 tick 就有 54% 像素在变。）
+        canvas = getattr(self, "canvas", None)
+        if canvas is not None and canvas.transform_mode():
+            if self._playing:
+                self.toggle_play()
+            return
         n = len(self._action.frames)
         if self._action.loop_mode == Action.LOOP:
             self._frame_index = (self._frame_index + 1) % n
@@ -2849,6 +2878,16 @@ class ActionPreviewWidget(QWidget):
                     self._thumbs_dirty = True
                 else:
                     self._refresh_thumbs()
+
+    def _on_canvas_transform_mode(self, mode: str) -> None:
+        """画布进入变换模式 → 暂停播放。
+
+        播放每 tick 会切帧（`set_frame` 会清掉视图锚定），而拖动中的变换一旦被打断，
+        画面每 tick 闪一次（实测一次 tick 就有 54% 像素变化）。与其让播放拆掉编辑，
+        不如进编辑就停播。
+        """
+        if mode and self._playing:
+            self.toggle_play()
 
     def _on_transform_edit_finished(self) -> None:
         """变换手柄松手：补刷拖动期间挂起的帧缩略图与画布尺寸标签。"""
