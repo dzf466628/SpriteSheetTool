@@ -422,6 +422,9 @@ class _FloatCard(QWidget):
     """
 
     TITLE_H = 26
+    BG_COLOR = "#1f1f1f"        # 卡片底色：不透明（否则就是"透明弹窗"）
+    BORDER_COLOR = "#000000"    # 1 像素描边：用户要求最大化后四块用黑色描边
+    RADIUS = 10.0
 
     def __init__(self, title: str, parent=None) -> None:
         super().__init__(parent, Qt.WindowType.Tool)
@@ -431,7 +434,6 @@ class _FloatCard(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self._drag_offset = None
-        self._closed_by_user = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(1, 1, 1, 1)        # 给 1px 边框留位置
@@ -447,13 +449,7 @@ class _FloatCard(QWidget):
         self.lbl_title = QLabel(title)
         tb.addWidget(self.lbl_title)
         tb.addStretch(1)
-        self.btn_close = QPushButton("✕")
-        self.btn_close.setObjectName("FloatCardClose")
-        self.btn_close.setFixedSize(20, 20)
-        self.btn_close.setToolTip("关闭（还原窗口时会自动回到原位）")
-        self.btn_close.setCursor(Qt.CursorShape.ArrowCursor)
-        self.btn_close.clicked.connect(self._on_close)
-        tb.addWidget(self.btn_close)
+        # 用户要求：去掉关闭按钮 —— 最大化时这几个窗口不能被关掉
         outer.addWidget(self.title_bar)
 
         self.body = QWidget()
@@ -465,16 +461,26 @@ class _FloatCard(QWidget):
 
         # ID 选择器只涂卡片自身/标题栏，避免级联污染内部控件（项目里的既有约定）
         self.setStyleSheet(
-            "#FloatCard { background: #1f1f1f; border: 1px solid #555555; border-radius: 10px; }"
             "#FloatCardTitle { background: #2a2a2a; border-top-left-radius: 9px;"
             " border-top-right-radius: 9px; }"
             "#FloatCardTitle QLabel { color: #e0e0e0; font-size: 11px; font-weight: 600;"
             " background: transparent; }"
-            "#FloatCardClose { color: #bbb; background: transparent; border: none;"
-            " border-radius: 3px; font-size: 12px; }"
-            "#FloatCardClose:hover { background: #E91E63; color: #ffffff; }"
             "#FloatCardBody { background: transparent; }"
         )
+
+    def paintEvent(self, event):
+        """自绘卡片底：圆角**不透明**背景 + 1 像素**黑色**描边（用户要求）。
+
+        必须自绘：普通 QWidget 不设 WA_StyledBackground 时压根不画样式表背景 ——
+        之前历史记录看着透明就是这个原因。
+        """
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(QColor(self.BORDER_COLOR), 1.0))
+        p.setBrush(QColor(self.BG_COLOR))
+        p.drawRoundedRect(rect, self.RADIUS, self.RADIUS)
+        p.end()
 
     def content_parent_padding(self) -> int:
         """内容区相对窗口左上角多出来的高度（标题栏 + 边框）。"""
@@ -482,16 +488,11 @@ class _FloatCard(QWidget):
 
     def set_content(self, w: QWidget) -> None:
         """把面板塞进卡片内容区。"""
-        self._closed_by_user = False
         self.body_layout.addWidget(w)
 
     def take_content(self):
         item = self.body_layout.takeAt(0)
         return item.widget() if item is not None else None
-
-    def _on_close(self) -> None:
-        self._closed_by_user = True
-        self.hide()
 
     def mousePressEvent(self, event):
         # 点在标题栏上 = 拖窗口（无边框窗口不能靠系统搬）
@@ -1816,8 +1817,7 @@ class MainWindow(QMainWindow):
         # 预览窗保留系统标题栏（用户说"预览窗口没问题"），只把内容做成圆角
         self.preview.preview_box.setObjectName("PreviewFloatBox")
         self.preview.preview_box.setStyleSheet(
-            "#PreviewFloatBox { background: #1f1f1f; border: 1px solid #555555;"
-            " border-radius: 8px; }"
+            "#PreviewFloatBox { background: #1f1f1f; border: none; }"
         )
         # ★ "默认窗口"里三块各自的尺寸：最大化脱出时**按这个尺寸**做悬浮窗。
         # 必须在窗口还没最大化时记（最大化时 Qt 会先按新窗口重排一次布局，

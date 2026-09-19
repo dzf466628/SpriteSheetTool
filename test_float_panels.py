@@ -22,7 +22,7 @@ if sys.platform == "win32":
 from pathlib import Path
 
 from PyQt6.QtCore import QEventLoop, QPoint, QTimer, Qt
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QColor, QImage, QPixmap
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
@@ -140,33 +140,39 @@ check("原图区拿到全部宽度",
       win.splitter.sizes()[1] == 0 and win.splitter.sizes()[0] > 0,
       f"splitter={win.splitter.sizes()}")
 
-print("\n2a. 动作编辑/帧编辑 用无系统标题栏的圆角卡片 + 自带 ✕：")
-for name in ("动作编辑", "帧编辑"):
+print("\n2a. 四块都是无系统标题栏/无关闭按钮的圆角卡片（黑描边、底色不透明）：")
+
+
+def card_pixels(card, pt):
+    """把卡片渲染出来，取某点像素 (r,g,b,a)。"""
+    img = QImage(card.size(), QImage.Format.Format_ARGB32)
+    img.fill(QColor(0, 0, 0, 0))
+    card.render(img)
+    px = img.pixel(pt)
+    return ((px >> 16) & 255, (px >> 8) & 255, px & 255, (px >> 24) & 255)
+
+
+for name in ("动作编辑", "帧编辑", "预览"):
     card = win._float_cards.get(name)
     panel = dict(panels)[name]
-    check(f"{name}：无边框（没有系统标题栏）",
-          card is not None and bool(card.windowFlags() & Qt.WindowType.FramelessWindowHint),
-          f"flags={card.windowFlags() if card else None}")
-    check(f"{name}：自带标题栏 + 关闭按钮在右边",
-          card is not None and card.title_bar.isVisible() and card.btn_close.isVisible()
-          and card.btn_close.mapTo(card, QPoint(0, 0)).x() > card.width() // 2,
-          f"✕位置={card.btn_close.mapTo(card, QPoint(0, 0)).x() if card else None} 宽={card.width() if card else None}")
-    check(f"{name}：面板内容在卡片里（内容屏幕位置和默认窗口一致）",
-          panel.parent() is card.body,
+    check(f"{name}：无边框（没有系统标题栏、没有关闭按钮）",
+          card is not None and bool(card.windowFlags() & Qt.WindowType.FramelessWindowHint)
+          and not hasattr(card, "btn_close"),
+          f"frameless={bool(card.windowFlags() & Qt.WindowType.FramelessWindowHint) if card else None}")
+    check(f"{name}：1 像素黑色描边（自绘 paintEvent）",
+          card is not None and card.BORDER_COLOR == "#000000",
+          f"border={getattr(card, 'BORDER_COLOR', None)}")
+    body = card_pixels(card, QPoint(card.width() // 2, card.height() - 12))
+    corner = card_pixels(card, QPoint(1, card.height() - 1))
+    check(f"{name}：底色不透明（不是透明弹窗）",
+          body[3] == 255,
+          f"卡片内像素={body}（alpha 必须 255；具体色值看落在哪个子控件上）")
+    check(f"{name}：面板内容在卡片里", panel.parent() is card.body,
           f"parent={panel.parent().__class__.__name__ if panel.parent() else None}")
-    check(f"{name}：卡片是圆角（有 border-radius 样式）",
-          card is not None and "border-radius" in card.styleSheet())
+    check(f"{name}：圆角（四角是透明的）", corner[3] == 0, f"左上角像素={corner}")
 
-card_anim = win._float_cards.get("动作编辑")
-card_anim.btn_close.click()
-wait(120)
-check("点 ✕ 会把这块收起来（不是关掉程序）",
-      not card_anim.isVisible() and win._panels_floating, f"visible={card_anim.isVisible()}")
-win.setWindowState(Qt.WindowState.WindowNoState)
-wait(200)
-win.setWindowState(Qt.WindowState.WindowMaximized)
-wait(250)
-check("重新最大化后它会回来", card_anim.isVisible(), f"visible={card_anim.isVisible()}")
+check("历史卡片同样没有关闭按钮（最大化时不能关掉）",
+      win._history_card is not None and not hasattr(win._history_card, "btn_close"))
 
 print("\n2b. 预览卡片：画布方形 + 尺寸固定 + 拖动标题栏可移动：")
 card_pv = win._float_cards.get("预览")
@@ -254,24 +260,22 @@ check("收起后按钮弹回", not hist_btn.isChecked() and not card_h.isVisible
 win._show_history(True)
 wait(80)
 check("点按钮/菜单能再叫回来", card_h.isVisible() and hist_btn.isChecked())
-check("历史卡片：无系统标题栏 + 圆角 + 1px 灰描边 + 自带 ✕ + 固定大小",
+check("历史卡片：无系统标题栏 + 1px 黑描边 + 无关闭按钮 + 固定大小",
       bool(card_h.windowFlags() & Qt.WindowType.FramelessWindowHint)
-      and "border-radius: 10px" in card_h.styleSheet()
-      and "border: 1px solid" in card_h.styleSheet()
-      and card_h.btn_close.isVisible()
+      and card_h.BORDER_COLOR == "#000000" and not hasattr(card_h, "btn_close")
       and card_h.minimumSize() == card_h.maximumSize(),
-      f"style ok, fixed={card_h.minimumSize() == card_h.maximumSize()}")
-check("历史卡片底色不透明（不是透明弹窗）",
-      card_h.testAttribute(Qt.WidgetAttribute.WA_StyledBackground)
-      and "background: #1f1f1f" in card_h.styleSheet()
-      and "background: #1f1f1f" in win._history_panel.styleSheet(),
-      f"WA_StyledBackground={card_h.testAttribute(Qt.WidgetAttribute.WA_StyledBackground)}")
+      f"fixed={card_h.minimumSize() == card_h.maximumSize()}")
+_h_body = card_pixels(card_h, QPoint(card_h.width() // 2, card_h.height() - 14))
+_h_corner = card_pixels(card_h, QPoint(1, card_h.height() - 1))
+check("历史卡片底色不透明（数像素：不是透明弹窗）",
+      _h_body[3] == 255 and _h_corner[3] == 0,
+      f"卡片内像素={_h_body} 圆角外={_h_corner}")
 win.setWindowState(Qt.WindowState.WindowMaximized)
 wait(250)
 check("最大化后历史卡片依然显示、依然是独立窗口",
       card_h.isVisible() and card_h.isWindow(), f"visible={card_h.isVisible()}")
-check("四块 + 历史 都是 1 像素灰描边",
-      all("border: 1px solid" in (c.styleSheet() if c is not None else "")
+check("四块 + 历史 都是 1 像素黑描边",
+      all(getattr(c, "BORDER_COLOR", None) == "#000000"
           for c in (win._float_cards.get("动作编辑"), win._float_cards.get("帧编辑"),
                     win._float_cards.get("预览"), card_h)),
       "动作编辑/帧编辑/预览/历史")
