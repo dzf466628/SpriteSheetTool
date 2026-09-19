@@ -30,7 +30,7 @@ FMT_TP_ARRAY = "tp_array"
 FMT_ASEPRITE_ARRAY = "aseprite_array"
 
 FORMAT_CHOICES = [
-    (FMT_NATIVE, "本工具格式"),
+    (FMT_NATIVE, "SpriteSheetTool json-AI专用"),
     (FMT_TP_HASH, "TexturePacker JSON-Hash"),
     (FMT_TP_ARRAY, "TexturePacker JSON-Array"),
     (FMT_ASEPRITE_ARRAY, "Aseprite JSON-Array"),

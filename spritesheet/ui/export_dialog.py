@@ -322,13 +322,10 @@ class ExportDialog(QDialog):
             "导出一个包含全部原图和编辑状态的单文件工程" if has_project
             else "当前窗口没有提供工程数据，无法导出 SSTOOL 工程"
         )
-        self.cb_json = QCheckBox("导出 JSON")
-        self.cb_json.setChecked(True)  # 默认打开导出 JSON
         self.cb_gif = QCheckBox("导出 GIF（预览）")
         self.cb_separate = QCheckBox("分别导出")
         self.cb_separate.toggled.connect(self._on_separate_toggled)
         right_layout.addWidget(self.cb_project)
-        right_layout.addWidget(self.cb_json)
         right_layout.addWidget(self.cb_gif)
         right_layout.addWidget(self.cb_separate)
 
@@ -350,11 +347,8 @@ class ExportDialog(QDialog):
             cb.setStyleSheet("color: #ccc;")  # 字号与上方复选框一致（继承默认字体）
             self._json_fmt_checks[fmt_id] = cb
             json_fmt_layout.addWidget(cb)
-        self.cb_json.toggled.connect(json_fmt_group.setEnabled)
-        self.cb_json.toggled.connect(lambda _=False: self._update_preview())
         for _cb in self._json_fmt_checks.values():
             _cb.toggled.connect(lambda _=False: self._update_preview())
-        json_fmt_group.setEnabled(self.cb_json.isChecked())
         right_layout.addWidget(json_fmt_group)
 
         right_layout.addSpacing(8)
@@ -1003,7 +997,7 @@ class ExportDialog(QDialog):
     def _file_count(self) -> int:
         """本次导出会写出多少个**文件**（不含文件夹）。"""
         selected = self.selected_actions()
-        json_count = len(self._json_formats()) if self.cb_json.isChecked() else 0
+        json_count = len(self._json_formats())
         gif_count = 1 if self.cb_gif.isChecked() else 0
         project = 1 if self.cb_project.isChecked() else 0
         if not selected:
@@ -1031,7 +1025,7 @@ class ExportDialog(QDialog):
         ``base_name`` / ``target_root``，不要再各自拼字符串。
         """
         selected = self.selected_actions()
-        json_formats = self._json_formats() if self.cb_json.isChecked() else []
+        json_formats = self._json_formats()
         base = self.base_name(suffix)
         out: list[Path] = []
         if self.cb_separate.isChecked():
@@ -1112,7 +1106,7 @@ class ExportDialog(QDialog):
         base = self.base_name(suffix)
         generated: list[Path] = []
         used_names: set[str] = set()
-        json_formats = self._json_formats() if self.cb_json.isChecked() else []
+        json_formats = self._json_formats()
 
         def report(done: int, total: int, label: str) -> bool:
             if progress is not None and not progress(done, total, label):
@@ -1282,7 +1276,7 @@ class ExportDialog(QDialog):
         return "original" if self.rb_original.isChecked() else "repack"
 
     def export_json(self) -> bool:
-        return self.cb_json.isChecked()
+        return len(self._json_formats()) > 0
 
     def export_gif(self) -> bool:
         return self.cb_gif.isChecked()
