@@ -17,7 +17,7 @@ import sys
 import weakref
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QPointF, QRectF, QSize, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QAction, QColor, QKeySequence, QPainter, QPen, QPixmap, QUndoCommand, QUndoStack,
 )
@@ -1641,17 +1641,20 @@ class MainWindow(QMainWindow):
         left_column.setObjectName("LeftColumn")
         # ID 选择器只涂容器自身，避免级联污染 image_viewer 内部子控件
         left_column.setStyleSheet("#LeftColumn { background-color: #1f1f1f; }")
-        left_layout = QVBoxLayout(left_column)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(0)
-        left_layout.addWidget(self.image_viewer, 1)
+        self.left_layout = QVBoxLayout(left_column)
+        self.left_layout.setContentsMargins(0, 0, 0, 0)
+        self.left_layout.setSpacing(0)
+        self.left_layout.addWidget(self.image_viewer, 1)
         self.anim_bar = AnimSettingsBar()
         self.anim_bar.set_actions(self.actions)
-        left_layout.addWidget(self.anim_bar)
+        self.left_layout.addWidget(self.anim_bar)
         self.splitter.addWidget(left_column)
 
         self.preview = ActionPreviewWidget()
         self.preview.set_actions(self.actions)
+        # 用户拖动预览/帧编辑之间的分隔线后，也要刷新"默认尺寸"记录
+        self.preview.preview_splitter.splitterMoved.connect(
+            lambda *_: QTimer.singleShot(0, self._remember_panel_sizes))
         # 导出工程（.sstool）需要完整文档数据；provider 由主窗口注入
         self.preview._project_manifest = self._project_manifest
         # 导出产物以当前标签页的工程名开头
@@ -1701,6 +1704,125 @@ class MainWindow(QMainWindow):
         self.lbl_status = QLabel(f"{__app_name__} v{__version__}  |  重构版")
         self.lbl_status.setStyleSheet("color: #888; font-size: 11px; padding: 2px 8px; background: #1a1a1a; border-top: 1px solid #333;")
         main_layout.addWidget(self.lbl_status)
+
+        # ---- 最大化时脱出来的三个悬浮窗 ----
+        # 需求：窗口只有"默认大小"和"最大化"两种。默认大小时布局完全不变；
+        # 最大化时把三块区域脱出来变成**独立悬浮窗**，而且**尺寸/比例必须和默认窗口里
+        # 一模一样**（不是重新算一个大小）—— 内部按钮因此不会被拉乱。
+        #   ① 动作编辑（原图区下方横条）
+        #   ② 帧编辑（标题 + 参数面板 + 原图信息 + 导出）
+        #   ③ 预览窗口（画布 + 播放控制条 + 缩略图）
+        self._panels_floating = False
+        self._float_records: list[dict] = []
+        # ★ "默认窗口"里三块各自的尺寸：最大化脱出时**按这个尺寸**做悬浮窗。
+        # 必须在窗口还没最大化时记（最大化时 Qt 会先按新窗口重排一次布局，
+        # 那时量到的就不是默认尺寸了）。见 _remember_panel_sizes。
+        self._panel_sizes_normal: dict[str, QSize] = {}
+        # 去抖计时器：布局稳定下来之后再记尺寸（resizeEvent 里量到的是重排前的旧值）
+        self._panel_size_timer = QTimer(self)
+        self._panel_size_timer.setSingleShot(True)
+        self._panel_size_timer.setInterval(250)
+        self._panel_size_timer.timeout.connect(self._remember_panel_sizes)
+
+    def _schedule_panel_size_memory(self) -> None:
+        self._panel_size_timer.start()
+
+    def _panel_widgets(self):
+        pv = self.preview
+        return (("动作编辑", self.anim_bar),
+                ("预览", pv.preview_box),
+                ("帧编辑", pv.edit_box))
+
+    def _remember_panel_sizes(self) -> None:
+        """窗口处于默认大小时，记下三块区域的尺寸（悬浮窗要沿用它们）。"""
+        if self._panels_floating or self.isMaximized() or self.isFullScreen():
+            return
+        if not hasattr(self, "preview"):
+            return
+        self._panel_sizes_normal = {
+            name: QSize(max(1, w.width()), max(1, w.height()))
+            for name, w in self._panel_widgets() if w.width() > 1 and w.height() > 1
+        }
+
+    def _float_targets(self):
+        """(标题, 控件, 塞回原布局的办法)。塞回时要保序，并恢复分隔线比例。"""
+        pv = self.preview
+        return (
+            ("动作编辑", self.anim_bar,
+             lambda w: self.left_layout.insertWidget(self._anim_bar_index, w)),
+            ("预览（画布 / 播放 / 缩略图）", pv.preview_box,
+             lambda w: (pv.preview_splitter.insertWidget(0, w),
+                        pv.preview_splitter.setSizes(self._pv_sizes_normal))),
+            ("帧编辑", pv.edit_box,
+             lambda w: (pv.preview_splitter.insertWidget(1, w),
+                        pv.preview_splitter.setSizes(self._pv_sizes_normal))),
+        )
+
+    def _float_panels(self) -> None:
+        """最大化：三块区域脱出成独立悬浮窗，尺寸 = 默认窗口里的原始尺寸。"""
+        if self._panels_floating:
+            return
+        pv = self.preview
+        # 先记下"默认窗口"里的尺寸、屏幕位置和还原办法
+        self._anim_bar_index = max(0, self.left_layout.indexOf(self.anim_bar))
+        self._pv_sizes_normal = pv.preview_splitter.sizes()
+        self._splitter_sizes_normal = self.splitter.sizes()
+        records = []
+        for title, w, put_back in self._float_targets():
+            remembered = self._panel_sizes_normal.get(title)
+            records.append({
+                "w": w,
+                "title": title,
+                # ★ 尺寸原样沿用"默认窗口"里记下的那一份，绝不重算
+                "size": remembered or QSize(w.width(), w.height()),
+                "pos": w.mapToGlobal(QPoint(0, 0)),
+                "parent": w.parentWidget(),
+                "put_back": put_back,
+            })
+        self._float_records = records
+        self._panels_floating = True
+
+        # 三块都飞走后，预览整块隐藏，腾出来的宽高全给原图区
+        pv.hide()
+        self.splitter.setSizes([max(1, sum(self._splitter_sizes_normal)), 0])
+
+        for rec in records:
+            w = rec["w"]
+            w.setParent(None)
+            w.setWindowFlags(Qt.WindowType.Window)
+            w.setWindowTitle(rec["title"])
+            w.setFixedSize(rec["size"])        # ★ 固定住：大小不会被拉变、内部布局不乱
+            w.move(rec["pos"])
+            w.show()
+            w.raise_()
+
+    def _dock_panels(self) -> None:
+        """还原窗口：三块按原顺序塞回原布局，并恢复默认窗口时的比例。"""
+        if not self._panels_floating:
+            return
+        self._panels_floating = False
+        for rec in self._float_records:
+            w = rec["w"]
+            w.hide()
+            w.setWindowFlags(Qt.WindowType.Widget)
+            w.setMinimumSize(0, 0)
+            w.setMaximumSize(16777215, 16777215)
+            w.setParent(rec["parent"])          # 回原父容器（QLayout 会自动接管）
+            rec["put_back"](w)                  # 再插回原来的位置（保序）
+            w.show()
+        self._float_records = []
+        self.preview.show()
+        if self._splitter_sizes_normal:
+            self.splitter.setSizes(self._splitter_sizes_normal)
+
+    def changeEvent(self, event) -> None:
+        # 窗口只有两种状态：默认大小（布局照旧）/ 最大化（三块脱出成悬浮窗）
+        if event.type() == QEvent.Type.WindowStateChange:
+            if self.isMaximized():
+                QTimer.singleShot(0, self._float_panels)
+            elif self._panels_floating:
+                QTimer.singleShot(0, self._dock_panels)
+        super().changeEvent(event)
 
     def _build_menu(self) -> None:
         menubar = self.menuBar()
@@ -1970,6 +2092,8 @@ class MainWindow(QMainWindow):
         # 浮动历史窗口跟随主窗口右侧
         if hasattr(self, "_history_dock") and self._history_dock.isFloating():
             self._history_dock.move(self.x() + self.width() + 10, self.y() + 80)
+        # 默认大小下的三块区域尺寸（最大化脱出成悬浮窗时沿用它们）
+        self._schedule_panel_size_memory()
 
     def closeEvent(self, event) -> None:
         """关闭窗口前：先处理未保存的标签，再收尾原图区。
@@ -1977,6 +2101,9 @@ class MainWindow(QMainWindow):
         收尾这两件事不做会导致随机闪退（原生 access violation）：检测线程在跑时宿主被
         析构、或 app 级事件过滤器指向已释放对象。参见 ``ImageViewer.shutdown``。
         """
+        if self._panels_floating:
+            # 三块此刻是独立顶层窗口，主窗口关掉后它们会残留 → 先收回去
+            self._dock_panels()
         dirty = self._dirty_tab_names()
         if dirty:
             choice = self._ask_quit_dirty([name for _i, name in dirty])
