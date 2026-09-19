@@ -114,7 +114,7 @@ check("预览窗默认=画布方形(缩30%)",
 check("另两块尺寸与默认窗口完全一致（★大小不变）",
       floated["动作编辑"] == docked["动作编辑"] and floated["帧编辑"] == docked["帧编辑"],
       f"默认={docked} 悬浮={floated}")
-check("四块悬浮窗都是归属主窗口的 Tool 窗口（永远在主页面之前、不被遮挡）",
+check("悬浮窗都是归属主窗口的 Tool 窗口（永远在主页面之前、不被遮挡）",
       all(bool(w.windowFlags() & Qt.WindowType.Tool) and w.parent() is win for _n, w in panels)
       and win._history_dock.isFloating(),
       f"{[(n, bool(w.windowFlags() & Qt.WindowType.Tool), w.parent() is win) for n, w in panels]} "
@@ -141,22 +141,6 @@ check("拖边框改大小后画布跟着变（不崩、不缩错）",
       f"画布={pv.canvas.width()}x{pv.canvas.height()}")
 pv.preview_box.resize(*floated["预览"])     # 拖回默认方形，后面按默认值还原
 wait(120)
-
-print("\n2c. 贴屏幕边缘（磁吸）：")
-area = app.primaryScreen().availableGeometry()
-w0 = win.anim_bar
-w0.move(area.left() + 5, area.top() + 5)
-win._snap_floating_to_edge(w0)              # 等价于贴边轮询定时器做的动作
-check(f"靠近左/上边缘自动贴边 (left={area.left()}, top={area.top()})",
-      w0.x() == area.left() and w0.y() == area.top(),
-      f"实际=({w0.x()},{w0.y()})")
-w0.move(area.left() + 3, area.top() + 3)    # 贴边后再往外拖（下一次轮询）
-win._snap_floating_to_edge(w0)
-check("贴边后能拉出来（不会被粘住）", w0.x() > area.left() and w0.y() > area.top(),
-      f"实际=({w0.x()},{w0.y()})")
-w0.move(area.left() + 120, area.top() + 140)
-win._snap_floating_to_edge(w0)
-check("离边缘远时不动它", w0.x() == area.left() + 120, f"实际=({w0.x()},{w0.y()})")
 
 print("\n3. 还原窗口 → 三块塞回原布局，比例复位：")
 win.setWindowState(Qt.WindowState.WindowNoState)
