@@ -2217,22 +2217,31 @@ class MainWindow(QMainWindow):
         anim_x = (avail_w - anim_s.width()) // 2
         anim_y = avail_h - anim_s.height() - margin
         anim_t.move(anim_x, anim_y)
-        # 预览：右上角，宽固定 250px
+        # 预览：右上角，宽固定 250px；和帧编辑在右边一列，中间隔 100px，整列垂直居中
         pv_w = 250
         pv_t.resize(pv_w, pv_t.height())
+        pv_h = pv_t.height()
+        gap = 100
+        col_h = pv_h + gap + fe_s.height()
+        col_y = (avail_h - col_h) // 2
         pv_x = avail_w - pv_w - margin
-        pv_y = margin
+        pv_y = col_y
         pv_t.move(pv_x, pv_y)
         # 帧编辑：右下角，和预览同列（右对齐）
         fe_x = avail_w - fe_s.width() - margin
-        fe_y = avail_h - fe_s.height() - margin
+        fe_y = col_y + pv_h + gap
         fe_t.move(fe_x, fe_y)
         # 原图悬浮工具栏：顶部水平居中（和底部动作编辑居中对齐）
-        toolbar = getattr(self.image_viewer, "_toolbar", None)
-        if toolbar is not None:
+        # 延迟一帧再移动，确保 canvas 宽度已经更新到最大化后的尺寸
+        def _center_toolbar():
+            toolbar = getattr(self.image_viewer, "_toolbar", None)
+            if toolbar is None:
+                return
             canvas = toolbar.parentWidget()
-            if canvas is not None:
-                toolbar.move((canvas.width() - toolbar.width()) // 2, 6)
+            if canvas is None:
+                return
+            toolbar.move((canvas.width() - toolbar.width()) // 2, 6)
+        QTimer.singleShot(0, _center_toolbar)
         # 显示
         for title, (target, _s) in sized.items():
             target.show()
