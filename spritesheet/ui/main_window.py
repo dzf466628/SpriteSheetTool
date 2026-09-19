@@ -2210,9 +2210,9 @@ class MainWindow(QMainWindow):
         anim_t, anim_s = sized["动作编辑"]
         pv_t, pv_s = sized["预览"]
         fe_t, fe_s = sized["帧编辑"]
-        # 动作编辑：左边贴边，垂直居中
+        # 动作编辑：左下角贴边（默认布局里 anim_bar 在左列底部）
         anim_x = margin
-        anim_y = (avail_h - anim_s.height()) // 2
+        anim_y = avail_h - anim_s.height() - margin
         anim_t.move(anim_x, anim_y)
         # 预览：右上角贴边
         pv_x = avail_w - pv_s.width() - margin
