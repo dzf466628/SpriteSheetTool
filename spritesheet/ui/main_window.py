@@ -1954,6 +1954,7 @@ class MainWindow(QMainWindow):
 
         self.image_viewer = ImageViewer()
         self.image_viewer.image_loaded.connect(self._on_image_loaded)
+        self.image_viewer.json_selected.connect(self._import_project)
         self.image_viewer.json_dropped.connect(self._import_project)
         self.image_viewer.project_dropped.connect(self._safe_open_project)
         self.image_viewer.json_dropped_current.connect(

@@ -185,6 +185,7 @@ class _Canvas(QWidget):
     """原图画布：背景 + 图片绘制，滚轮缩放，空格拖动，点击/拖放添加。"""
 
     image_loaded = pyqtSignal(QPixmap)
+    json_selected = pyqtSignal(str)
     selection_changed = pyqtSignal()
 
     def __init__(self, viewer, parent=None) -> None:
@@ -636,6 +637,11 @@ class _Canvas(QWidget):
         )
         if path:
             set_last_directory(path)
+            # 自动检测同目录同名 JSON，有则导入工程（JSON 连带加载图片）
+            json_candidate = Path(path).with_suffix(".json")
+            if json_candidate.is_file():
+                self.json_selected.emit(str(json_candidate))
+                return
             pm = QPixmap(path)
             if not pm.isNull():
                 self.image_loaded.emit(pm)
@@ -948,6 +954,7 @@ class ImageViewer(QWidget):
     """原图查看器：顶部水平标尺 + 左侧垂直标尺 + 画布 + 浮动工具条。"""
 
     image_loaded = pyqtSignal(QPixmap)
+    json_selected = pyqtSignal(str)
     selection_changed = pyqtSignal()
     frames_updated = pyqtSignal()
     # 在原图上按下鼠标（选元素 / 框选 / 点空白 / 空格平移都算）：主窗口据此收起
@@ -1016,6 +1023,7 @@ class ImageViewer(QWidget):
 
         self.canvas = _Canvas(self)
         self.canvas.image_loaded.connect(self._on_image_loaded)
+        self.canvas.json_selected.connect(self._on_json_selected)
         self.canvas.selection_changed.connect(self.selection_changed)
         grid.addWidget(self.canvas, 1, 1)
         grid.setRowStretch(1, 1)
@@ -1871,6 +1879,10 @@ class ImageViewer(QWidget):
     def _on_image_loaded(self, pm: QPixmap):
         # 由主窗口决定是首次载入还是追加，避免覆盖已有动作。
         self.image_loaded.emit(pm)
+
+    def _on_json_selected(self, path: str):
+        # 导入图片时自动检测到同目录同名 JSON，转发给主窗口导入工程。
+        self.json_selected.emit(path)
 
     def refresh(self):
         """刷新画布和标尺。"""
