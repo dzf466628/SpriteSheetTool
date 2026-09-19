@@ -922,6 +922,25 @@ class PreviewCanvas(QWidget):
         lp = self._screen_to_logical(screen_pos)
         return QPolygonF(pts).containsPoint(lp, Qt.FillRule.OddEvenFill)
 
+    def _hit_inside_box(self, screen_pos, margin: float = 6.0) -> bool:
+        """屏幕点是否落在变换控制框内（含几像素余量）。
+
+        用途：判断"这一点是不是框外空白"。框内的点击即使没点到可拖控件（例如旋转模式下
+        的四个空心角点），也不该退出变换 —— 退出的条件只有"点框外空白"。
+        """
+        pts = self._handles_canvas(
+            self._drag_mo if self._drag_kind else self._current_mo(),
+            layout=self._drag_layout if self._drag_kind else None,
+        )
+        if len(pts) < 4:
+            return False
+        lp = self._screen_to_logical(screen_pos)
+        poly = QPolygonF(pts)
+        if poly.containsPoint(lp, Qt.FillRule.OddEvenFill):
+            return True
+        m = margin / max(0.01, self._zoom)
+        return poly.boundingRect().adjusted(-m, -m, m, m).contains(lp)
+
     def _hit_test(self, screen_pos):
         """返回 (kind, index)，只让当前模式的玫红控件可命中。"""
         if not self._transform_mode or not self._action or not self._action.frames:
@@ -1318,6 +1337,11 @@ class PreviewCanvas(QWidget):
                     self._frame_drag_whole = True
                     self._frame_drag_last = event.position()
                     self.setCursor(Qt.CursorShape.SizeAllCursor)
+                elif self._hit_inside_box(event.position()):
+                    # 框内但没点到可拖控件（典型：旋转模式下点四个空心角点）：
+                    # 什么都不做，**但不退出** —— 退出条件是"点框外空白"。
+                    # 以前这里会直接退出，用户点了手柄看着像被弹起。
+                    return
                 else:
                     self.set_transform_mode(None)  # 点框外空白退出
             else:

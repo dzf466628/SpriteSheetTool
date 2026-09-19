@@ -27,8 +27,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
 
-from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt
+from PyQt6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PyQt6.QtGui import QColor, QFontMetrics, QImage, QMouseEvent, QPainter, QPixmap
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
 from spritesheet.ui.models import Action
@@ -720,6 +721,24 @@ check("播放 tick 不再打断拖动（模式/拖动/角度都在）",
       cp.transform_mode() == "rotate" and cp._drag_kind == "rotate" and bool(angle_p),
       f"mode={cp.transform_mode()} drag={cp._drag_kind} 角度={angle_p}")
 check("播放 tick 会暂停播放", not wd_p._playing, f"playing={wd_p._playing}")
+
+# ================= 14. 点框内不退出，点框外空白才退出 =================
+# 用户实测：旋转模式下点四个空心角点会把手柄弹起（以前没点到可拖控件就直接退出）。
+print("14. 点框内/点手柄不退出变换，点框外空白才退出：")
+a, c = new_canvas(1, "rotate")
+ht = c._handles_canvas(c._current_mo())
+QTest.mouseClick(c, Qt.MouseButton.LeftButton,
+                 pos=c._logical_to_screen(ht[0]).toPoint())
+check("旋转模式点角点手柄不退出", c.transform_mode() == "rotate",
+      f"实际: {c.transform_mode()!r}")
+mid = (ht[0] + ht[2]) / 2.0
+QTest.mouseClick(c, Qt.MouseButton.LeftButton,
+                 pos=c._logical_to_screen(mid + QPointF(30, 0)).toPoint())
+check("点框内空白不退出", c.transform_mode() == "rotate",
+      f"实际: {c.transform_mode()!r}")
+QTest.mouseClick(c, Qt.MouseButton.LeftButton, pos=QPoint(3, 3))
+check("点框外空白退出", c.transform_mode() is None,
+      f"实际: {c.transform_mode()!r}")
 
 print(f"\n结果: {PASS} passed, {FAIL} failed")
 sys.exit(0 if FAIL == 0 else 1)
