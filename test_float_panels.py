@@ -74,12 +74,8 @@ panels = (("动作编辑", win.anim_bar), ("预览", pv.preview_box), ("帧编�
 
 
 def holders():
-    """真正当窗口的那个：动作编辑/帧编辑 = 无边框圆角卡片，预览 = preview_box 本身。"""
-    out = []
-    for name, w in panels:
-        card = None if w is pv.preview_box else win._float_cards.get(name)
-        out.append((name, w, card if card is not None else w))
-    return out
+    """真正当窗口的那个：四块都是同款无边框圆角卡片。"""
+    return [(name, w, win._float_cards.get(name) or w) for name, w in panels]
 
 
 def sizes():
@@ -130,11 +126,13 @@ check("悬浮窗都是归属主窗口的 Tool 窗口（永远在主页面之前�
       and win._history_card is not None and win._history_card.isVisible(),
       f"{[(n, bool(h.windowFlags() & Qt.WindowType.Tool), h.parent() is win) for n, _w, h in holders()]} "
       f"历史记录卡片可见={win._history_card is not None and win._history_card.isVisible()}")
-check("预览窗可拖边框改大小（没被锁死）",
-      pv.preview_box.maximumWidth() > 10000 and pv.preview_box.minimumWidth() < 300,
-      f"min={pv.preview_box.minimumSize()} max={pv.preview_box.maximumSize()}")
+check("四块窗口都固定大小（拖不动大小）",
+      all(win._float_cards.get(n) is not None
+          and win._float_cards[n].minimumSize() == win._float_cards[n].maximumSize()
+          for n in ("动作编辑", "帧编辑", "预览")),
+      f"{[(n, (win._float_cards[n].minimumSize(), win._float_cards[n].maximumSize())) for n in ('动作编辑', '帧编辑', '预览') if win._float_cards.get(n)]}")
 _cards = [win._float_cards.get(n) for n in ("动作编辑", "帧编辑")]
-check("另两块的卡片锁住尺寸（内部布局不许被拉乱）",
+check("卡片的尺寸是锁住的（内部布局不许被拉乱）",
       all(c is not None and c.minimumSize() == c.maximumSize() for c in _cards),
       f"{[(c.minimumSize(), c.maximumSize()) for c in _cards if c is not None]}")
 check("预览整块隐藏（宽高让给原图区）", not pv.isVisible())
@@ -170,16 +168,20 @@ win.setWindowState(Qt.WindowState.WindowMaximized)
 wait(250)
 check("重新最大化后它会回来", card_anim.isVisible(), f"visible={card_anim.isVisible()}")
 
-print("\n2b. 悬浮的预览窗随便拖大小：")
-pv.preview_box.move(pv.preview_box.x() + 40, pv.preview_box.y() + 30)
-pv.preview_box.resize(420, 300)
-wait(200)
-check("拖边框改大小后画布跟着变（不崩、不缩错）",
-      pv.canvas.width() == 420 and pv.canvas.height() == 300 - 32 - 52 - 8,
-      f"窗口={pv.preview_box.width()}x{pv.preview_box.height()} "
-      f"画布={pv.canvas.width()}x{pv.canvas.height()}")
-pv.preview_box.resize(*floated["预览"])     # 拖回默认方形，后面按默认值还原
-wait(120)
+print("\n2b. 预览卡片：画布方形 + 尺寸固定 + 拖动标题栏可移动：")
+card_pv = win._float_cards.get("预览")
+check("预览画布是正方形", pv.canvas.width() == pv.canvas.height() == exp_side,
+      f"画布={pv.canvas.width()}x{pv.canvas.height()} 期望={exp_side}")
+check("预览卡片固定大小（拖边框改不了）",
+      card_pv is not None and card_pv.minimumSize() == card_pv.maximumSize(),
+      f"{card_pv.minimumSize() if card_pv else None}")
+pos0 = card_pv.pos()
+QTest.mousePress(card_pv, Qt.MouseButton.LeftButton, pos=QPoint(20, 8))     # 拖标题栏
+QTest.mouseMove(card_pv, pos=QPoint(20 + 60, 8 + 40))
+QTest.mouseRelease(card_pv, Qt.MouseButton.LeftButton, pos=QPoint(20 + 60, 8 + 40))
+wait(80)
+check("拖标题栏能移动（四块都可拖）", card_pv.pos() != pos0,
+      f"{pos0.x()},{pos0.y()} -> {card_pv.pos().x()},{card_pv.pos().y()}")
 
 print("\n3. 还原窗口 → 三块塞回原布局，比例复位：")
 win.setWindowState(Qt.WindowState.WindowNoState)
@@ -237,42 +239,42 @@ check("工具条不会跑出画布",
       and 0 <= tb.y() <= max(0, canvas.height() - tb.height()),
       f"toolbar=({tb.x()},{tb.y()}) canvas={canvas.width()}x{canvas.height()}")
 
-print("\n6. 历史记录：默认在主页面右列，最大化时是同样的圆角卡片，工具栏按钮联动：")
+print("\n6. 历史记录：始终是独立悬浮卡片（默认窗口下也不融进主窗口）+ 底色不透明：")
 hist_btn = win.image_viewer._toolbar.btn_history
-# 默认窗口：显示时是主窗口右列（不是浮在外面的 QDockWidget，那种会被"吸"进主窗口）
-win._show_history(True)
-wait(150)
-check("默认窗口下历史记录在主窗口里面（splitter 的一列）",
-      win.history_box.isVisible() and not win.history_box.isWindow()
-      and win.splitter.indexOf(win.history_box) >= 0,
-      f"visible={win.history_box.isVisible()} window={win.history_box.isWindow()}")
+card_h = win._history_card
+check("默认窗口下历史记录就是独立窗口（不在主窗口布局里）",
+      card_h is not None and card_h.isWindow() and card_h.parent() is win
+      and win.splitter.indexOf(card_h) < 0 and not hasattr(win, "history_box"),
+      f"isWindow={card_h.isWindow() if card_h else None} parent={card_h.parent().__class__.__name__ if card_h else None}")
+card_h.show(); win._sync_history_button(); wait(80)
 check("显示时工具栏历史按钮激活", hist_btn.isChecked(), f"checked={hist_btn.isChecked()}")
 win._show_history(False)
-wait(120)
-check("收起后按钮弹回", not hist_btn.isChecked() and not win.history_box.isVisible())
-win.setWindowState(Qt.WindowState.WindowMaximized)
-wait(300)
-card_h = win._history_card
-check("最大化后历史记录是独立卡片窗口", card_h is not None and card_h.isWindow()
-      and card_h.isVisible(), f"card={card_h}")
-check("历史卡片同样无系统标题栏 + 圆角 + 1px 灰描边 + 自带 ✕",
-      card_h is not None and bool(card_h.windowFlags() & Qt.WindowType.FramelessWindowHint)
+wait(100)
+check("收起后按钮弹回", not hist_btn.isChecked() and not card_h.isVisible())
+win._show_history(True)
+wait(80)
+check("点按钮/菜单能再叫回来", card_h.isVisible() and hist_btn.isChecked())
+check("历史卡片：无系统标题栏 + 圆角 + 1px 灰描边 + 自带 ✕ + 固定大小",
+      bool(card_h.windowFlags() & Qt.WindowType.FramelessWindowHint)
       and "border-radius: 10px" in card_h.styleSheet()
       and "border: 1px solid" in card_h.styleSheet()
-      and card_h.btn_close.isVisible(),
-      f"style={'border-radius' in card_h.styleSheet() if card_h else None}")
-check("工具栏历史按钮激活（最大化时也显示着）", hist_btn.isChecked() and win._history_shown())
-win._show_history(False)
-wait(120)
-check("卡片能收起来，按钮弹回", not card_h.isVisible() and not hist_btn.isChecked())
-hist_btn.click()
-wait(120)
-check("点按钮又能叫回来", card_h.isVisible() and hist_btn.isChecked())
-check("四个窗口都是 1 像素灰描边",
+      and card_h.btn_close.isVisible()
+      and card_h.minimumSize() == card_h.maximumSize(),
+      f"style ok, fixed={card_h.minimumSize() == card_h.maximumSize()}")
+check("历史卡片底色不透明（不是透明弹窗）",
+      card_h.testAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+      and "background: #1f1f1f" in card_h.styleSheet()
+      and "background: #1f1f1f" in win._history_panel.styleSheet(),
+      f"WA_StyledBackground={card_h.testAttribute(Qt.WidgetAttribute.WA_StyledBackground)}")
+win.setWindowState(Qt.WindowState.WindowMaximized)
+wait(250)
+check("最大化后历史卡片依然显示、依然是独立窗口",
+      card_h.isVisible() and card_h.isWindow(), f"visible={card_h.isVisible()}")
+check("四块 + 历史 都是 1 像素灰描边",
       all("border: 1px solid" in (c.styleSheet() if c is not None else "")
-          for c in (win._float_cards.get("动作编辑"), win._float_cards.get("帧编辑"), card_h))
-      and "border: 1px solid" in pv.preview_box.styleSheet(),
-      "动作编辑/帧编辑/历史/预览")
+          for c in (win._float_cards.get("动作编辑"), win._float_cards.get("帧编辑"),
+                    win._float_cards.get("预览"), card_h)),
+      "动作编辑/帧编辑/预览/历史")
 win.setWindowState(Qt.WindowState.WindowNoState)
 wait(200)
 
