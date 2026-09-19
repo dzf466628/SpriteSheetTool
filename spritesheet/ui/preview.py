@@ -2493,28 +2493,44 @@ class ActionPreviewWidget(QWidget):
         self.toolbar.zoom_out_requested.connect(self.canvas.zoom_out)
         self.toolbar.bg_changed.connect(self._on_bg_changed)
 
-        # 预览画布与下方控制区使用垂直分栏，用户可拖动横向分隔线调整高度。
-        lower = QWidget()
-        lower_layout = QVBoxLayout(lower)
-        lower_layout.setContentsMargins(0, 0, 0, 0)
-        lower_layout.setSpacing(4)
+        # 上下两块各自"成一体"，中间是可拖动分隔线：
+        #   上 = 预览（画布 + 播放控制条 + 帧缩略图）
+        #   下 = 帧编辑（标题 + 参数面板 + 原图信息 + 导出）
+        # 为什么要分组：以前只有"画布 / 其余全部"两段，最大化窗口时"其余全部"跟着长高，
+        # 帧编辑面板内部的按钮/输入框被拉散（用户报的"内部按钮混乱"）。现在两块各有
+        # 默认高度，分隔线可以独立拖动（用户要求"可以独立拖动"）。
+        self.preview_box = QWidget()
+        preview_box_layout = QVBoxLayout(self.preview_box)
+        preview_box_layout.setContentsMargins(0, 0, 0, 0)
+        preview_box_layout.setSpacing(4)
+        self.edit_box = QWidget()
+        self.edit_layout = QVBoxLayout(self.edit_box)
+        self.edit_layout.setContentsMargins(0, 0, 0, 0)
+        self.edit_layout.setSpacing(4)
+
         self.preview_splitter = QSplitter(Qt.Orientation.Vertical)
+        # handleWidth 必须 >0，否则分隔线拖不动（用户要求"可以独立拖动"）
         self.preview_splitter.setHandleWidth(6)
+        self.preview_splitter.setChildrenCollapsible(False)
         self.preview_splitter.setStyleSheet(
             "QSplitter::handle { background: #3d3d3d; }"
             "QSplitter::handle:hover { background: #E91E63; }"
         )
-        self.preview_splitter.addWidget(self.canvas)
-        self.preview_splitter.addWidget(lower)
+        self.preview_splitter.addWidget(self.preview_box)
+        self.preview_splitter.addWidget(self.edit_box)
+        # 拉伸因子：只有上面的"预览"跟着窗口长高，下面的"帧编辑"保持默认高度
+        # （里面的按钮/控件因此不会被拉变形）
         self.preview_splitter.setStretchFactor(0, 1)
         self.preview_splitter.setStretchFactor(1, 0)
-        self.preview_splitter.setSizes([200, 420])
+        # 用户一旦自己拖过分隔线，就不再自动改回默认高度
+        self._user_split = False
+        self.preview_splitter.splitterMoved.connect(self._on_splitter_moved)
         layout.addWidget(self.preview_splitter, 1)
 
         # 控制栏：播放/暂停 + 进度条 + 帧序号（带背景）
-        ctrl_widget = QWidget()
-        ctrl_widget.setStyleSheet("background-color: #1a1a1a; border: none; border-radius: 4px;")
-        ctrl = QHBoxLayout(ctrl_widget)
+        self.ctrl_widget = QWidget()
+        self.ctrl_widget.setStyleSheet("background-color: #1a1a1a; border: none; border-radius: 4px;")
+        ctrl = QHBoxLayout(self.ctrl_widget)
         ctrl.setContentsMargins(6, 4, 6, 4)
         ctrl.setSpacing(6)
 
@@ -2547,7 +2563,8 @@ class ActionPreviewWidget(QWidget):
         self.lbl_frame.setMinimumWidth(40)
         ctrl.addWidget(self.lbl_frame)
 
-        lower_layout.addWidget(ctrl_widget)
+        preview_box_layout.addWidget(self.canvas, 1)
+        preview_box_layout.addWidget(self.ctrl_widget)
 
         # 帧缩略图
         self.thumb_list = QListWidget()
@@ -2571,7 +2588,7 @@ class ActionPreviewWidget(QWidget):
         self.thumb_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.thumb_list.currentRowChanged.connect(self._on_thumb_changed)
         self.thumb_list.itemSelectionChanged.connect(self._on_thumb_selection_changed)
-        lower_layout.addWidget(self.thumb_list)
+        preview_box_layout.addWidget(self.thumb_list)
 
         # 帧编辑区总标题（与原图区下方「动画设置」横条对应：横条管整段，这里管单帧）
         self.panel_title = QLabel("帧编辑·当前帧")
@@ -2580,12 +2597,14 @@ class ActionPreviewWidget(QWidget):
             "QLabel { color: #F06292; font-size: 11px; background: #1f1f1f;"
             " border: 1px solid #333333; border-radius: 3px; padding: 0 8px; }"
         )
-        lower_layout.addWidget(self.panel_title)
+        self.edit_layout.addWidget(self.panel_title)
 
         # 帧编辑面板（可滚动）
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
         self.adjust_panel = AnimAdjustPanel()
         self.adjust_panel.set_canvas(self.canvas)
         self.adjust_panel._get_selected_rows = self._selected_rows
@@ -2602,8 +2621,8 @@ class ActionPreviewWidget(QWidget):
         self.canvas.transform_edit_finished.connect(self._on_transform_edit_finished)
         # 画布进入变换模式 → 暂停播放（播放每 tick 会切帧、打断编辑并清掉视图锚定）
         self.canvas.transform_mode_changed.connect(self._on_canvas_transform_mode)
-        scroll.setWidget(self.adjust_panel)
-        lower_layout.addWidget(scroll, 1)
+        self.scroll.setWidget(self.adjust_panel)
+        self.edit_layout.addWidget(self.scroll, 1)
 
         # 原图信息栏
         self.lbl_source_info = QLabel("未加载原图")
@@ -2612,7 +2631,7 @@ class ActionPreviewWidget(QWidget):
             "QLabel { color: #888; font-size: 10px; padding: 3px 4px; "
             "background: #1a1a1a; border: 1px solid #333; border-radius: 3px; }"
         )
-        lower_layout.addWidget(self.lbl_source_info)
+        self.edit_layout.addWidget(self.lbl_source_info)
 
         # 导出按钮
         self.btn_export = QPushButton("导出")
@@ -2622,10 +2641,14 @@ class ActionPreviewWidget(QWidget):
             "QPushButton:hover { background: #F06292; }"
         )
         self.btn_export.clicked.connect(self._on_export_clicked)
-        lower_layout.addWidget(self.btn_export)
+        self.edit_layout.addWidget(self.btn_export)
 
         self._square_preview = True
         QTimer.singleShot(0, self._apply_default_square)
+
+    # 预览块里**画布**的默认高度（控制条 32 / 缩略图 52 是固定高，跟着一起"成一体"）。
+    # 用户要求："固定"= 默认状态下就是这么大，避免最大化窗口后内部按钮被拉乱。
+    PREVIEW_CANVAS_H = 200
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2638,6 +2661,50 @@ class ActionPreviewWidget(QWidget):
         # 无动作时也由 splitter 控制画布高度，不锁方形（默认 200px）
         self.canvas.setMinimumHeight(100)
         self.canvas.setMaximumHeight(16777215)
+        self._apply_default_split()
+
+    def _edit_min_height(self) -> int:
+        """帧编辑块的最小高度 = 能完整放下内部控件（标题+面板+信息+导出按钮）。
+
+        用户要求"帧编辑宽高固定，避免内部按钮混乱"：面板里的行是固定高度的，
+        高度不够时会被压扁/裁掉。所以这里把最小高度钉在内容需要的像素上
+        （最多只允许占整块的六成，避免小窗口被顶爆）。
+        """
+        panel_h = self.adjust_panel.sizeHint().height()
+        chrome = (self.panel_title.sizeHint().height()
+                  + self.lbl_source_info.sizeHint().height()
+                  + self.btn_export.height()
+                  + 3 * self.edit_layout.spacing() + 8)
+        need = panel_h + chrome
+        total = self.preview_splitter.height()
+        if total > 0:
+            # 最多让帧编辑块占满"整块 - 200"（至少给预览留 200px）；小窗口才出现压缩
+            need = min(need, max(150, total - 200))
+        return max(150, need)
+
+    def _on_splitter_moved(self, *_args) -> None:
+        """用户拖动了"预览 / 帧编辑"之间的分隔线：之后不再自动套用默认高度。"""
+        self._user_split = True
+
+    def _apply_default_split(self) -> None:
+        """给上下两块设**默认**高度（用户自己拖过分隔线后就不再干预）。
+
+        默认值只在"还没被用户改过"时生效，所以窗口最大化/还原都不会把内部控件
+        拉乱；多出来的高度按拉伸因子全给上面的预览画布 —— 画布本来就自适应缩放，
+        播放控制条、缩略图、帧编辑面板的高度都保持不变。
+        """
+        # 帧编辑块的最小高度跟着面板内容走（内容变多也不会被压扁）
+        self.edit_box.setMinimumHeight(self._edit_min_height())
+        if self._user_split:
+            return
+        total = self.preview_splitter.height()
+        if total <= 0:
+            return
+        ctrl_h = self.ctrl_widget.sizeHint().height()
+        thumb_h = self.thumb_list.height() or self.thumb_list.sizeHint().height()
+        top = min(self.PREVIEW_CANVAS_H + ctrl_h + thumb_h + 8, max(120, total - 160))
+        bottom = max(self.edit_box.minimumHeight(), total - top)
+        self.preview_splitter.setSizes([int(top), int(bottom)])
 
     # ---- 对外接口 ----
     def set_actions(self, actions: list[Action]) -> None:
@@ -2688,9 +2755,11 @@ class ActionPreviewWidget(QWidget):
             # 进入动作预览后由垂直分栏控制高度，不沿用无动作状态的方形限制。
             self.canvas.setMinimumHeight(100)
             self.canvas.setMaximumHeight(16777215)
-            # 第一次从无动作进入有动作：默认画布高度 200（放开方形锁后 splitter 会按 stretch 撑满，这里手动压回）
+            # 第一次从无动作进入有动作：把上下两块压回**默认**高度
+            # （放开方形锁后 splitter 会按拉伸因子撑满，这里手动压回；
+            #   之后用户拖过分隔线就不再覆盖）
             if not had_action:
-                QTimer.singleShot(0, lambda: self.preview_splitter.setSizes([200, max(100, self.preview_splitter.height() - 200)]))
+                self._apply_default_split()
         self.adjust_panel.set_action(action)
         self.adjust_panel.set_current_frame(0)
         if action and action.frames:
