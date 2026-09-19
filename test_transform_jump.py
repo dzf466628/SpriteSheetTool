@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import QApplication
 from spritesheet.ui.models import Action
 from spritesheet.ui.preview import ActionPreviewWidget, PreviewCanvas
 from spritesheet.ui.transform import (
-    DEFAULT_QUAD, DEFAULT_ROTATION_PIVOT, action_frame_size,
+    DEFAULT_QUAD, DEFAULT_ROTATION_PIVOT, action_frame_size, frame_pivot_in_pixmap,
 )
 
 app = QApplication([])
@@ -783,6 +783,85 @@ QTest.mousePress(c, Qt.MouseButton.LeftButton, pos=far.toPoint())
 QTest.mouseRelease(c, Qt.MouseButton.LeftButton, pos=far.toPoint())
 check("明显远离控制框（45px 外）仍能退出", c.transform_mode() is None,
       f"实际: {c.transform_mode()!r}")
+
+# ================= 17. 改锚点不许动画面（只影响之后的操作） =================
+# 用户要求："编辑的锚点应该只能影响后面对变化的操作，不能影响以前的变换"。
+# 量法：每帧在同一个位置有一颗品红标记（整体模式下所有帧的标记叠在一起），
+# 先旋转一次，再改锚点 —— 标记块必须原地不动，而红十字要跟着新锚点走。
+print("17. 改锚点只动红点、不动画面：")
+wd_p2, act_p2, cp2 = whole_frames_with_marker()
+cs2, rs2 = rotate_ref(cp2)
+cp2._begin_drag("rotate", -1, QPointF(cs2.x(), cs2.y() - rs2))
+cp2._update_drag(QPointF(cs2.x() + rs2 * math.sin(math.radians(25)),
+                         cs2.y() - rs2 * math.cos(math.radians(25))))
+cp2._end_drag()
+render(cp2)
+img_m = find_blob(cp2, blob_marker)
+cross_a = find_blob(cp2, is_cross)
+from spritesheet.ui.transform import compute_preview_layout as _cpl0
+lay_before_17 = _cpl0(act_p2, 0)
+# 真鼠标拖红点（走完整交互，不是直接改数据）
+dot0 = cp2._logical_to_screen(cp2._rotation_pivot_canvas())
+dot1 = dot0 + QPointF(0, 70)
+cp2._begin_drag("pivot", -1, dot0)
+cp2._update_drag(dot1)
+render(cp2)
+img_m2 = find_blob(cp2, blob_marker)
+cross_b = find_blob(cp2, is_cross)
+cp2._end_drag()
+render(cp2)
+img_m3 = find_blob(cp2, blob_marker)
+check("拖红点中：画面（各帧标记）不动(<4px)",
+      img_m is not None and img_m2 is not None
+      and math.hypot(img_m2[0] - img_m[0], img_m2[1] - img_m[1]) < 4.0,
+      f"{None if img_m is None else (round(img_m[0], 1), round(img_m[1], 1))} -> "
+      f"{None if img_m2 is None else (round(img_m2[0], 1), round(img_m2[1], 1))}"
+      f"（阈值 4px ≈ 1 源像素：换 pivot 会重渲染一次，裁剪边界可能差 1px）")
+check("松手后画面仍不动(<4px)",
+      img_m is not None and img_m3 is not None
+      and math.hypot(img_m3[0] - img_m[0], img_m3[1] - img_m[1]) < 4.0,
+      f"位移={None if img_m is None or img_m3 is None else round(math.hypot(img_m3[0]-img_m[0], img_m3[1]-img_m[1]), 2)}px")
+check("红点跟着鼠标走(>50px)",
+      cross_a is not None and cross_b is not None
+      and math.hypot(cross_b[0] - cross_a[0], cross_b[1] - cross_a[1]) > 50.0,
+      f"红点位移={None if cross_a is None or cross_b is None else round(math.hypot(cross_b[0]-cross_a[0], cross_b[1]-cross_a[1]), 1)}px")
+
+
+def whole_pivot_spread(c):
+    """各帧"当前 pivot 像素"落在画布上的位置最大离散度。
+
+    = 整体旋转是否还绕同一个点（各帧 pivot 画布位置必须重合）。改完锚点后这个必须
+    仍然是 0 —— 否则"之后的操作"就不对了。
+    """
+    _anchor, targets = c._whole_place_targets()
+    pts = []
+    for i in c._transform_indices:
+        px, py = frame_pivot_in_pixmap(c._action, i)
+        sx, sy = frame_pivot_in_pixmap(c._action, i, c._whole_place_pivot(i))
+        t = targets[i]
+        pts.append((t.x() + (px - sx), t.y() + (py - sy)))
+    return max(math.hypot(p[0] - pts[0][0], p[1] - pts[0][1]) for p in pts)
+
+
+spread = whole_pivot_spread(cp2)
+check("改锚点后：各帧 pivot 在画布上仍重合(<1px)（之后旋转仍绕同一点）",
+      spread < 1.0, f"离散度={spread:.2f}px")
+
+# 播放/导出用的布局（compute_preview_layout）与锚点无关：改锚点前后必须一致
+from spritesheet.ui.transform import compute_preview_layout as _cpl
+lay_after = _cpl(act_p2, 0)
+
+
+def _layout_key(layout):
+    _cw, _ch, pos, _meta = layout
+    return [tuple(int(v) for v in p) for p in pos]
+
+
+check("改锚点基本不影响播放/导出布局（尺寸差 ≤1px，重渲染的取整）",
+      len(_layout_key(lay_after)) == len(_layout_key(lay_before_17)) and all(
+          max(abs(a - b) for a, b in zip(pa, pb)) <= 1
+          for pa, pb in zip(_layout_key(lay_after), _layout_key(lay_before_17))),
+      f"{_layout_key(lay_after)[:1]} vs {_layout_key(lay_before_17)[:1]}")
 
 print(f"\n结果: {PASS} passed, {FAIL} failed")
 sys.exit(0 if FAIL == 0 else 1)

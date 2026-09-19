@@ -201,8 +201,11 @@ def transform_frame_pixmap(pm: QPixmap, rotation: int, mirror_h: bool, mirror_v:
     return pm
 
 
-def frame_pivot_output(action: Action, index: int) -> tuple[float, float]:
+def frame_pivot_output(action: Action, index: int, pivot=None) -> tuple[float, float]:
     """第 index 帧：旋转中心在该帧"镜像+旋转并裁剪后"基图里的坐标。
+
+    ``pivot`` 不传就用该帧当前记录的值；传了就用传进来的 —— 整体模式需要
+    "落位用快照 pivot、红点用当前 pivot"两个口径分开算。
 
     必须与 ``transform_frame_pixmap`` 逐像素同管线，否则红色锚点画的位置和实际
     旋转围绕的点不一致，旋转/缩放就会"不按锚点来"。
@@ -220,7 +223,10 @@ def frame_pivot_output(action: Action, index: int) -> tuple[float, float]:
         return (0.0, 0.0)
     src = action.frames[index]
     src_w, src_h = src.width(), src.height()
-    pivot = action.frame_rotation_pivots.get(index, DEFAULT_ROTATION_PIVOT)
+    if pivot is None:
+        pivot = action.frame_rotation_pivots.get(index, DEFAULT_ROTATION_PIVOT)
+    else:
+        pivot = tuple(pivot)
     angle = int(action.frame_rotations.get(index, 0)) % 360
     mh = index in action.frame_mirror_h
     mv = index in action.frame_mirror_v
@@ -261,14 +267,16 @@ def frame_pivot_output(action: Action, index: int) -> tuple[float, float]:
     return out
 
 
-def frame_pivot_in_pixmap(action: Action, index: int) -> tuple[float, float]:
+def frame_pivot_in_pixmap(action: Action, index: int, pivot=None) -> tuple[float, float]:
     """第 index 帧：旋转中心在该帧**最终绘制用的 pixmap** 里的像素坐标。
+
+    ``pivot`` 同 ``frame_pivot_output``：不传用当前值，传了用传进来的。
 
     = ``frame_pivot_output`` 再走一遍该帧的 quad（与 ``action_frame_pixmap`` 的
     变换管线一致），并以 quad 包围盒最小角为原点 —— 绘制时 pixmap 就是贴在这个
     原点上的。
     """
-    px, py = frame_pivot_output(action, index)
+    px, py = frame_pivot_output(action, index, pivot)
     quad = action.frame_quads.get(index, DEFAULT_QUAD)
     if quad is None or tuple(quad) == DEFAULT_QUAD:
         return px, py

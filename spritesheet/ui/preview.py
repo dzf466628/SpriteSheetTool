@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """动作预览区（从 main_window.py 拆出，纯搬移，逻辑未改动）。
 
@@ -206,6 +206,11 @@ class PreviewCanvas(QWidget):
         self._anchor_spec: tuple | None = None   # ('pivot',) | ('frac', fx, fy)
         self._anchor_screen: QPointF | None = None
         self._last_resize: QSize | None = None
+        # 整体模式的"落位锚点快照"：帧的落位按它算，红点按**当前** pivot 画。
+        # 用户要求：编辑锚点只影响之后的操作，不影响已经做过的变换 ——
+        # 于是拖红点时各帧纹丝不动，只有红点在动（见 _whole_place_targets）。
+        self._whole_place_pivots: dict | None = None
+        self._whole_place_key: tuple | None = None
         # Hover feedback deliberately uses a tiny pulse rather than a layout
         # animation, so the control frame never changes size while painting.
         self._hover_kind: str | None = None
@@ -610,16 +615,39 @@ class PreviewCanvas(QWidget):
         ref = self._whole_current_ref()
         return [QPointF(x0 + ref[2 * k] * W, y0 + ref[2 * k + 1] * H) for k in range(4)]
 
-    def _whole_anchor_targets(self, layout=None):
-        """整体变换：每帧的"锚点像素"各应落在画布的哪个点；返回 (红点位置, {帧: 目标点})。
+    def _whole_place_pivot(self, i: int) -> tuple:
+        """该帧"落位用"的 pivot：优先用快照，没有就用当前值。
 
-        目标点 = 该帧 pivot 在参考框里的那个位置（若有整体 quad 就一起过一遍）——也就是
-        "同一个视觉点"。各帧 pivot 一致时它们全都相同（= 红点位置）；如果用户给某几帧
-        单独设过不同的旋转中心，就各按各的，帧不会因此错位。
+        快照的意义：编辑红点只该影响之后的操作，不该挪动画面 —— 落位按快照算，
+        红点按当前 pivot 画，于是拖红点时只有红点在动、各帧纹丝不动。
+        """
+        if self._whole_place_pivots:
+            got = self._whole_place_pivots.get(i)
+            if got is not None:
+                return got
+        return self._action.frame_rotation_pivots.get(i, DEFAULT_ROTATION_PIVOT)
 
-        为什么要有这个：整体变换必须"按锚点对齐"。以前是按"内容包围盒居中"，
-        而那个口径在 0°（不裁剪）和旋转后（裁剪）之间会变，且拖动用未裁剪图、
-        松手用裁剪图，导致其它帧在拖动中偏出十几像素、松手又弹回（实测 12.5px → 0）。
+    def _whole_place_snapshot(self) -> None:
+        """记录当前各帧 pivot 作为落位基准（换动作/换目标集时重新记）。"""
+        idxs = (id(self._action),) + tuple(self._transform_indices)
+        if self._whole_place_pivots is not None and self._whole_place_key == idxs:
+            return
+        self._whole_place_key = idxs
+        self._whole_place_pivots = {
+            i: self._action.frame_rotation_pivots.get(i, DEFAULT_ROTATION_PIVOT)
+            for i in self._transform_indices
+        }
+
+    def _whole_place_targets(self, layout=None):
+        """整体变换的落位：每帧"落位锚点像素"该落在画布的哪个点。
+
+        目标点 = 该帧的落位 pivot 在参考框里的那个位置（有整体 quad 就一起过一遍）——
+        "同一个视觉点"。各帧 pivot 一致时它们全都相同；某几帧单独设过不同旋转中心时
+        就各按各的，帧不会因此错位。
+
+        为什么按锚点对齐：以前按"内容包围盒居中"，那个口径在 0°（不裁剪）和旋转后
+        （裁剪）之间会变，且拖动用未裁剪图、松手用裁剪图 —— 实测其它帧拖动中偏出
+        12.5px、松手又弹回。锚点对齐与角度、与裁剪都无关。
         """
         if not self._action or not self._transform_indices:
             return None, {}
@@ -630,6 +658,7 @@ class PreviewCanvas(QWidget):
         Wr, Hr, entries = whole_reference(self._action, self._transform_indices)
         if Wr <= 0 or Hr <= 0:
             return None, {}
+        self._whole_place_snapshot()
         # 参考框 quad（与手柄同源）：无 quad 时是单位映射
         ref = self._whole_current_ref()
         matrix = None
@@ -642,13 +671,11 @@ class PreviewCanvas(QWidget):
                 matrix = m
         targets = {}
         for i, ox, oy, w, h in entries:
-            pv = self._action.frame_rotation_pivots.get(i, DEFAULT_ROTATION_PIVOT)
+            pv = self._whole_place_pivot(i)
             pt = QPointF(ox + pv[0] * w, oy + pv[1] * h)
             if matrix is not None:
                 pt = matrix.map(pt)
             targets[i] = QPointF(x0 + pt.x(), y0 + pt.y())
-        # 红点位置 = 代表帧的锚点目标（同一个来源，绝不能再各算一套 —— 之前红点用冻结
-        # 参考框、各帧用实时参考框，拖动中两者会分叉，帧就相对红点漂出去几像素）
         try:
             master = self._whole_master_entry()[2][0]
         except (ValueError, TypeError, IndexError):
@@ -658,13 +685,31 @@ class PreviewCanvas(QWidget):
             anchor = next(iter(targets.values()), None)
         return anchor, targets
 
-    def _whole_anchor_canvas(self, layout=None) -> QPointF | None:
-        """整体变换里"各帧旋转中心重合的那个点"的画布坐标（= 红色锚点该画的位置）。
+    def _whole_live_dot_canvas(self, layout=None) -> QPointF | None:
+        """红点该画的画布坐标 = 代表帧**当前** pivot 落在画布上的位置（按实际落位算）。
 
-        实现放在 ``_whole_anchor_targets`` 里：红点位置与各帧的锚点目标必须同一个来源，
-        否则拖动中参考框一变，帧就会相对红点漂出去（实测漂了 12~14px）。
+        与"落位目标"分开：落位用快照 pivot（改红点时帧不动），红点用当前 pivot
+        （跟着鼠标走）。绘制时 pixmap 贴在 (快照目标 - 快照 pivot 在 pixmap 里的位置)，
+        所以红点 = 快照目标 + (当前 pivot - 快照 pivot) 在 pixmap 里的偏移。
         """
-        return self._whole_anchor_targets(layout)[0]
+        if not self._action or not self._transform_indices:
+            return None
+        anchor, targets = self._whole_place_targets(layout)
+        if anchor is None:
+            return None
+        try:
+            master = self._whole_master_entry()[2][0]
+        except (ValueError, TypeError, IndexError):
+            master = self._transform_indices[0]
+        tgt = targets.get(master, anchor)
+        snap_px, snap_py = frame_pivot_in_pixmap(
+            self._action, master, self._whole_place_pivot(master))
+        live_px, live_py = frame_pivot_in_pixmap(self._action, master)
+        return QPointF(tgt.x() + (live_px - snap_px), tgt.y() + (live_py - snap_py))
+
+    def _whole_anchor_canvas(self, layout=None) -> QPointF | None:
+        """整体变换里红点该画的位置（= 代表帧当前 pivot 的画布坐标）。"""
+        return self._whole_live_dot_canvas(layout)
 
     def _current_layout(self):
         if not self._action or not self._action.frames:
@@ -1424,10 +1469,13 @@ class PreviewCanvas(QWidget):
         · 以前拖动用 fast(不裁剪) 图、松手用精确图，两套口径不一致 —— 实测其它帧
           在拖动中偏出 12.5px、松手又归 0，就是用户看到的"其它帧位置变了又回去"。
           现在拖动与松手都用精确图（布局已冻结，拖动期间的开销可控）。
+        · 落位用的是**锚点快照**（`_whole_place_targets`）而不是当前 pivot：
+          用户要求"编辑锚点只影响之后的操作、不影响已经做过的变换"，
+          所以拖红点时各帧纹丝不动，只有红点跟着鼠标走。
         """
         if not self._action or not self._transform_indices:
             return None
-        anchor, targets = self._whole_anchor_targets(layout)
+        anchor, targets = self._whole_place_targets(layout)
         if anchor is None:
             return None
         opacity = self._action.frame_opacity
@@ -1437,7 +1485,8 @@ class PreviewCanvas(QWidget):
                 continue
             pm = action_frame_pixmap(self._action, i)
             fw, fh = pm.width(), pm.height()
-            px, py = frame_pivot_in_pixmap(self._action, i)
+            # 落位用**快照 pivot**（frames 不会因为改红点而移动），红点单独按当前 pivot 画
+            px, py = frame_pivot_in_pixmap(self._action, i, self._whole_place_pivot(i))
             tgt = targets.get(i, anchor)
             ox, oy = tgt.x() - px, tgt.y() - py
             rect = QRectF(cx + ox * scale, cy + oy * scale, fw * scale, fh * scale)
@@ -1451,7 +1500,7 @@ class PreviewCanvas(QWidget):
             # 当前帧不在目标集合（理论不会）：用第一个目标帧占位
             i = self._transform_indices[0]
             pm = action_frame_pixmap(self._action, i)
-            px, py = frame_pivot_in_pixmap(self._action, i)
+            px, py = frame_pivot_in_pixmap(self._action, i, self._whole_place_pivot(i))
             tgt = targets.get(i, anchor)
             ox, oy = tgt.x() - px, tgt.y() - py
             main_rect = QRectF(cx + ox * scale, cy + oy * scale,
@@ -2485,7 +2534,7 @@ class ActionPreviewWidget(QWidget):
         self.preview_splitter.addWidget(lower)
         self.preview_splitter.setStretchFactor(0, 1)
         self.preview_splitter.setStretchFactor(1, 0)
-        self.preview_splitter.setSizes([360, 420])
+        self.preview_splitter.setSizes([200, 420])
         layout.addWidget(self.preview_splitter, 1)
 
         # 控制栏：播放/暂停 + 进度条 + 帧序号（带背景）
@@ -2528,7 +2577,7 @@ class ActionPreviewWidget(QWidget):
 
         # 帧缩略图
         self.thumb_list = QListWidget()
-        self.thumb_list.setFixedHeight(76)
+        self.thumb_list.setFixedHeight(52)
         # IconMode + 固定 gridSize + item.setSizeHint，点击区域与格子完全一致
         self.thumb_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.thumb_list.setIconSize(QSize(36, 36))
@@ -2612,11 +2661,9 @@ class ActionPreviewWidget(QWidget):
     def _apply_default_square(self):
         if self._action is not None:
             return
-        # 底部预留：原图信息栏 + 导出按钮 + spacing，避免挤压底部控件
-        bottom_reserve = 90
-        side = max(160, min(self.width() - 8, self.height() - bottom_reserve))
-        self.canvas.setMinimumHeight(side)
-        self.canvas.setMaximumHeight(side)
+        # 无动作时也由 splitter 控制画布高度，不锁方形（默认 200px）
+        self.canvas.setMinimumHeight(100)
+        self.canvas.setMaximumHeight(16777215)
 
     # ---- 对外接口 ----
     def set_actions(self, actions: list[Action]) -> None:
@@ -2654,6 +2701,7 @@ class ActionPreviewWidget(QWidget):
     def set_action(self, action: Action | None):
         # Switching actions must not leave the previous playback timer running.
         self._timer.stop()
+        had_action = self._action is not None
         self._action = action
         self.action_changed.emit(action)
         self._frame_index = 0
@@ -2666,6 +2714,9 @@ class ActionPreviewWidget(QWidget):
             # 进入动作预览后由垂直分栏控制高度，不沿用无动作状态的方形限制。
             self.canvas.setMinimumHeight(100)
             self.canvas.setMaximumHeight(16777215)
+            # 第一次从无动作进入有动作：默认画布高度 200（放开方形锁后 splitter 会按 stretch 撑满，这里手动压回）
+            if not had_action:
+                QTimer.singleShot(0, lambda: self.preview_splitter.setSizes([200, max(100, self.preview_splitter.height() - 200)]))
         self.adjust_panel.set_action(action)
         self.adjust_panel.set_current_frame(0)
         if action and action.frames:
