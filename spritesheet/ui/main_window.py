@@ -2181,11 +2181,18 @@ class MainWindow(QMainWindow):
         self._float_history_card()
         self._sync_history_button()
 
+        # 按默认布局的相对位置排列悬浮卡片：动作编辑在左，预览在右上，帧编辑在右下
+        margin = 20
+        avail_w = self.width()
+        avail_h = self.height()
+        # 先算每块卡片的最终尺寸
+        sized = {}
         for rec in records:
+            title = rec["title"]
             w = rec["w"]
             if rec["card"] is None:
-                card = _FloatCard(rec["title"], self, resizable=rec["is_preview"])
-                self._float_cards[rec["title"]] = card
+                card = _FloatCard(title, self, resizable=rec["is_preview"])
+                self._float_cards[title] = card
                 rec["card"] = card
             rec["card"].set_content(w)
             target = rec["card"]
@@ -2193,17 +2200,30 @@ class MainWindow(QMainWindow):
             if rec["card"] is not None:
                 size = QSize(size.width() + 2, size.height() + rec["card"].content_parent_padding())
             if rec["is_preview"]:
-                # 预览窗：最大化后可以拖边框改大小（用户要求）
                 target.setMinimumSize(200, 170)
                 target.setMaximumSize(16777215, 16777215)
                 target.resize(size)
             else:
-                target.setFixedSize(size)       # ★ 其余三块固定大小
-            # 卡片比面板多出标题栏，往上挪一点，让**内容**还停在原来的屏幕位置
-            if rec["card"] is not None:
-                pad = rec["card"].content_parent_padding()
-                rec["pos"] = QPoint(rec["pos"].x() - 1, rec["pos"].y() - (pad - 1))
-            target.move(rec["pos"])
+                target.setFixedSize(size)
+            sized[title] = (target, size)
+        # 按相对位置摆：动作编辑贴左边垂直居中；预览贴右上角；帧编辑贴右下角
+        anim_t, anim_s = sized["动作编辑"]
+        pv_t, pv_s = sized["预览"]
+        fe_t, fe_s = sized["帧编辑"]
+        # 动作编辑：左边贴边，垂直居中
+        anim_x = margin
+        anim_y = (avail_h - anim_s.height()) // 2
+        anim_t.move(anim_x, anim_y)
+        # 预览：右上角贴边
+        pv_x = avail_w - pv_s.width() - margin
+        pv_y = margin
+        pv_t.move(pv_x, pv_y)
+        # 帧编辑：右下角贴边
+        fe_x = avail_w - fe_s.width() - margin
+        fe_y = avail_h - fe_s.height() - margin
+        fe_t.move(fe_x, fe_y)
+        # 显示
+        for title, (target, _s) in sized.items():
             target.show()
             target.raise_()
 
