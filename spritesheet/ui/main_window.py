@@ -2531,6 +2531,12 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        # 禁止手动拖拽边缘调整大小：非最大化状态下强制保持默认 1000x1000
+        if not self.isMaximized() and not getattr(self, '_forcing_size', False):
+            if self.width() != 1000 or self.height() != 1000:
+                self._forcing_size = True
+                self.resize(1000, 1000)
+                self._forcing_size = False
         # 默认大小下的三块区域尺寸（最大化脱出成悬浮窗时沿用它们）
         self._schedule_panel_size_memory()
 
