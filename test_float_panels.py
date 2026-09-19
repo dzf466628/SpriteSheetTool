@@ -127,9 +127,9 @@ check("另两块尺寸与默认窗口完全一致（★大小不变）",
 check("悬浮窗都是归属主窗口的 Tool 窗口（永远在主页面之前、不被遮挡）",
       all(bool(h.windowFlags() & Qt.WindowType.Tool) and h.parent() is win
           for _n, _w, h in holders())
-      and win._history_dock.isFloating(),
+      and win._history_card is not None and win._history_card.isVisible(),
       f"{[(n, bool(h.windowFlags() & Qt.WindowType.Tool), h.parent() is win) for n, _w, h in holders()]} "
-      f"历史记录 floating={win._history_dock.isFloating()}")
+      f"历史记录卡片可见={win._history_card is not None and win._history_card.isVisible()}")
 check("预览窗可拖边框改大小（没被锁死）",
       pv.preview_box.maximumWidth() > 10000 and pv.preview_box.minimumWidth() < 300,
       f"min={pv.preview_box.minimumSize()} max={pv.preview_box.maximumSize()}")
@@ -185,8 +185,12 @@ print("\n3. 还原窗口 → 三块塞回原布局，比例复位：")
 win.setWindowState(Qt.WindowState.WindowNoState)
 wait(400)
 back = sizes()
+# 期望值取"默认尺寸记录"（面板自己记的默认尺寸），而不是启动时的快照 ——
+# 中间显示过历史记录右列，主分隔线比例可能整体漂几像素
+expect = {n: (v.width(), v.height()) for n, v in win._panel_sizes_normal.items()}
 check("三块又都是子控件", all(not w.isWindow() for _n, w in panels))
-check("尺寸回到默认值", back == docked, f"{back}")
+check("尺寸回到默认值", all(back[n] == expect[n] for n in back if n in expect),
+      f"{back} vs {expect}")
 check("内部结构复位", inner() == docked_inner, f"{inner()}")
 check("预览块里面还是原来那三样（画布/控制条/缩略图）",
       pv.preview_splitter.count() == 2 and pv.canvas.parent() is pv.preview_box
@@ -200,15 +204,16 @@ check("左列顺序仍是 原图区 → 动作编辑",
 print("\n4. 可以反复最大化/还原：")
 ok = True
 for _ in range(2):
+    before_round = sizes()          # 每一轮都拿当前停靠尺寸当基准
     win.setWindowState(Qt.WindowState.WindowMaximized)
     wait(150)
     s = sizes()
-    ok = ok and s["动作编辑"] == docked["动作编辑"] and s["帧编辑"] == docked["帧编辑"] \
+    ok = ok and s["动作编辑"] == before_round["动作编辑"] and s["帧编辑"] == before_round["帧编辑"] \
         and s["预览"] == (exp_side, exp_side + 92) \
         and all(h.isWindow() for _n, _w, h in holders())
     win.setWindowState(Qt.WindowState.WindowNoState)
     wait(250)
-    ok = ok and sizes() == docked and all(not w.isWindow() for _n, w in panels)
+    ok = ok and sizes() == before_round and all(not w.isWindow() for _n, w in panels)
 check("两轮来回尺寸都保持", ok, f"最后={sizes()}")
 
 print("\n5. 原图区悬浮工具条可以自己拖（用户要挪到悬浮预览窗左边）：")
@@ -232,23 +237,42 @@ check("工具条不会跑出画布",
       and 0 <= tb.y() <= max(0, canvas.height() - tb.height()),
       f"toolbar=({tb.x()},{tb.y()}) canvas={canvas.width()}x{canvas.height()}")
 
-print("\n6. 历史记录窗口：最大化时也能显示在主窗口，且工具栏历史按钮为激活态：")
+print("\n6. 历史记录：默认在主页面右列，最大化时是同样的圆角卡片，工具栏按钮联动：")
 hist_btn = win.image_viewer._toolbar.btn_history
+# 默认窗口：显示时是主窗口右列（不是浮在外面的 QDockWidget，那种会被"吸"进主窗口）
+win._show_history(True)
+wait(150)
+check("默认窗口下历史记录在主窗口里面（splitter 的一列）",
+      win.history_box.isVisible() and not win.history_box.isWindow()
+      and win.splitter.indexOf(win.history_box) >= 0,
+      f"visible={win.history_box.isVisible()} window={win.history_box.isWindow()}")
+check("显示时工具栏历史按钮激活", hist_btn.isChecked(), f"checked={hist_btn.isChecked()}")
+win._show_history(False)
+wait(120)
+check("收起后按钮弹回", not hist_btn.isChecked() and not win.history_box.isVisible())
 win.setWindowState(Qt.WindowState.WindowMaximized)
 wait(300)
-check("最大化后历史记录窗口显示着", win._history_dock.isVisible(),
-      f"visible={win._history_dock.isVisible()} floating={win._history_dock.isFloating()}")
-check("工具栏历史按钮是激活（选中）态", hist_btn.isChecked(), f"checked={hist_btn.isChecked()}")
-# 手动关掉 → 按钮要跟着弹回
-win._history_dock.hide()
+card_h = win._history_card
+check("最大化后历史记录是独立卡片窗口", card_h is not None and card_h.isWindow()
+      and card_h.isVisible(), f"card={card_h}")
+check("历史卡片同样无系统标题栏 + 圆角 + 1px 灰描边 + 自带 ✕",
+      card_h is not None and bool(card_h.windowFlags() & Qt.WindowType.FramelessWindowHint)
+      and "border-radius: 10px" in card_h.styleSheet()
+      and "border: 1px solid" in card_h.styleSheet()
+      and card_h.btn_close.isVisible(),
+      f"style={'border-radius' in card_h.styleSheet() if card_h else None}")
+check("工具栏历史按钮激活（最大化时也显示着）", hist_btn.isChecked() and win._history_shown())
+win._show_history(False)
 wait(120)
-check("历史窗口关掉后按钮弹回", not hist_btn.isChecked(), f"checked={hist_btn.isChecked()}")
-# 点工具栏按钮 → 窗口回来且按钮点亮
+check("卡片能收起来，按钮弹回", not card_h.isVisible() and not hist_btn.isChecked())
 hist_btn.click()
 wait(120)
-check("点按钮能把历史窗口叫回来，按钮重新点亮",
-      win._history_dock.isVisible() and hist_btn.isChecked(),
-      f"visible={win._history_dock.isVisible()} checked={hist_btn.isChecked()}")
+check("点按钮又能叫回来", card_h.isVisible() and hist_btn.isChecked())
+check("四个窗口都是 1 像素灰描边",
+      all("border: 1px solid" in (c.styleSheet() if c is not None else "")
+          for c in (win._float_cards.get("动作编辑"), win._float_cards.get("帧编辑"), card_h))
+      and "border: 1px solid" in pv.preview_box.styleSheet(),
+      "动作编辑/帧编辑/历史/预览")
 win.setWindowState(Qt.WindowState.WindowNoState)
 wait(200)
 

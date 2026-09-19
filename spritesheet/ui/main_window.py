@@ -22,7 +22,7 @@ from PyQt6.QtGui import (
     QAction, QColor, QKeySequence, QPainter, QPen, QPixmap, QUndoCommand, QUndoStack,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QDockWidget, QFileDialog, QHBoxLayout, QLabel,
+    QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar,
     QPushButton, QSplitter, QVBoxLayout, QWidget,
     QTreeWidget, QTreeWidgetItem,
@@ -463,7 +463,7 @@ class _FloatCard(QWidget):
 
         # ID 选择器只涂卡片自身/标题栏，避免级联污染内部控件（项目里的既有约定）
         self.setStyleSheet(
-            "#FloatCard { background: #1f1f1f; border: 1px solid #3d3d3d; border-radius: 10px; }"
+            "#FloatCard { background: #1f1f1f; border: 1px solid #555555; border-radius: 10px; }"
             "#FloatCardTitle { background: #2a2a2a; border-top-left-radius: 9px;"
             " border-top-right-radius: 9px; }"
             "#FloatCardTitle QLabel { color: #e0e0e0; font-size: 11px; font-weight: 600;"
@@ -558,32 +558,44 @@ class MainWindow(QMainWindow):
 
         # 右侧浮动窗口：历史记录（独立窗口，有关闭按钮，不挤压主窗口）
         self._history_panel = HistoryPanel(self, self)
-        self._history_dock = QDockWidget("历史记录", self)
-        self._history_dock.setWidget(self._history_panel)
-        self._history_dock.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetClosable
-            | QDockWidget.DockWidgetFeature.DockWidgetMovable
-        )
-        self._history_dock.setFloating(True)
-        self._history_dock.setStyleSheet(
-            "QDockWidget { color: #e0e0e0; }"
-            "QDockWidget::title { background: #2a2a2a; padding: 4px 8px; border-bottom: 1px solid #3d3d3d; }"
-        )
-        self._history_dock.setMinimumWidth(180)
-        self._history_dock.setMaximumWidth(340)
-        self._history_dock.setMinimumHeight(300)
-        # 圆角显示（ID 选择器只涂面板自身，避免级联污染内部控件）
+        # 历史记录：默认停靠在主窗口右列（"放到主页面里面"，与另外三块一样），
+        # 最大化时脱出成同样的无边框圆角卡片悬浮窗。
+        # 注意：**不要用 QDockWidget** —— 它被拖到主窗口上方时会自动"吸"进主窗口
+        # （用户明确不要这个行为），所以改成普通控件 + 自绘标题栏。
         self._history_panel.setObjectName("HistoryPanel")
-        self._history_panel.setStyleSheet(
-            "#HistoryPanel { background: #1f1f1f; border: 1px solid #3d3d3d;"
+        self.history_box = QWidget()
+        self.history_box.setObjectName("HistoryBox")
+        _hb = QVBoxLayout(self.history_box)
+        _hb.setContentsMargins(0, 0, 0, 0)
+        _hb.setSpacing(4)
+        _hheader = QWidget()
+        _hheader.setObjectName("HistoryHeader")
+        _hheader.setFixedHeight(24)
+        _hl = QHBoxLayout(_hheader)
+        _hl.setContentsMargins(8, 0, 4, 0)
+        _hl.setSpacing(6)
+        _hlabel = QLabel("历史记录")
+        _hl.addWidget(_hlabel)
+        _hl.addStretch(1)
+        self.btn_history_close = QPushButton("\u2715")
+        self.btn_history_close.setFixedSize(18, 18)
+        self.btn_history_close.setToolTip("收起历史记录（工具栏的历史按钮可以再叫回来）")
+        self.btn_history_close.clicked.connect(lambda: self._show_history(False))
+        _hl.addWidget(self.btn_history_close)
+        _hb.addWidget(_hheader)
+        _hb.addWidget(self._history_panel, 1)
+        self.history_box.setStyleSheet(
+            "#HistoryBox { background: #1f1f1f; border: 1px solid " + self.FLOAT_BORDER_COLOR + ";"
             " border-radius: 8px; }"
+            "#HistoryHeader QLabel { color: #e0e0e0; font-size: 11px; font-weight: 600;"
+            " background: transparent; }"
+            "#HistoryHeader QPushButton { color: #bbb; background: transparent; border: none;"
+            " border-radius: 3px; font-size: 12px; }"
+            "#HistoryHeader QPushButton:hover { background: #E91E63; color: #ffffff; }"
+            "#HistoryPanel { background: transparent; }"
         )
-        # 显示/隐藏都同步工具栏里的"历史"按钮，显示时保持激活外观
-        self._history_dock.visibilityChanged.connect(self._sync_history_button)
-        self._sync_history_button()
-        # 放在主窗口右侧
-        self._history_dock.move(self.x() + self.width() + 10, self.y() + 80)
-        self._history_dock.show()
+        self.splitter.addWidget(self.history_box)
+        self.history_box.hide()          # 默认收起，点工具栏"历史"或最大化时出现
         # 程序退出时断开历史面板到各 undo 栈的连接（防 Qt 析构崩溃）
         app = QApplication.instance()
         if app is not None:
@@ -1824,12 +1836,15 @@ class MainWindow(QMainWindow):
         self._float_records: list[dict] = []
         # 预览悬浮窗默认尺寸 = 画布方形再缩 30%（用户："有点大了，再缩小 30%"）
         self.PREVIEW_FLOAT_SCALE = 0.7
+        # 四个独立窗口统一 1 像素灰色描边（用户要求）
+        self.FLOAT_BORDER_COLOR = "#555555"
         # 无系统标题栏的圆角卡片（动作编辑 / 帧编辑 用；创建一次，反复复用）
         self._float_cards: dict[str, _FloatCard] = {}
+        self._history_card: _FloatCard | None = None
         # 预览窗保留系统标题栏（用户说"预览窗口没问题"），只把内容做成圆角
         self.preview.preview_box.setObjectName("PreviewFloatBox")
         self.preview.preview_box.setStyleSheet(
-            "#PreviewFloatBox { background: #1f1f1f; border: 1px solid #3d3d3d;"
+            "#PreviewFloatBox { background: #1f1f1f; border: 1px solid #555555;"
             " border-radius: 8px; }"
         )
         # ★ "默认窗口"里三块各自的尺寸：最大化脱出时**按这个尺寸**做悬浮窗。
@@ -1889,6 +1904,32 @@ class MainWindow(QMainWindow):
                         pv.preview_splitter.setSizes(self._pv_sizes_normal))),
         )
 
+    def _float_history_card(self) -> None:
+        """最大化时把历史记录面板放进同样的圆角卡片悬浮窗（并显示出来）。"""
+        if self._history_card is None:
+            self._history_card = _FloatCard("历史记录", self)
+        card = self._history_card
+        if self._history_panel.parent() is not card.body:
+            self.history_box.layout().removeWidget(self._history_panel)
+            card.set_content(self._history_panel)
+        self.history_box.hide()
+        width, height = 300, 520
+        card.setFixedSize(width + 2, height + card.content_parent_padding())
+        if not card.isVisible():
+            card.move(self.x() + max(0, self.width() - width - 40), self.y() + 80)
+        card.show()
+        card.raise_()
+
+    def _dock_history_panel(self) -> None:
+        """还原窗口：历史记录面板从卡片回到主窗口右列。"""
+        card = self._history_card
+        if card is not None:
+            card.take_content()
+            card.hide()
+        if self._history_panel.parent() is not self.history_box:
+            self.history_box.layout().addWidget(self._history_panel, 1)
+        self.history_box.show()
+
     def _float_panels(self) -> None:
         """最大化：三块区域脱出成独立悬浮窗，尺寸 = 默认窗口里的原始尺寸。"""
         if self._panels_floating:
@@ -1923,10 +1964,8 @@ class MainWindow(QMainWindow):
         pv.hide()
         self.splitter.setSizes([max(1, sum(self._splitter_sizes_normal)), 0])
 
-        # 历史记录窗口：最大化时也要能显示在主窗口前面（用户要求）
-        if not self._history_dock.isVisible():
-            self._history_dock.show()
-        self._history_dock.raise_()
+        # 历史记录：最大化时脱出成同样的无边框圆角卡片（显示在主窗口前面）
+        self._float_history_card()
         self._sync_history_button()
 
         for rec in records:
@@ -1982,6 +2021,7 @@ class MainWindow(QMainWindow):
             rec["put_back"](w)                  # 再插回原来的位置（保序）
             w.show()
         self._float_records = []
+        self._dock_history_panel()
         self.preview.show()
         if self._splitter_sizes_normal:
             self.splitter.setSizes(self._splitter_sizes_normal)
@@ -2087,22 +2127,50 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self, check_update=self._check_update_manual)
         dialog.exec()
 
+    def _history_shown(self) -> bool:
+        """历史记录现在是"显示着"的吗（最大化=悬浮卡片，否则=右列）。"""
+        if self._panels_floating:
+            card = getattr(self, "_history_card", None)
+            return bool(card is not None and card.isVisible())
+        return bool(getattr(self, "history_box", None) is not None and self.history_box.isVisible())
+
     def _open_history(self) -> None:
-        """编辑 → 历史记录面板 / 原图工具栏的"历史"按钮：显示/隐藏浮动窗口。"""
-        self._history_dock.setVisible(not self._history_dock.isVisible())
-        if self._history_dock.isVisible():
-            self._history_dock.raise_()
+        """工具栏"历史"/编辑菜单：显示/隐藏历史记录。"""
+        self._show_history(not self._history_shown())
+
+    def _show_history(self, show: bool) -> None:
+        """显示/隐藏历史记录：最大化时是悬浮卡片，默认窗口时是主窗口右列。"""
+        if self._panels_floating:
+            card = getattr(self, "_history_card", None)
+            if card is None:
+                return
+            card.setVisible(bool(show))
+            if show:
+                card.raise_()
+        else:
+            box = getattr(self, "history_box", None)
+            if box is None:
+                return
+            if show and not box.isVisible():
+                self._splitter_sizes_before_history = self.splitter.sizes()
+                sizes = self.splitter.sizes()
+                if len(sizes) >= 3:
+                    take = min(max(200, sizes[2]), max(200, sizes[1] - 200))
+                    self.splitter.setSizes([sizes[0], max(200, sizes[1] - take), take])
+            elif not show and box.isVisible():
+                # 收起时把主分隔线比例还原：否则三块宽度会被"重新分配"漂几像素
+                sizes = getattr(self, "_splitter_sizes_before_history", None)
+                if sizes:
+                    self.splitter.setSizes(list(sizes))
+            box.setVisible(bool(show))
         self._sync_history_button()
 
     def _sync_history_button(self, *_args) -> None:
-        """历史窗口显示时，原图工具栏里的"历史"按钮保持激活。"""
-        dock = getattr(self, "_history_dock", None)
+        """历史记录显示时，原图工具栏里的"历史"按钮保持激活。"""
         toolbar = getattr(getattr(self, "image_viewer", None), "_toolbar", None)
-        if dock is None or toolbar is None:
-            return
         setter = getattr(toolbar, "set_history_active", None)
         if setter is not None:
-            setter(dock.isVisible())
+            setter(self._history_shown())
 
     def _open_about(self) -> None:
         """帮助 → 关于 SpriteSheetTool：GPL 声明 + 第三方组件清单。"""
@@ -2271,9 +2339,6 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        # 浮动历史窗口跟随主窗口右侧
-        if hasattr(self, "_history_dock") and self._history_dock.isFloating():
-            self._history_dock.move(self.x() + self.width() + 10, self.y() + 80)
         # 默认大小下的三块区域尺寸（最大化脱出成悬浮窗时沿用它们）
         self._schedule_panel_size_memory()
 
