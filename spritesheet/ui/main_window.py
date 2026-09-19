@@ -424,7 +424,8 @@ class _FloatCard(QWidget):
     TITLE_H = 26
     # 用户要求：最大化后四个窗口用**和分界线同款的浅灰**（分隔线是 #3d3d3d）
     BG_COLOR = "#3d3d3d"
-    BORDER_COLOR = "#2b2b2b"    # 1 像素描边（比底色略深，保证有轮廓）
+    BORDER_COLOR = "#8a8a8a"    # 描边：用户要求"再亮一些、再粗 1 像素"
+    BORDER_W = 2                # 描边宽度（像素）
     RADIUS = 10.0
 
     EDGE = 6                    # 拖边框改大小的感应宽度（像素）
@@ -484,8 +485,9 @@ class _FloatCard(QWidget):
         """
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        p.setPen(QPen(QColor(self.BORDER_COLOR), 1.0))
+        half = self.BORDER_W / 2.0
+        rect = QRectF(self.rect()).adjusted(half, half, -half, -half)
+        p.setPen(QPen(QColor(self.BORDER_COLOR), float(self.BORDER_W)))
         p.setBrush(QColor(self.BG_COLOR))
         p.drawRoundedRect(rect, self.RADIUS, self.RADIUS)
         p.end()

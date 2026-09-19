@@ -159,10 +159,11 @@ for name in ("动作编辑", "帧编辑", "预览"):
           card is not None and bool(card.windowFlags() & Qt.WindowType.FramelessWindowHint)
           and not hasattr(card, "btn_close"),
           f"frameless={bool(card.windowFlags() & Qt.WindowType.FramelessWindowHint) if card else None}")
-    check(f"{name}：和分界线同款浅灰底色 + 1px 描边（自绘 paintEvent）",
+    check(f"{name}：和分界线同款浅灰底色 + 更亮更粗的 2px 描边",
           card is not None and card.BG_COLOR == "#3d3d3d"
-          and card.BORDER_COLOR == "#2b2b2b",
-          f"bg={getattr(card, 'BG_COLOR', None)} border={getattr(card, 'BORDER_COLOR', None)}")
+          and card.BORDER_COLOR == "#8a8a8a" and card.BORDER_W == 2,
+          f"bg={getattr(card, 'BG_COLOR', None)} border={getattr(card, 'BORDER_COLOR', None)}"
+          f" w={getattr(card, 'BORDER_W', None)}")
     body = card_pixels(card, QPoint(card.width() // 2, card.height() - 12))
     corner = card_pixels(card, QPoint(1, card.height() - 1))
     check(f"{name}：底色不透明（不是透明弹窗）",
@@ -252,9 +253,12 @@ wait(80)
 check("画布缩放后不再被强行搬回右上角", tb.pos() == moved,
       f"{moved.x()},{moved.y()} -> {tb.pos().x()},{tb.pos().y()}")
 grip = win.image_viewer._toolbar.grip
-check("原图工具条右侧有 3px 拖动把手（紧密竖线）",
-      grip.width() == 3 and win.image_viewer._toolbar.width() > 326,
-      f"grip={grip.width()}px toolbar={win.image_viewer._toolbar.width()}px")
+check("原图工具条右侧是 3 根细短竖线的拖动把手，且贴最右",
+      grip.LINES == 3 and grip.width() <= 8 and grip.height() < 20
+      and grip.mapTo(win.image_viewer._toolbar, QPoint(0, 0)).x() \
+      >= win.image_viewer._toolbar.width() - 16,
+      f"grip={grip.width()}x{grip.height()} 位置x={grip.mapTo(win.image_viewer._toolbar, QPoint(0, 0)).x()} "
+      f"toolbar宽={win.image_viewer._toolbar.width()}")
 
 check("工具条不会跑出画布",
       0 <= tb.x() <= max(0, canvas.width() - tb.width())
@@ -278,7 +282,7 @@ wait(80)
 check("点按钮/菜单能再叫回来", card_h.isVisible() and hist_btn.isChecked())
 check("历史卡片：无系统标题栏 + 浅灰底+1px 描边 + 无关闭按钮 + 固定大小",
       bool(card_h.windowFlags() & Qt.WindowType.FramelessWindowHint)
-      and card_h.BG_COLOR == "#3d3d3d" and card_h.BORDER_COLOR == "#2b2b2b"
+      and card_h.BG_COLOR == "#3d3d3d" and card_h.BORDER_COLOR == "#8a8a8a"
       and not hasattr(card_h, "btn_close")
       and card_h.minimumSize() == card_h.maximumSize(),
       f"fixed={card_h.minimumSize() == card_h.maximumSize()}")
@@ -292,7 +296,8 @@ wait(250)
 check("最大化后历史卡片依然显示、依然是独立窗口",
       card_h.isVisible() and card_h.isWindow(), f"visible={card_h.isVisible()}")
 check("四块 + 历史 都是同款浅灰卡片（含 1px 描边）",
-      all(getattr(c, "BG_COLOR", None) == "#3d3d3d" and getattr(c, "BORDER_COLOR", None) == "#2b2b2b"
+      all(getattr(c, "BG_COLOR", None) == "#3d3d3d" and getattr(c, "BORDER_COLOR", None) == "#8a8a8a"
+          and getattr(c, "BORDER_W", None) == 2
           for c in (win._float_cards.get("动作编辑"), win._float_cards.get("帧编辑"),
                     win._float_cards.get("预览"), card_h)),
       "动作编辑/帧编辑/预览/历史")

@@ -678,6 +678,29 @@ class _Canvas(QWidget):
         return self._viewer._pixmap is not None and not self._viewer._pixmap.isNull()
 
 
+class _DragGrip(QWidget):
+    """工具条右侧的拖动手柄：3 根**细短竖线**，一眼看出这里可以拖。"""
+
+    LINES = 3
+    LINE_H = 10          # 竖线长度（比整条工具条矮，用户要求"短一些"）
+    GAP = 2
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(self.LINES + (self.LINES - 1) * self.GAP, 16)
+        self.setToolTip("按住这里拖动工具条")
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setPen(QPen(QColor("#a0a0a0"), 1.0))     # 1 像素细线
+        y0 = max(0, (self.height() - self.LINE_H) // 2)
+        for i in range(self.LINES):
+            x = i * (1 + self.GAP)
+            p.drawLine(x, y0, x, y0 + self.LINE_H)
+        p.end()
+
+
 class FloatingToolBar(QWidget):
     """画布右上角浮动工具条：放大/缩小/透明背景/黑背景/白背景。"""
 
@@ -691,9 +714,9 @@ class FloatingToolBar(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         # 宽度要容纳：合成(80) + 复用(80) + 放大/缩小(24×2) + 三种背景(24×3) + 历史(24) + 边距/间距
-        # 右侧多留 3px 画一条"紧密竖线"当拖动把手（证明这里可以拖）
-        self.GRIP_W = 3
-        self.setFixedSize(326 + self.GRIP_W + 3, 32)
+        # 右侧留一条"3 根细短竖线"的拖动把手（证明这里可以拖）
+        self.GRIP_W = 7
+        self.setFixedSize(326 + self.GRIP_W + 4, 32)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._bg_mode = "checker"
         # 工具条可以自己拖（空白处按下拖动）：用户要求"原图的悬浮工具也能拖动，
@@ -704,7 +727,7 @@ class FloatingToolBar(QWidget):
         self.setCursor(Qt.CursorShape.SizeAllCursor)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setContentsMargins(4, 2, 1, 2)      # 右边距收窄 → 把手更靠右
         layout.setSpacing(2)
 
         # 合成帧按钮：宽按钮 + 图标 + Ctrl+文字 + 描边
@@ -778,16 +801,8 @@ class FloatingToolBar(QWidget):
         self.btn_history.clicked.connect(self.history_requested)
         layout.addWidget(self.btn_history)
 
-        # 拖动把手：3px 宽的紧密竖线（鼠标移上去是"移动"光标，拖它就能搬工具条）
-        self.grip = QWidget()
-        self.grip.setFixedWidth(self.GRIP_W)
-        self.grip.setToolTip("按住这里拖动工具条")
-        self.grip.setCursor(Qt.CursorShape.SizeAllCursor)
-        self.grip.setStyleSheet(
-            "background: qlineargradient(x1:0, y1:0, x2:1, y2:0,"
-            " stop:0 transparent, stop:0.34 transparent, stop:0.34 #9a9a9a,"
-            " stop:0.66 #9a9a9a, stop:0.66 transparent);"
-        )
+        # 拖动把手：3 根细短竖线，贴着最右边（鼠标移上去是"移动"光标）
+        self.grip = _DragGrip()
         layout.addWidget(self.grip)
 
     def paintEvent(self, event):
