@@ -93,7 +93,27 @@ wait_ms(app, 600)
 # 截图2：建好动作后的主界面
 save(win, "02_main_action.png")
 
-# 截图3：多动作列表（再建两个动作，选不同帧）
+# 截图3：锚点准星（动作1 开启 show_anchor，预览窗绘制红色准星）
+action.show_anchor = True
+win.preview.set_action(action)
+win.preview.set_actions(win.actions)
+app.processEvents()
+wait_ms(app, 600)
+save(win, "03_anchor.png")
+# 预览面板特写
+try:
+    save(win.preview, "04_preview_closeup.png")
+except Exception as e:
+    print("preview closeup failed:", e)
+# 动画设置栏特写
+try:
+    save(win.anim_bar, "05_animbar_closeup.png")
+except Exception as e:
+    print("animbar closeup failed:", e)
+action.show_anchor = False
+app.processEvents()
+
+# 截图6：多动作列表（再建两个动作，选不同帧）
 win._create_action()
 a2 = win.actions[-1]
 frames = win.image_viewer._frames
@@ -107,11 +127,14 @@ if len(frames) > 16:
     a3.selected_indices = list(range(12, min(17, len(frames))))
     win.image_viewer.set_current_action(a3)
     win.image_viewer.crop_frames_for_action(a3)
+# 回到动作1显示
+win.image_viewer.set_current_action(win.actions[0])
+win.preview.set_action(win.actions[0])
 win.preview.set_actions(win.actions)
 wait_ms(app, 500)
-save(win, "03_multi_actions.png")
+save(win, "06_multi_actions.png")
 
-# 截图4：导出对话框（真实）
+# 截图7：导出对话框（真实）
 from spritesheet.ui.export_dialog import ExportDialog
 dlg = ExportDialog(win.actions, win.image_viewer._pixmap,
                    project_provider=win._project_manifest,
@@ -120,8 +143,28 @@ dlg.cb_gif.setChecked(True)
 dlg.resize(960, 640)
 dlg.show()
 wait_ms(app, 500)
-save(dlg, "04_export_dialog.png")
+save(dlg, "07_export_dialog.png")
 dlg.close()
+
+# 截图8：关于对话框（真实，含 logo / 版本 / 开源说明）
+from spritesheet.ui.main_window import AboutDialog
+about = AboutDialog(win)
+about.show()
+wait_ms(app, 400)
+save(about, "08_about.png")
+about.close()
+
+# 截图9：文件菜单展开
+_mbar = win.menuBar()
+_fmenu = _mbar.actions()[0].menu()
+_fmenu.show()
+app.processEvents()
+wait_ms(app, 300)
+try:
+    save(_fmenu, "09_file_menu.png")
+except Exception as e:
+    print("file menu failed:", e)
+_fmenu.close()
 
 print("DONE")
 win.close()
