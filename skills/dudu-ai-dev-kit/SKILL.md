@@ -59,7 +59,8 @@ dudu-ai-dev-kit/
 │   ├── dev-workflow.md         # 开发工作流
 │   ├── ui-guidelines.md        # UI 设计规范
 │   ├── git-collab.md           # Git 协作规范
-│   └── pitfalls.md             # 踩过的坑（29个）
+│   ├── pitfalls.md             # 踩过的坑（30个）
+│   └── project-checkup.md      # 项目体检流程（全面检查/体检）
 ├── templates/                  # 模板文件，新项目复制就能用
 │   ├── smoke_test.py           # 冒烟测试模板
 │   ├── verify_script.py        # 验证脚本模板

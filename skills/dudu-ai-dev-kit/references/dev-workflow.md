@@ -4,6 +4,12 @@
 
 改完代码后，必须按这个顺序验证和提交：
 
+> **一键脚本（推荐）**：先把 `config.example.json` 复制为项目根目录的 `config.json` 并填写包名，脚本会从 config 读路径（不写死包名），在项目根目录的 PowerShell 中运行：
+> - 一键三件套（编译 + pyflakes + 冒烟）：`powershell -ExecutionPolicy Bypass -File skills\dudu-ai-dev-kit\scripts\check.ps1`
+> - 一键提交推送（只暂存核心代码路径，推内网 origin）：`powershell -ExecutionPolicy Bypass -File skills\dudu-ai-dev-kit\scripts\git_commit.ps1 -Message "类型(模块): 信息"`
+>
+> 下面是脚本内部执行的等价手动步骤，排查问题时可逐条运行。
+
 ### 1. 编译检查
 ```powershell
 .venv\Scripts\python.exe -m compileall -q 包名/ main.py tools/

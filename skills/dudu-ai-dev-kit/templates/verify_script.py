@@ -1,4 +1,4 @@
-"""验证脚本模板 —— 专门验证视觉/交互细节（offscreen 测不了的）。
+r"""验证脚本模板 —— 专门验证视觉/交互细节（offscreen 测不了的）。
 
 用法：
     .venv\Scripts\python.exe tools\verify_xxx.py
@@ -40,7 +40,7 @@ def check(label: str, ok: bool, detail: str = ""):
 # ========== 在这里加你的验证逻辑 ==========
 
 def main():
-    app = QApplication(sys.argv)
+    app = QApplication(sys.argv)  # noqa: F841  必须保留 QApplication 实例引用（坑1）
 
     print("=== 开始验证 ===")
 

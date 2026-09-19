@@ -1,4 +1,4 @@
-# 踩过的坑（29个）
+# 踩过的坑（30个）
 
 ## PyQt6 / UI 相关坑（21个）
 
@@ -159,5 +159,25 @@
 - 解决办法：改用 PowerShell 按行号删除/替换，或者用 Python 脚本改
 
 ### 坑 29：pyflakes 误报
-- `app = QApplication(sys.argv)` 会报未使用，**这是误报，必须保留**
+- **函数内** `app = QApplication(sys.argv)` 且后续没用到时，pyflakes 报 `local variable 'app' is assigned to but never used`——**这是误报，app 必须保留**（模块顶层的 app 不会报）
+- 纯 pyflakes **不认** `# noqa` 注释（那是 flake8 / IDE 的约定）：check.ps1 靠字符串过滤兜底，代码里可同时加 `# noqa: F841` 给 flake8 / IDE 看
 - 除了这个，其他未使用导入/变量基本是真的，可以清理
+
+---
+
+## PowerShell 脚本坑（1个）
+
+### 坑 30：含中文/emoji 的 .ps1 必须存成 UTF-8 带 BOM，否则 PS5.1 直接语法错误
+- Windows PowerShell 5.1 用 `-File` 执行**无 BOM** 的 .ps1 时，按系统 ANSI 代码页解析（中文系统是 GBK/936），**和控制台 `chcp` 是不是 65001 无关**
+- 脚本里只要有中文或 ✅❌⚠️ 等 emoji，就会乱码，甚至把字符串截断报 `The string is missing the terminator`，整个脚本跑不起来
+- **注意和坑 24 / 坑 27 区分，结论正好相反**：
+  - `.py` / `.json` / `.gitignore` 等被其他工具解析的源码或数据文件 → **UTF-8 无 BOM**
+  - `.ps1` 脚本自身（要交给 powershell.exe 5.1 执行）→ **UTF-8 带 BOM**
+- 批量把 .ps1 转成带 BOM：
+  ```powershell
+  Get-ChildItem *.ps1 | ForEach-Object {
+      $t = [IO.File]::ReadAllText($_.FullName, (New-Object Text.UTF8Encoding($false)))
+      [IO.File]::WriteAllText($_.FullName, $t, (New-Object Text.UTF8Encoding($true)))
+  }
+  ```
+- PowerShell 7（pwsh）默认按 UTF-8 读脚本、无此问题，但中文机器常只装 5.1，脚本统一存带 BOM 最保险

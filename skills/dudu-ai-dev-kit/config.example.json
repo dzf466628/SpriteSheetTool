@@ -17,6 +17,7 @@
 
   "paths": {
     "venv": ".venv",
+    "main": "main.py",
     "smoke_test": "smoke_test.py",
     "tools_dir": "tools"
   },

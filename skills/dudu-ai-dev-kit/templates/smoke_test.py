@@ -1,4 +1,4 @@
-"""冒烟测试模板 —— offscreen 模式下验证关键功能不崩。
+r"""冒烟测试模板 —— offscreen 模式下验证关键功能不崩。
 
 用法：
     $env:QT_QPA_PLATFORM="offscreen"

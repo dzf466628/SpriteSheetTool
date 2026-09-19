@@ -1,0 +1,32 @@
+{
+    "project_name":  "SpriteSheetTool",
+    "package_name":  "spritesheet",
+    "version":  "1.0.0",
+    "git":  {
+                "user_name":  "duduadudu",
+                "user_email":  "3140992714@qq.com",
+                "remote_origin":  "http://192.168.0.3:3003/dzf466628/SpriteSheetTool.git",
+                "remote_github":  "https://github.com/dzf466628/SpriteSheetTool.git"
+            },
+    "proxy":  {
+                  "address":  "127.0.0.1:11304",
+                  "note":  "推 GitHub 前必须开代理"
+              },
+    "paths":  {
+                  "venv":  ".venv",
+                  "main":  "main.py",
+                  "smoke_test":  "smoke_test.py",
+                  "tools_dir":  "tools"
+              },
+    "ui":  {
+               "font":  "Microsoft YaHei UI",
+               "accent_color":  "#E91E63",
+               "scrollbar_width":  6,
+               "button_radius":  4
+           },
+    "build":  {
+                  "script":  "build_windows.ps1",
+                  "installer_config":  "installer.iss",
+                  "output_dir":  "installer"
+              }
+}
