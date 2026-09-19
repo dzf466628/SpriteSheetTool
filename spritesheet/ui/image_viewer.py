@@ -456,6 +456,10 @@ class _Canvas(QWidget):
 
     def mousePressEvent(self, event):
         self.setFocus(Qt.FocusReason.MouseFocusReason)
+        # 在原图上按下（含空白、含空格平移）：通知主窗口收起右侧变换手柄
+        if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton,
+                              Qt.MouseButton.MiddleButton):
+            self._viewer.canvas_pressed.emit()
         if self._panning and event.button() == Qt.MouseButton.LeftButton:
             self._pan_start = event.position() - self._viewer._offset
             return
@@ -862,6 +866,9 @@ class ImageViewer(QWidget):
     image_loaded = pyqtSignal(QPixmap)
     selection_changed = pyqtSignal()
     frames_updated = pyqtSignal()
+    # 在原图上按下鼠标（选元素 / 框选 / 点空白 / 空格平移都算）：主窗口据此收起
+    # 右侧「帧编辑」的变换手柄 —— 点了别处，变换按钮就该弹起。
+    canvas_pressed = pyqtSignal()
     action_performed = pyqtSignal(str)  # 右键菜单操作完成，带记录文字
     # 影响所有动作的右键操作（如合并为一整块会重映射全部动作的元素索引），
     # 需要全量快照才能正确 undo。

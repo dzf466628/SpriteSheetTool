@@ -1631,12 +1631,10 @@ class MainWindow(QMainWindow):
         self.image_viewer.action_performed_full.connect(self._on_action_performed_full)
         self.image_viewer.about_to_perform_full.connect(self._on_before_full_action)
         self.image_viewer.frames_updated.connect(self._on_frames_updated)
-        # 「点别处就弹起」：变换手柄亮着时，在预览区以外按下鼠标（原图、动作列表、
-        # 动画设置横条、菜单…）就把手柄收起来。变换用的控件全在预览区里，所以不用
-        # 逐个按钮去连，也不会误伤缩略图 Ctrl 多选。
-        app_inst = QApplication.instance()
-        if app_inst is not None:
-            app_inst.installEventFilter(self)
+        # 「点别处就弹起」：变换手柄亮着时，点了原图（元素/框选/空白/平移）就收起手柄。
+        # 只用原图这一个入口，**不用 app 级事件过滤器** —— 全局过滤器会误伤预览画布上的
+        # 手柄点击（悬浮动画正常、一点击就退出），这个坑踩过一次就不再来第二次。
+        self.image_viewer.canvas_pressed.connect(self._exit_preview_transform)
 
         # 左列：原图区 + 下方「动画设置」横条（整段动画参数）
         left_column = QWidget()
@@ -1664,6 +1662,8 @@ class MainWindow(QMainWindow):
         self.preview.canvas.transform_edit_started.connect(self._begin_transform_history)
         self.preview.canvas.transform_edit_finished.connect(self._finish_transform_history)
         self.preview.toolbar.bg_changed.connect(lambda _mode: self._mark_project_dirty())
+        # 「点别处就弹起」的三个入口：原图（信号）+ 动作列表 + 动画设置横条（局部过滤器）
+        self._install_transform_exit_hooks()
         # 「动画设置」横条：当前动作切换时同步；改动后刷新预览并标脏
         self.preview.action_changed.connect(self.anim_bar.set_action)
         self.anim_bar.changed.connect(self.preview._on_adjust_changed)
@@ -1988,11 +1988,6 @@ class MainWindow(QMainWindow):
                 return
         self._stop_update_thread()
         self.image_viewer.shutdown()
-        # 撤掉自己装的 app 级事件过滤器：留着它 = app 里存着一个指向已释放窗口的
-        # 指针，退出时会随机 access violation（这个坑项目里已经踩过一次）。
-        app_inst = QApplication.instance()
-        if app_inst is not None:
-            app_inst.removeEventFilter(self)
         if hasattr(self, "_history_panel") and self._history_panel is not None:
             self._history_panel.disconnect_all()
         super().closeEvent(event)
@@ -2613,30 +2608,39 @@ class MainWindow(QMainWindow):
             # 选择图块改变帧组成：debounce 后统一记录
             self._schedule_per_action_snapshot(f"选择图块{name}({n}个)")
 
-    def eventFilter(self, obj, event):
-        """全局按下鼠标 → 如果按的不是预览区，就收起变换手柄（见 _maybe_exit_preview_transform）。"""
-        if event.type() == QEvent.Type.MouseButtonPress:
-            self._maybe_exit_preview_transform(obj)
-        return super().eventFilter(obj, event)
+    def _exit_preview_transform(self) -> None:
+        """点了原图/动作列表/动画设置横条等"别处"时，收起右侧「帧编辑」的变换手柄。
 
-    def _maybe_exit_preview_transform(self, pressed_obj) -> None:
-        """在预览区以外按下鼠标时收起「帧编辑」的变换手柄。
-
-        「变换控件」全在预览区（右侧预览整列：画布手柄 + 缩略图 + 帧编辑面板），
-        所以在预览区之外按下就一定是"点了别处" —— 包括点原图（哪怕是空白）、点动作
-        列表、点底部动画设置横条。缩略图上 Ctrl 多选属于变换编辑，不会被误伤。
+        注意：**不要**用 app 级事件过滤器来做这件事 —— 全局过滤器会连着预览画布上的
+        手柄点击一起吃掉（表现为"手柄悬浮动画正常、一点击就退出变换"），
+        所以这里只挂少数几个明确入口（见 `_install_transform_exit_hooks`）。
         """
-        preview = getattr(self, "preview", None)
-        if preview is None:
-            return
-        panel = getattr(preview, "adjust_panel", None)
-        canvas = getattr(panel, "canvas", None) if panel is not None else None
-        if panel is None or canvas is None or not canvas.transform_mode():
-            return
-        if isinstance(pressed_obj, QWidget) and (pressed_obj is preview
-                                                or preview.isAncestorOf(pressed_obj)):
-            return
-        panel._exit_transform_mode()
+        panel = getattr(getattr(self, "preview", None), "adjust_panel", None)
+        if panel is not None:
+            panel._exit_transform_mode()
+
+    def _install_transform_exit_hooks(self) -> None:
+        """给"框外"的几处入口挂上"点这里就收起变换手柄"的钩子。
+
+        用**局部事件过滤器**（只装在这几个控件上）而不是 app 级全局过滤器：
+        全局过滤器会把预览画布上的手柄点击也一起吃掉 —— 用户实测"手柄悬浮动画正常、
+        一点击就退出变换"，就是它干的。
+
+        挂的对象只有：左侧动作列表的 viewport、底部「动画设置」横条及其子控件
+        （原图区走 `ImageViewer.canvas_pressed` 信号）。预览区一律不挂。
+        """
+        targets = [self.action_list.viewport()]
+        targets += list(self.anim_bar.findChildren(QWidget))
+        targets.append(self.anim_bar)
+        for w in targets:
+            if w is not None:
+                w.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        """只有白名单里的那几个控件会走到这里（见 _install_transform_exit_hooks）。"""
+        if event.type() == QEvent.Type.MouseButtonPress:
+            self._exit_preview_transform()
+        return super().eventFilter(obj, event)
 
     def _on_action_performed(self, text: str):
         """右键菜单操作：用具体文字记录到当前动作栈。"""
