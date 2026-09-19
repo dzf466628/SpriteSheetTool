@@ -413,6 +413,105 @@ class HistoryPanel(QWidget):
             stack.setIndex(int(idx))
 
 
+class _FloatCard(QWidget):
+    """无系统标题栏的悬浮卡片：自己画圆角背景 + 自绘标题栏（标题 + 关闭按钮）。
+
+    用户要求："动作编辑与帧编辑的系统标题栏去掉，关闭按钮直接放到我们自己的标题栏右边"，
+    并且"这几个窗口改为圆角显示"。所以这里用 FramelessWindowHint + 半透明背景，
+    自己画一个圆角卡片，标题栏里放标题和 ✕；拖动标题栏即可移动窗口。
+    """
+
+    TITLE_H = 26
+
+    def __init__(self, title: str, parent=None) -> None:
+        super().__init__(parent, Qt.WindowType.Tool)
+        self.setObjectName("FloatCard")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        self._drag_offset = None
+        self._closed_by_user = False
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(1, 1, 1, 1)        # 给 1px 边框留位置
+        outer.setSpacing(0)
+
+        self.title_bar = QWidget()
+        self.title_bar.setObjectName("FloatCardTitle")
+        self.title_bar.setFixedHeight(self.TITLE_H)
+        self.title_bar.setCursor(Qt.CursorShape.SizeAllCursor)   # 提示可拖动
+        tb = QHBoxLayout(self.title_bar)
+        tb.setContentsMargins(10, 0, 5, 0)
+        tb.setSpacing(6)
+        self.lbl_title = QLabel(title)
+        tb.addWidget(self.lbl_title)
+        tb.addStretch(1)
+        self.btn_close = QPushButton("✕")
+        self.btn_close.setObjectName("FloatCardClose")
+        self.btn_close.setFixedSize(20, 20)
+        self.btn_close.setToolTip("关闭（还原窗口时会自动回到原位）")
+        self.btn_close.setCursor(Qt.CursorShape.ArrowCursor)
+        self.btn_close.clicked.connect(self._on_close)
+        tb.addWidget(self.btn_close)
+        outer.addWidget(self.title_bar)
+
+        self.body = QWidget()
+        self.body.setObjectName("FloatCardBody")
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        self.body_layout.setSpacing(0)
+        outer.addWidget(self.body, 1)
+
+        # ID 选择器只涂卡片自身/标题栏，避免级联污染内部控件（项目里的既有约定）
+        self.setStyleSheet(
+            "#FloatCard { background: #1f1f1f; border: 1px solid #3d3d3d; border-radius: 10px; }"
+            "#FloatCardTitle { background: #2a2a2a; border-top-left-radius: 9px;"
+            " border-top-right-radius: 9px; }"
+            "#FloatCardTitle QLabel { color: #e0e0e0; font-size: 11px; font-weight: 600;"
+            " background: transparent; }"
+            "#FloatCardClose { color: #bbb; background: transparent; border: none;"
+            " border-radius: 3px; font-size: 12px; }"
+            "#FloatCardClose:hover { background: #E91E63; color: #ffffff; }"
+            "#FloatCardBody { background: transparent; }"
+        )
+
+    def content_parent_padding(self) -> int:
+        """内容区相对窗口左上角多出来的高度（标题栏 + 边框）。"""
+        return self.TITLE_H + 2
+
+    def set_content(self, w: QWidget) -> None:
+        """把面板塞进卡片内容区。"""
+        self._closed_by_user = False
+        self.body_layout.addWidget(w)
+
+    def take_content(self):
+        item = self.body_layout.takeAt(0)
+        return item.widget() if item is not None else None
+
+    def _on_close(self) -> None:
+        self._closed_by_user = True
+        self.hide()
+
+    def mousePressEvent(self, event):
+        # 点在标题栏上 = 拖窗口（无边框窗口不能靠系统搬）
+        if (event.button() == Qt.MouseButton.LeftButton
+                and event.position().y() <= self.TITLE_H + 1):
+            self._drag_offset = event.position().toPoint()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_offset is not None:
+            self.move(self.pos() + event.position().toPoint() - self._drag_offset)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+
 class MainWindow(QMainWindow):
     """主窗口：系统标题栏 + 菜单栏 + Logo名称栏 + 左侧边栏 + 原图区 + 右侧预览 + 状态栏。"""
 
@@ -473,9 +572,15 @@ class MainWindow(QMainWindow):
         self._history_dock.setMinimumWidth(180)
         self._history_dock.setMaximumWidth(340)
         self._history_dock.setMinimumHeight(300)
-        # 历史记录本来就是个"有主窗口做 owner 的浮动窗口"，天然显示在主窗口前面；
-        # 这里只额外挂上"贴屏幕边缘"。注意：QDockWidget 不要手动改 windowFlags
-        # （加 Qt.Tool 会在 show 时崩，实测 0xC0000409）。
+        # 圆角显示（ID 选择器只涂面板自身，避免级联污染内部控件）
+        self._history_panel.setObjectName("HistoryPanel")
+        self._history_panel.setStyleSheet(
+            "#HistoryPanel { background: #1f1f1f; border: 1px solid #3d3d3d;"
+            " border-radius: 8px; }"
+        )
+        # 显示/隐藏都同步工具栏里的"历史"按钮，显示时保持激活外观
+        self._history_dock.visibilityChanged.connect(self._sync_history_button)
+        self._sync_history_button()
         # 放在主窗口右侧
         self._history_dock.move(self.x() + self.width() + 10, self.y() + 80)
         self._history_dock.show()
@@ -1719,6 +1824,14 @@ class MainWindow(QMainWindow):
         self._float_records: list[dict] = []
         # 预览悬浮窗默认尺寸 = 画布方形再缩 30%（用户："有点大了，再缩小 30%"）
         self.PREVIEW_FLOAT_SCALE = 0.7
+        # 无系统标题栏的圆角卡片（动作编辑 / 帧编辑 用；创建一次，反复复用）
+        self._float_cards: dict[str, _FloatCard] = {}
+        # 预览窗保留系统标题栏（用户说"预览窗口没问题"），只把内容做成圆角
+        self.preview.preview_box.setObjectName("PreviewFloatBox")
+        self.preview.preview_box.setStyleSheet(
+            "#PreviewFloatBox { background: #1f1f1f; border: 1px solid #3d3d3d;"
+            " border-radius: 8px; }"
+        )
         # ★ "默认窗口"里三块各自的尺寸：最大化脱出时**按这个尺寸**做悬浮窗。
         # 必须在窗口还没最大化时记（最大化时 Qt 会先按新窗口重排一次布局，
         # 那时量到的就不是默认尺寸了）。见 _remember_panel_sizes。
@@ -1796,6 +1909,9 @@ class MainWindow(QMainWindow):
                 "size": self._preview_float_size(remembered) if is_preview else remembered,
                 # 预览窗：可移动 + 可拖边框改大小；另两块：锁住尺寸（内部布局不许被拉乱）
                 "fixed": not is_preview,
+                # 动作编辑 / 帧编辑 用无系统标题栏的圆角卡片（自绘标题 + ✕）
+                "is_preview": is_preview,
+                "card": None if is_preview else self._float_cards.get(title),
                 "pos": w.mapToGlobal(QPoint(0, 0)),
                 "parent": w.parentWidget(),
                 "put_back": put_back,
@@ -1807,23 +1923,45 @@ class MainWindow(QMainWindow):
         pv.hide()
         self.splitter.setSizes([max(1, sum(self._splitter_sizes_normal)), 0])
 
+        # 历史记录窗口：最大化时也要能显示在主窗口前面（用户要求）
+        if not self._history_dock.isVisible():
+            self._history_dock.show()
+        self._history_dock.raise_()
+        self._sync_history_button()
+
         for rec in records:
             w = rec["w"]
-            # ★ 归属主窗口的 Tool 窗口：永远显示在主窗口前面，不会被主页面遮挡；
-            #   也不进任务栏。不给关闭按钮，免得用户误关导致面板"丢了"。
-            w.setParent(self, Qt.WindowType.Tool)
-            w.setWindowTitle(rec["title"])
-            w.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+            card = rec["card"]
+            if rec["is_preview"]:
+                # 预览窗：保留系统标题栏
+                w.setParent(self, Qt.WindowType.Tool)
+                w.setWindowTitle(rec["title"])
+                w.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+            else:
+                # 动作编辑 / 帧编辑：没有系统标题栏，用自带圆角标题栏 + ✕
+                if card is None:
+                    card = _FloatCard(rec["title"], self)
+                    self._float_cards[rec["title"]] = card
+                    rec["card"] = card
+                card.set_content(w)
+            target = rec["card"] or w
             if rec["fixed"]:
-                w.setFixedSize(rec["size"])     # ★ 锁住：大小不会被拉变、内部布局不乱
+                size = rec["size"]
+                if rec["card"] is not None:
+                    size = QSize(size.width() + 2, size.height() + rec["card"].content_parent_padding())
+                target.setFixedSize(size)       # ★ 锁住：大小不会被拉变、内部布局不乱
             else:
                 # 预览窗：给一个能用的最小尺寸，其余随意拖（拖边框改大小）
-                w.setMinimumSize(200, 170)
-                w.setMaximumSize(16777215, 16777215)
-                w.resize(rec["size"])
-            w.move(rec["pos"])
-            w.show()
-            w.raise_()
+                target.setMinimumSize(200, 170)
+                target.setMaximumSize(16777215, 16777215)
+                target.resize(rec["size"])
+            # 卡片比面板多出标题栏，往上挪一点，让**内容**还停在原来的屏幕位置
+            if rec["card"] is not None:
+                pad = rec["card"].content_parent_padding()
+                rec["pos"] = QPoint(rec["pos"].x() - 1, rec["pos"].y() - (pad - 1))
+            target.move(rec["pos"])
+            target.show()
+            target.raise_()
 
     def _dock_panels(self) -> None:
         """还原窗口：三块按原顺序塞回原布局，并恢复默认窗口时的比例。"""
@@ -1832,6 +1970,10 @@ class MainWindow(QMainWindow):
         self._panels_floating = False
         for rec in self._float_records:
             w = rec["w"]
+            if rec.get("card") is not None:
+                # 先 hide 卡片再取出面板（卡片只是外壳，面板要回原布局）
+                rec["card"].take_content()
+                rec["card"].hide()
             w.hide()
             w.setWindowFlags(Qt.WindowType.Widget)
             w.setMinimumSize(0, 0)
@@ -1946,10 +2088,21 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _open_history(self) -> None:
-        """编辑 → 历史记录面板：显示/隐藏右侧浮动窗口。"""
+        """编辑 → 历史记录面板 / 原图工具栏的"历史"按钮：显示/隐藏浮动窗口。"""
         self._history_dock.setVisible(not self._history_dock.isVisible())
         if self._history_dock.isVisible():
             self._history_dock.raise_()
+        self._sync_history_button()
+
+    def _sync_history_button(self, *_args) -> None:
+        """历史窗口显示时，原图工具栏里的"历史"按钮保持激活。"""
+        dock = getattr(self, "_history_dock", None)
+        toolbar = getattr(getattr(self, "image_viewer", None), "_toolbar", None)
+        if dock is None or toolbar is None:
+            return
+        setter = getattr(toolbar, "set_history_active", None)
+        if setter is not None:
+            setter(dock.isVisible())
 
     def _open_about(self) -> None:
         """帮助 → 关于 SpriteSheetTool：GPL 声明 + 第三方组件清单。"""

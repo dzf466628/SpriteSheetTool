@@ -771,6 +771,8 @@ class FloatingToolBar(QWidget):
 
         # 历史记录面板开关（显示/隐藏右侧浮动历史窗口）
         self.btn_history = self._make_button("history", "历史记录")
+        # 可勾选：历史窗口显示着的时候保持"激活"外观（主窗口负责同步状态）
+        self.btn_history.setCheckable(True)
         self.btn_history.clicked.connect(self.history_requested)
         layout.addWidget(self.btn_history)
 
@@ -781,6 +783,13 @@ class FloatingToolBar(QWidget):
         p.setPen(QPen(QColor("#444"), 1))
         p.drawRoundedRect(self.rect(), 6, 6)
         p.end()
+
+    def set_history_active(self, active: bool) -> None:
+        """历史记录窗口显示时，工具栏里的"历史"按钮保持激活外观。"""
+        if self.btn_history.isChecked() != bool(active):
+            self.btn_history.blockSignals(True)
+            self.btn_history.setChecked(bool(active))
+            self.btn_history.blockSignals(False)
 
     def _make_button(self, icon_kind: str, tip: str, checkable: bool = False) -> QPushButton:
         btn = QPushButton()

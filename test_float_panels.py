@@ -69,7 +69,17 @@ win.preview.set_actions(win.actions)
 wait(600)          # 等去抖记下"默认尺寸"
 
 pv = win.preview
+# 三块内容控件（尺寸以它们为准）
 panels = (("动作编辑", win.anim_bar), ("预览", pv.preview_box), ("帧编辑", pv.edit_box))
+
+
+def holders():
+    """真正当窗口的那个：动作编辑/帧编辑 = 无边框圆角卡片，预览 = preview_box 本身。"""
+    out = []
+    for name, w in panels:
+        card = None if w is pv.preview_box else win._float_cards.get(name)
+        out.append((name, w, card if card is not None else w))
+    return out
 
 
 def sizes():
@@ -103,8 +113,8 @@ print("\n2. 最大化（真窗口状态变化）→ 三块脱出成独立悬浮�
 win.setWindowState(Qt.WindowState.WindowMaximized)
 wait(300)
 floated = sizes()
-check("三个都变成独立窗口", all(w.isWindow() for _n, w in panels) and win._panels_floating,
-      f"{[(n, w.isWindow()) for n, w in panels]}")
+check("三块都成了独立窗口", all(h.isWindow() for _n, _w, h in holders()) and win._panels_floating,
+      f"{[(n, h.isWindow()) for n, _w, h in holders()]}")
 # 预览窗例外：按用户要求"默认画布方形"，并再缩 30%
 exp_side = max(200, int(round(docked["预览"][0] * 0.7)))
 check("预览窗默认=画布方形(缩30%)",
@@ -115,21 +125,50 @@ check("另两块尺寸与默认窗口完全一致（★大小不变）",
       floated["动作编辑"] == docked["动作编辑"] and floated["帧编辑"] == docked["帧编辑"],
       f"默认={docked} 悬浮={floated}")
 check("悬浮窗都是归属主窗口的 Tool 窗口（永远在主页面之前、不被遮挡）",
-      all(bool(w.windowFlags() & Qt.WindowType.Tool) and w.parent() is win for _n, w in panels)
+      all(bool(h.windowFlags() & Qt.WindowType.Tool) and h.parent() is win
+          for _n, _w, h in holders())
       and win._history_dock.isFloating(),
-      f"{[(n, bool(w.windowFlags() & Qt.WindowType.Tool), w.parent() is win) for n, w in panels]} "
+      f"{[(n, bool(h.windowFlags() & Qt.WindowType.Tool), h.parent() is win) for n, _w, h in holders()]} "
       f"历史记录 floating={win._history_dock.isFloating()}")
 check("预览窗可拖边框改大小（没被锁死）",
       pv.preview_box.maximumWidth() > 10000 and pv.preview_box.minimumWidth() < 300,
       f"min={pv.preview_box.minimumSize()} max={pv.preview_box.maximumSize()}")
-check("另两块锁住尺寸（内部布局不许被拉乱）",
-      win.anim_bar.minimumSize() == win.anim_bar.maximumSize()
-      and pv.edit_box.minimumSize() == pv.edit_box.maximumSize(),
-      f"动作编辑 min={win.anim_bar.minimumSize()} max={win.anim_bar.maximumSize()}")
+_cards = [win._float_cards.get(n) for n in ("动作编辑", "帧编辑")]
+check("另两块的卡片锁住尺寸（内部布局不许被拉乱）",
+      all(c is not None and c.minimumSize() == c.maximumSize() for c in _cards),
+      f"{[(c.minimumSize(), c.maximumSize()) for c in _cards if c is not None]}")
 check("预览整块隐藏（宽高让给原图区）", not pv.isVisible())
 check("原图区拿到全部宽度",
       win.splitter.sizes()[1] == 0 and win.splitter.sizes()[0] > 0,
       f"splitter={win.splitter.sizes()}")
+
+print("\n2a. 动作编辑/帧编辑 用无系统标题栏的圆角卡片 + 自带 ✕：")
+for name in ("动作编辑", "帧编辑"):
+    card = win._float_cards.get(name)
+    panel = dict(panels)[name]
+    check(f"{name}：无边框（没有系统标题栏）",
+          card is not None and bool(card.windowFlags() & Qt.WindowType.FramelessWindowHint),
+          f"flags={card.windowFlags() if card else None}")
+    check(f"{name}：自带标题栏 + 关闭按钮在右边",
+          card is not None and card.title_bar.isVisible() and card.btn_close.isVisible()
+          and card.btn_close.mapTo(card, QPoint(0, 0)).x() > card.width() // 2,
+          f"✕位置={card.btn_close.mapTo(card, QPoint(0, 0)).x() if card else None} 宽={card.width() if card else None}")
+    check(f"{name}：面板内容在卡片里（内容屏幕位置和默认窗口一致）",
+          panel.parent() is card.body,
+          f"parent={panel.parent().__class__.__name__ if panel.parent() else None}")
+    check(f"{name}：卡片是圆角（有 border-radius 样式）",
+          card is not None and "border-radius" in card.styleSheet())
+
+card_anim = win._float_cards.get("动作编辑")
+card_anim.btn_close.click()
+wait(120)
+check("点 ✕ 会把这块收起来（不是关掉程序）",
+      not card_anim.isVisible() and win._panels_floating, f"visible={card_anim.isVisible()}")
+win.setWindowState(Qt.WindowState.WindowNoState)
+wait(200)
+win.setWindowState(Qt.WindowState.WindowMaximized)
+wait(250)
+check("重新最大化后它会回来", card_anim.isVisible(), f"visible={card_anim.isVisible()}")
 
 print("\n2b. 悬浮的预览窗随便拖大小：")
 pv.preview_box.move(pv.preview_box.x() + 40, pv.preview_box.y() + 30)
@@ -166,7 +205,7 @@ for _ in range(2):
     s = sizes()
     ok = ok and s["动作编辑"] == docked["动作编辑"] and s["帧编辑"] == docked["帧编辑"] \
         and s["预览"] == (exp_side, exp_side + 92) \
-        and all(w.isWindow() for _n, w in panels)
+        and all(h.isWindow() for _n, _w, h in holders())
     win.setWindowState(Qt.WindowState.WindowNoState)
     wait(250)
     ok = ok and sizes() == docked and all(not w.isWindow() for _n, w in panels)
@@ -192,6 +231,26 @@ check("工具条不会跑出画布",
       0 <= tb.x() <= max(0, canvas.width() - tb.width())
       and 0 <= tb.y() <= max(0, canvas.height() - tb.height()),
       f"toolbar=({tb.x()},{tb.y()}) canvas={canvas.width()}x{canvas.height()}")
+
+print("\n6. 历史记录窗口：最大化时也能显示在主窗口，且工具栏历史按钮为激活态：")
+hist_btn = win.image_viewer._toolbar.btn_history
+win.setWindowState(Qt.WindowState.WindowMaximized)
+wait(300)
+check("最大化后历史记录窗口显示着", win._history_dock.isVisible(),
+      f"visible={win._history_dock.isVisible()} floating={win._history_dock.isFloating()}")
+check("工具栏历史按钮是激活（选中）态", hist_btn.isChecked(), f"checked={hist_btn.isChecked()}")
+# 手动关掉 → 按钮要跟着弹回
+win._history_dock.hide()
+wait(120)
+check("历史窗口关掉后按钮弹回", not hist_btn.isChecked(), f"checked={hist_btn.isChecked()}")
+# 点工具栏按钮 → 窗口回来且按钮点亮
+hist_btn.click()
+wait(120)
+check("点按钮能把历史窗口叫回来，按钮重新点亮",
+      win._history_dock.isVisible() and hist_btn.isChecked(),
+      f"visible={win._history_dock.isVisible()} checked={hist_btn.isChecked()}")
+win.setWindowState(Qt.WindowState.WindowNoState)
+wait(200)
 
 win.close()
 print(f"\n结果：{PASS} 通过, {FAIL} 失败")
