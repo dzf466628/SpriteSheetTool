@@ -685,7 +685,7 @@ class _DragGrip(QWidget):
     LINES = 3
     LINE_H = 18          # 竖线长度（用户再次要求"再长 4 像素"：14 → 18）
     GAP = 1              # 三根线间距 1px（0 会糊成一条，用户要求向左分散）
-    SHIFT_RIGHT = 6      # 左侧留白 6px：三根线在 11px 控件里右对齐，最右一根距工具条右边 1px
+    SHIFT_RIGHT = 7      # 左侧留白 7px：三根线在 12px 控件里右对齐，最右一根距工具条右边 3px（左移2px）
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -697,9 +697,9 @@ class _DragGrip(QWidget):
         p = QPainter(self)
         p.setPen(QPen(QColor("#a0a0a0"), 1.0))     # 1 像素细线
         y0 = max(0, (self.height() - self.LINE_H) // 2)
-        # 右对齐画：最右一根贴控件右边（本轮整体再向右挪 3 像素）
+        # 右对齐画：最右一根距控件右边 3px（本轮整体左移 2 像素）
         for i in range(self.LINES):
-            x = self.width() - 1 - (self.LINES - 1 - i) * (1 + self.GAP)
+            x = self.width() - 3 - (self.LINES - 1 - i) * (1 + self.GAP)
             p.drawLine(x, y0, x, y0 + self.LINE_H)
         p.end()
 
@@ -718,8 +718,8 @@ class FloatingToolBar(QWidget):
         super().__init__(parent)
         # 宽度要容纳：合成(80) + 复用(80) + 放大/缩小(24×2) + 三种背景(24×3) + 历史(24) + 边距/间距
         # 右侧留一条"3 根细短竖线"的拖动把手（证明这里可以拖）
-        self.GRIP_W = 11
-        self.setFixedSize(334, 32)
+        self.GRIP_W = 12
+        self.setFixedSize(335, 32)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._bg_mode = "checker"
         # 工具条可以自己拖（空白处按下拖动）：用户要求"原图的悬浮工具也能拖动，

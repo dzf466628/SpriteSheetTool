@@ -2134,10 +2134,10 @@ class MainWindow(QMainWindow):
         return self._history_card
 
     def _float_history_card(self) -> None:
-        """最大化时：历史记录卡片一并显示在前面。"""
+        """最大化时：历史记录卡片如果之前显示着就保持在前面，否则保持隐藏。"""
         card = self._ensure_history_card()
-        card.show()
-        card.raise_()
+        if card.isVisible():
+            card.raise_()
 
     def _float_panels(self) -> None:
         """最大化：三块区域脱出成独立悬浮窗，尺寸 = 默认窗口里的原始尺寸。"""
@@ -2300,7 +2300,7 @@ class MainWindow(QMainWindow):
         act_history.setShortcut(QKeySequence("Ctrl+H"))
         act_history.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         act_history.setCheckable(True)
-        act_history.setChecked(True)
+        act_history.setChecked(False)
         act_history.triggered.connect(self._open_history)
         edit_menu.addAction(act_history)
 
@@ -2352,10 +2352,9 @@ class MainWindow(QMainWindow):
         self._sync_history_button()
 
     def _init_history_card(self) -> None:
-        """启动后建好历史记录卡片并显示（与以前一样默认可见）。"""
+        """启动后建好历史记录卡片（默认隐藏，用户点工具栏按钮或 Ctrl+H 再打开）。"""
         card = self._ensure_history_card()
-        card.show()
-        card.raise_()
+        card.hide()
         self._sync_history_button()
 
     def _sync_history_button(self, *_args) -> None:
