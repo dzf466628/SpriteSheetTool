@@ -422,11 +422,14 @@ class _FloatCard(QWidget):
     """
 
     TITLE_H = 26
-    BG_COLOR = "#1f1f1f"        # 卡片底色：不透明（否则就是"透明弹窗"）
-    BORDER_COLOR = "#000000"    # 1 像素描边：用户要求最大化后四块用黑色描边
+    # 用户要求：最大化后四个窗口用**和分界线同款的浅灰**（分隔线是 #3d3d3d）
+    BG_COLOR = "#3d3d3d"
+    BORDER_COLOR = "#2b2b2b"    # 1 像素描边（比底色略深，保证有轮廓）
     RADIUS = 10.0
 
-    def __init__(self, title: str, parent=None) -> None:
+    EDGE = 6                    # 拖边框改大小的感应宽度（像素）
+
+    def __init__(self, title: str, parent=None, resizable: bool = False) -> None:
         super().__init__(parent, Qt.WindowType.Tool)
         self.setObjectName("FloatCard")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -434,6 +437,9 @@ class _FloatCard(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self._drag_offset = None
+        self._resize_edge = None        # 拖边框改大小时记的方向（'r'/'b'/'br'…）
+        self._resize_origin = None
+        self.resizable = bool(resizable)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(1, 1, 1, 1)        # 给 1px 边框留位置
@@ -443,6 +449,8 @@ class _FloatCard(QWidget):
         self.title_bar.setObjectName("FloatCardTitle")
         self.title_bar.setFixedHeight(self.TITLE_H)
         self.title_bar.setCursor(Qt.CursorShape.SizeAllCursor)   # 提示可拖动
+        # 同上：子控件也要这个属性，否则标题栏样式表背景同样不画
+        self.title_bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         tb = QHBoxLayout(self.title_bar)
         tb.setContentsMargins(10, 0, 5, 0)
         tb.setSpacing(6)
@@ -461,7 +469,7 @@ class _FloatCard(QWidget):
 
         # ID 选择器只涂卡片自身/标题栏，避免级联污染内部控件（项目里的既有约定）
         self.setStyleSheet(
-            "#FloatCardTitle { background: #2a2a2a; border-top-left-radius: 9px;"
+            "#FloatCardTitle { background: #333333; border-top-left-radius: 9px;"
             " border-top-right-radius: 9px; }"
             "#FloatCardTitle QLabel { color: #e0e0e0; font-size: 11px; font-weight: 600;"
             " background: transparent; }"
@@ -494,24 +502,90 @@ class _FloatCard(QWidget):
         item = self.body_layout.takeAt(0)
         return item.widget() if item is not None else None
 
+    def _edge_at(self, pos) -> str:
+        """这个点落在哪条可拖拽的边上（无边框窗口的缩放只能自己实现）。"""
+        if not self.resizable:
+            return ""
+        x, y, w, h = pos.x(), pos.y(), self.width(), self.height()
+        right, bottom = x >= w - self.EDGE, y >= h - self.EDGE
+        left, top = x <= self.EDGE, y <= self.EDGE
+        if bottom and right:
+            return "br"
+        if bottom and left:
+            return "bl"
+        if top and right:
+            return "tr"
+        if top and left:
+            return "tl"
+        if right:
+            return "r"
+        if bottom:
+            return "b"
+        if left:
+            return "l"
+        if top:
+            return "t"
+        return ""
+
+    def _update_cursor(self, edge: str) -> None:
+        cursors = {
+            "r": Qt.CursorShape.SizeHorCursor, "l": Qt.CursorShape.SizeHorCursor,
+            "b": Qt.CursorShape.SizeVerCursor, "t": Qt.CursorShape.SizeVerCursor,
+            "br": Qt.CursorShape.SizeFDiagCursor, "tl": Qt.CursorShape.SizeFDiagCursor,
+            "bl": Qt.CursorShape.SizeBDiagCursor, "tr": Qt.CursorShape.SizeBDiagCursor,
+        }
+        self.setCursor(cursors.get(edge, Qt.CursorShape.SizeAllCursor))
+
     def mousePressEvent(self, event):
-        # 点在标题栏上 = 拖窗口（无边框窗口不能靠系统搬）
-        if (event.button() == Qt.MouseButton.LeftButton
-                and event.position().y() <= self.TITLE_H + 1):
-            self._drag_offset = event.position().toPoint()
-            event.accept()
-            return
+        pos = event.position().toPoint()
+        if event.button() == Qt.MouseButton.LeftButton:
+            edge = self._edge_at(pos)
+            if edge:
+                self._resize_edge = edge
+                self._resize_origin = (event.globalPosition().toPoint(), self.geometry())
+                event.accept()
+                return
+            if pos.y() <= self.TITLE_H + 1:      # 标题栏 = 拖窗口
+                self._drag_offset = pos
+                event.accept()
+                return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self._drag_offset is not None:
-            self.move(self.pos() + event.position().toPoint() - self._drag_offset)
+        pos = event.position().toPoint()
+        if self._resize_edge is not None and self._resize_origin is not None:
+            start, geo = self._resize_origin
+            now = event.globalPosition().toPoint()
+            dx, dy = now.x() - start.x(), now.y() - start.y()
+            min_w, min_h = max(200, self.minimumWidth()), max(150, self.minimumHeight())
+            rect = QRectF(geo)
+            if "r" in self._resize_edge:
+                rect.setWidth(max(min_w, geo.width() + dx))
+            if "l" in self._resize_edge:
+                new_w = max(min_w, geo.width() - dx)
+                rect.setLeft(geo.right() - new_w + 1)
+                rect.setWidth(new_w)
+            if "b" in self._resize_edge:
+                rect.setHeight(max(min_h, geo.height() + dy))
+            if "t" in self._resize_edge:
+                new_h = max(min_h, geo.height() - dy)
+                rect.setTop(geo.bottom() - new_h + 1)
+                rect.setHeight(new_h)
+            self.setGeometry(rect.toRect())
             event.accept()
             return
+        if self._drag_offset is not None:
+            self.move(self.pos() + pos - self._drag_offset)
+            event.accept()
+            return
+        if self.resizable:
+            self._update_cursor(self._edge_at(pos))
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         self._drag_offset = None
+        self._resize_edge = None
+        self._resize_origin = None
         super().mouseReleaseEvent(event)
 
 
@@ -1938,7 +2012,7 @@ class MainWindow(QMainWindow):
         for rec in records:
             w = rec["w"]
             if rec["card"] is None:
-                card = _FloatCard(rec["title"], self)
+                card = _FloatCard(rec["title"], self, resizable=rec["is_preview"])
                 self._float_cards[rec["title"]] = card
                 rec["card"] = card
             rec["card"].set_content(w)
@@ -1946,7 +2020,13 @@ class MainWindow(QMainWindow):
             size = rec["size"]
             if rec["card"] is not None:
                 size = QSize(size.width() + 2, size.height() + rec["card"].content_parent_padding())
-            target.setFixedSize(size)           # ★ 锁住：四块都是固定大小
+            if rec["is_preview"]:
+                # 预览窗：最大化后可以拖边框改大小（用户要求）
+                target.setMinimumSize(200, 170)
+                target.setMaximumSize(16777215, 16777215)
+                target.resize(size)
+            else:
+                target.setFixedSize(size)       # ★ 其余三块固定大小
             # 卡片比面板多出标题栏，往上挪一点，让**内容**还停在原来的屏幕位置
             if rec["card"] is not None:
                 pad = rec["card"].content_parent_padding()

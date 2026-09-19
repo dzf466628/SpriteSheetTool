@@ -126,11 +126,11 @@ check("悬浮窗都是归属主窗口的 Tool 窗口（永远在主页面之前�
       and win._history_card is not None and win._history_card.isVisible(),
       f"{[(n, bool(h.windowFlags() & Qt.WindowType.Tool), h.parent() is win) for n, _w, h in holders()]} "
       f"历史记录卡片可见={win._history_card is not None and win._history_card.isVisible()}")
-check("四块窗口都固定大小（拖不动大小）",
-      all(win._float_cards.get(n) is not None
-          and win._float_cards[n].minimumSize() == win._float_cards[n].maximumSize()
-          for n in ("动作编辑", "帧编辑", "预览")),
-      f"{[(n, (win._float_cards[n].minimumSize(), win._float_cards[n].maximumSize())) for n in ('动作编辑', '帧编辑', '预览') if win._float_cards.get(n)]}")
+check("动作编辑/帧编辑 固定大小；预览可缩放（用户要求）",
+      all(win._float_cards[n].minimumSize() == win._float_cards[n].maximumSize()
+          for n in ("动作编辑", "帧编辑") if win._float_cards.get(n))
+      and win._float_cards["预览"].maximumWidth() > 10000,
+      f"预览 min={win._float_cards['预览'].minimumSize()} max={win._float_cards['预览'].maximumSize()}")
 _cards = [win._float_cards.get(n) for n in ("动作编辑", "帧编辑")]
 check("卡片的尺寸是锁住的（内部布局不许被拉乱）",
       all(c is not None and c.minimumSize() == c.maximumSize() for c in _cards),
@@ -159,9 +159,10 @@ for name in ("动作编辑", "帧编辑", "预览"):
           card is not None and bool(card.windowFlags() & Qt.WindowType.FramelessWindowHint)
           and not hasattr(card, "btn_close"),
           f"frameless={bool(card.windowFlags() & Qt.WindowType.FramelessWindowHint) if card else None}")
-    check(f"{name}：1 像素黑色描边（自绘 paintEvent）",
-          card is not None and card.BORDER_COLOR == "#000000",
-          f"border={getattr(card, 'BORDER_COLOR', None)}")
+    check(f"{name}：和分界线同款浅灰底色 + 1px 描边（自绘 paintEvent）",
+          card is not None and card.BG_COLOR == "#3d3d3d"
+          and card.BORDER_COLOR == "#2b2b2b",
+          f"bg={getattr(card, 'BG_COLOR', None)} border={getattr(card, 'BORDER_COLOR', None)}")
     body = card_pixels(card, QPoint(card.width() // 2, card.height() - 12))
     corner = card_pixels(card, QPoint(1, card.height() - 1))
     check(f"{name}：底色不透明（不是透明弹窗）",
@@ -178,9 +179,19 @@ print("\n2b. 预览卡片：画布方形 + 尺寸固定 + 拖动标题栏可移�
 card_pv = win._float_cards.get("预览")
 check("预览画布是正方形", pv.canvas.width() == pv.canvas.height() == exp_side,
       f"画布={pv.canvas.width()}x{pv.canvas.height()} 期望={exp_side}")
-check("预览卡片固定大小（拖边框改不了）",
-      card_pv is not None and card_pv.minimumSize() == card_pv.maximumSize(),
-      f"{card_pv.minimumSize() if card_pv else None}")
+check("预览卡片可以拖边框改大小",
+      card_pv is not None and card_pv.resizable
+      and card_pv.maximumWidth() > 10000 and card_pv.minimumWidth() < 300,
+      f"resizable={card_pv.resizable if card_pv else None} min={card_pv.minimumSize() if card_pv else None}")
+sz0 = card_pv.size()
+QTest.mousePress(card_pv, Qt.MouseButton.LeftButton,
+                 pos=QPoint(card_pv.width() - 2, card_pv.height() // 2))
+QTest.mouseMove(card_pv, pos=QPoint(card_pv.width() - 2 + 60, card_pv.height() // 2))
+QTest.mouseRelease(card_pv, Qt.MouseButton.LeftButton,
+                   pos=QPoint(card_pv.width() - 2, card_pv.height() // 2))
+wait(80)
+check("拖右边框真的变宽了", card_pv.width() >= sz0.width() + 40,
+      f"{sz0.width()} -> {card_pv.width()}")
 pos0 = card_pv.pos()
 QTest.mousePress(card_pv, Qt.MouseButton.LeftButton, pos=QPoint(20, 8))     # 拖标题栏
 QTest.mouseMove(card_pv, pos=QPoint(20 + 60, 8 + 40))
@@ -240,6 +251,11 @@ canvas.resize(canvas.width() - 30, canvas.height() - 20)
 wait(80)
 check("画布缩放后不再被强行搬回右上角", tb.pos() == moved,
       f"{moved.x()},{moved.y()} -> {tb.pos().x()},{tb.pos().y()}")
+grip = win.image_viewer._toolbar.grip
+check("原图工具条右侧有 3px 拖动把手（紧密竖线）",
+      grip.width() == 3 and win.image_viewer._toolbar.width() > 326,
+      f"grip={grip.width()}px toolbar={win.image_viewer._toolbar.width()}px")
+
 check("工具条不会跑出画布",
       0 <= tb.x() <= max(0, canvas.width() - tb.width())
       and 0 <= tb.y() <= max(0, canvas.height() - tb.height()),
@@ -260,9 +276,10 @@ check("收起后按钮弹回", not hist_btn.isChecked() and not card_h.isVisible
 win._show_history(True)
 wait(80)
 check("点按钮/菜单能再叫回来", card_h.isVisible() and hist_btn.isChecked())
-check("历史卡片：无系统标题栏 + 1px 黑描边 + 无关闭按钮 + 固定大小",
+check("历史卡片：无系统标题栏 + 浅灰底+1px 描边 + 无关闭按钮 + 固定大小",
       bool(card_h.windowFlags() & Qt.WindowType.FramelessWindowHint)
-      and card_h.BORDER_COLOR == "#000000" and not hasattr(card_h, "btn_close")
+      and card_h.BG_COLOR == "#3d3d3d" and card_h.BORDER_COLOR == "#2b2b2b"
+      and not hasattr(card_h, "btn_close")
       and card_h.minimumSize() == card_h.maximumSize(),
       f"fixed={card_h.minimumSize() == card_h.maximumSize()}")
 _h_body = card_pixels(card_h, QPoint(card_h.width() // 2, card_h.height() - 14))
@@ -274,8 +291,8 @@ win.setWindowState(Qt.WindowState.WindowMaximized)
 wait(250)
 check("最大化后历史卡片依然显示、依然是独立窗口",
       card_h.isVisible() and card_h.isWindow(), f"visible={card_h.isVisible()}")
-check("四块 + 历史 都是 1 像素黑描边",
-      all(getattr(c, "BORDER_COLOR", None) == "#000000"
+check("四块 + 历史 都是同款浅灰卡片（含 1px 描边）",
+      all(getattr(c, "BG_COLOR", None) == "#3d3d3d" and getattr(c, "BORDER_COLOR", None) == "#2b2b2b"
           for c in (win._float_cards.get("动作编辑"), win._float_cards.get("帧编辑"),
                     win._float_cards.get("预览"), card_h)),
       "动作编辑/帧编辑/预览/历史")

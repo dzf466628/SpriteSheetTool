@@ -691,7 +691,9 @@ class FloatingToolBar(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         # 宽度要容纳：合成(80) + 复用(80) + 放大/缩小(24×2) + 三种背景(24×3) + 历史(24) + 边距/间距
-        self.setFixedSize(326, 32)
+        # 右侧多留 3px 画一条"紧密竖线"当拖动把手（证明这里可以拖）
+        self.GRIP_W = 3
+        self.setFixedSize(326 + self.GRIP_W + 3, 32)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._bg_mode = "checker"
         # 工具条可以自己拖（空白处按下拖动）：用户要求"原图的悬浮工具也能拖动，
@@ -775,6 +777,18 @@ class FloatingToolBar(QWidget):
         self.btn_history.setCheckable(True)
         self.btn_history.clicked.connect(self.history_requested)
         layout.addWidget(self.btn_history)
+
+        # 拖动把手：3px 宽的紧密竖线（鼠标移上去是"移动"光标，拖它就能搬工具条）
+        self.grip = QWidget()
+        self.grip.setFixedWidth(self.GRIP_W)
+        self.grip.setToolTip("按住这里拖动工具条")
+        self.grip.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.grip.setStyleSheet(
+            "background: qlineargradient(x1:0, y1:0, x2:1, y2:0,"
+            " stop:0 transparent, stop:0.34 transparent, stop:0.34 #9a9a9a,"
+            " stop:0.66 #9a9a9a, stop:0.66 transparent);"
+        )
+        layout.addWidget(self.grip)
 
     def paintEvent(self, event):
         p = QPainter(self)
