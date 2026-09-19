@@ -46,14 +46,15 @@ html,body{height:100%;background:#000;overflow:hidden;
 .hlb{color:var(--doubao2);font-weight:800;}
 .hlg{color:var(--green);font-weight:800;}
 
-/* ---------- 史莱姆精灵（真实精灵图切帧） ---------- */
+/* ---------- 妙蛙花精灵（按工程 json 精确切帧，bulba_walkR=正面走 1x4） ---------- */
 .actor{display:flex;align-items:center;justify-content:center;will-change:transform;}
-.sprite{background-image:url("assets/slime_sheet.png");background-repeat:no-repeat;
-  background-size:400% 400%;background-position:0% 33.333%;will-change:background-position,transform;}
-@keyframes fwdFrame{from{background-position:0% 33.333%}to{background-position:100% 33.333%}}
-@keyframes bwdFrame{from{background-position:100% 33.333%}to{background-position:0% 33.333%}}
-.sprite.fwd{animation:fwdFrame .46s steps(4,end) infinite;}
-.sprite.bwd{animation:bwdFrame .46s steps(4,end) infinite;}
+/* 行走帧：.sprite 是视口，里面 img 帧条宽 400%，用 transform:translateX 切帧，绝不切歪 */
+.sprite{position:relative;overflow:hidden;}
+.sprite img.frames{position:absolute;left:0;top:0;width:400%;height:100%;object-fit:fill;display:block;will-change:transform;}
+@keyframes fwdFrame{from{transform:translateX(0)}to{transform:translateX(-75%)}}
+@keyframes bwdFrame{from{transform:translateX(-75%)}to{transform:translateX(0)}}
+.sprite.fwd img.frames{animation:fwdFrame .4s steps(4,end) infinite;}
+.sprite.bwd img.frames{animation:bwdFrame .4s steps(4,end) infinite;}
 @keyframes glitchFrame{
   0%,12%{background-position:100% 0%}
   13%,25%{background-position:33.333% 66.666%}
@@ -69,15 +70,17 @@ html,body{height:100%;background:#000;overflow:hidden;
   50%{transform:translate(-2%,4%) rotate(-4deg) scaleY(.9)}
   75%{transform:translate(3%,-2%) rotate(8deg) scaleX(-1)}
   100%{transform:translate(-4%,1%) rotate(-6deg)}}
-.sprite.glitch{animation:glitchFrame .5s steps(1,end) infinite,glitchT .16s linear infinite;}
+.sprite.glitch{overflow:visible;background-image:url("assets/bulba_sheet.png");background-repeat:no-repeat;
+  background-size:400% 400%;background-position:0 0;
+  animation:glitchFrame .5s steps(1,end) infinite,glitchT .16s linear infinite;}
 @keyframes moveR{from{transform:translateX(-34vw)}to{transform:translateX(34vw)}}
 @keyframes moveL{from{transform:translateX(32vw)}to{transform:translateX(-32vw)}}
 .actor.moveR{animation:moveR 2.6s linear infinite;}
 .actor.moveL{animation:moveL 2.6s linear infinite;}
 @keyframes idleBob{0%,100%{transform:translateY(0)}50%{transform:translateY(-1.4vh)}}
 .actor.bob{animation:idleBob 2.2s ease-in-out infinite;}
-.slide .sprite,.slide .actor{animation-play-state:paused;}
-.slide.active .sprite,.slide.active .actor{animation-play-state:running;}
+.slide .sprite,.slide .actor,.slide .sprite img.frames{animation-play-state:paused;}
+.slide.active .sprite,.slide.active .actor,.slide.active .sprite img.frames{animation-play-state:running;}
 
 /* ---------- 聊天 UI（豆包双簧，纯 CSS+SVG，无 emoji） ---------- */
 .chat{width:60vw;max-width:860px;display:flex;flex-direction:column;gap:1.7vh;}
@@ -215,9 +218,9 @@ html,body{height:100%;background:#000;overflow:hidden;
   <div class="slide">
     <div class="lane">
       <div class="lane-label ok fade-in fi1">别人的角色</div>
-      <div class="track"><div class="actor moveR" style="position:absolute;top:0;left:0;width:20vh;height:20vh;"><div class="sprite fwd" style="width:20vh;height:20vh;"></div></div></div>
+      <div class="track"><div class="actor moveR" style="position:absolute;top:0;left:0;width:22.8vh;height:20vh;"><div class="sprite fwd" style="width:22.8vh;height:20vh;"><img class="frames" src="assets/bulba_walkR.png" alt=""></div></div></div>
       <div class="lane-label bad fade-in fi2">我的角色</div>
-      <div class="track"><div class="actor moveL" style="position:absolute;top:0;left:0;width:20vh;height:20vh;"><div class="sprite bwd" style="width:20vh;height:20vh;"></div></div></div>
+      <div class="track"><div class="actor moveL" style="position:absolute;top:0;left:0;width:22.8vh;height:20vh;"><div class="sprite bwd" style="width:22.8vh;height:20vh;"><img class="frames" src="assets/bulba_walkR.png" alt=""></div></div></div>
     </div>
     <div class="mid fade-up d3" style="margin-top:2.4vh;">别人往前冲，我的<span class="hl">倒着走</span>——合着是要退着打怪？</div>
   </div>
@@ -288,6 +291,128 @@ html,body{height:100%;background:#000;overflow:hidden;
       <div class="tag green t-top" style="left:30%;top:-1.4vh;">自动检测到 17 个元素</div>
     </div>
     <div class="mid fade-up d4" style="margin-top:2.2vh;">图片往里一拖，<span class="hlg">每一帧自动切得明明白白</span></div>
+  </div>
+
+  <!-- ============ P9 多种来源导入（真实素材） ============ -->
+  <div class="slide">
+    <div class="kicker fade-in fi1">第二步 · 啥图都能往里拖</div>
+    <div class="sheet-wall fade-up d1">
+      <div class="sheet-card"><img src="assets/jie.png" alt=""><div class="cap">网上下的精灵图</div></div>
+      <div class="sheet-card"><img src="assets/miao.png" alt=""><div class="cap">宝可梦素材</div></div>
+      <div class="sheet-card"><img src="assets/nido.png" alt=""><div class="cap">现成帧动画</div></div>
+      <div class="sheet-card"><img src="assets/mage.png" alt=""><div class="cap">AI 视频关键帧平铺图</div></div>
+    </div>
+    <div class="mid fade-up d4" style="margin-top:3vh;">AI 视频用关键帧工具导成<span class="hl">平铺图</span>，或者网上下的精灵图</div>
+    <div class="body fade-up d5" style="margin-top:1vh;">拖进来，<span class="hlg">一样自动识别、自动切帧</span>，不用你一格格框</div>
+  </div>
+
+  <!-- ============ P10 动作编辑（真实截图） ============ -->
+  <div class="slide">
+    <div class="kicker fade-in fi1">第三步 · 动作编辑</div>
+    <div class="shot-wrap fade-up d1">
+      <img class="shot" src="shots/05_animbar_closeup.png" style="width:74vw;">
+      <div class="tag t-bottom" style="left:6%;bottom:-1.4vh;">动作顺序拖一拖</div>
+      <div class="tag blue t-bottom" style="left:34%;bottom:-1.4vh;">帧率拉一拉</div>
+      <div class="tag green t-bottom" style="left:62%;bottom:-1.4vh;">循环 / 单次 / 来回乒乓</div>
+    </div>
+    <div class="mid fade-up d4" style="margin-top:3.4vh;">顺序、帧率、循环方式，<span class="hl">拖拖拽拽就定了</span></div>
+  </div>
+
+  <!-- ============ P11 锚点 + 变换（真实截图） ============ -->
+  <div class="slide">
+    <div style="display:flex;align-items:center;gap:3.4vw;">
+      <div class="shot-wrap fade-up d1">
+        <img class="shot" src="shots/04_preview_closeup.png" style="height:62vh;">
+        <div class="tag t-left" style="right:-1.4vw;top:12%;">锚点十字线</div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:2vh;width:34vw;">
+        <div class="mid fade-up d2" style="text-align:left;">锚点对准，<span class="hl">像素级微调</span></div>
+        <div class="cards" style="justify-content:flex-start;">
+          <div class="card fade-up d3" style="width:15.5vw;padding:1.8vh 1vw;">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12a9 9 0 1 1-9-9" stroke-linecap="round"/><path d="M21 3v6h-6"/></svg>
+            <h4>旋转</h4></div>
+          <div class="card fade-up d3" style="width:15.5vw;padding:1.8vh 1vw;">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v18M3 12h18" stroke-linecap="round"/><path d="M7 7l10 10M17 7L7 17" stroke-linecap="round" opacity=".5"/></svg>
+            <h4>镜像</h4></div>
+        </div>
+        <div class="cards" style="justify-content:flex-start;">
+          <div class="card fade-up d4" style="width:15.5vw;padding:1.8vh 1vw;">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 9l8-5 8 5-8 5-8-5z"/><path d="M4 14l8 5 8-5"/></svg>
+            <h4>缩放</h4></div>
+          <div class="card fade-up d4" style="width:15.5vw;padding:1.8vh 1vw;">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+            <h4>斜切透视</h4></div>
+        </div>
+        <div class="body fade-up d5" style="text-align:left;">旋转、镜像、缩放、斜切、透视、扭曲……<span class="hlg">全都有</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ P12 实时预览，正常走 ============ -->
+  <div class="slide">
+    <div style="display:flex;align-items:center;gap:3vw;">
+      <img class="shot fade-up d1" src="shots/04_preview_closeup.png" style="height:58vh;">
+      <div style="width:34vw;">
+        <div class="track fade-up d2" style="width:30vw;height:22vh;background:rgba(255,255,255,.03);border-radius:12px;border-bottom:2px dashed rgba(255,255,255,.15);">
+          <div class="actor moveR" style="position:absolute;width:18.2vh;height:16vh;"><div class="sprite fwd" style="width:18.2vh;height:16vh;"><img class="frames" src="assets/bulba_walkR.png" alt=""></div></div>
+        </div>
+        <div class="mid fade-up d4" style="margin-top:2.4vh;text-align:left;">右边<span class="hlg">实时预览</span></div>
+        <div class="body fade-up d5" style="text-align:left;margin-top:.8vh;">这回总算是<span class="hlg">正经往前走</span>了，<br>不用闭眼祈祷。</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ P13 多素材合并（真实截图） ============ -->
+  <div class="slide">
+    <div class="kicker fade-in fi1">还能合并素材</div>
+    <div class="shot-wrap fade-up d1">
+      <img class="shot" src="shots/06_multi_actions.png" style="width:60vw;">
+      <div class="tag blue t-left" style="left:-1.2vw;top:14%;">动作 1 / 2 / 3</div>
+    </div>
+    <div class="mid fade-up d4" style="margin-top:2.4vh;">好几套<span class="hlb">带 JSON 的素材直接合并</span>成一个工程</div>
+    <div class="body fade-up d5" style="margin-top:.8vh;">动作、锚点、帧率、帧信息——<span class="hlg">一点不丢</span></div>
+  </div>
+
+  <!-- ============ P14 导出 AI 专用 JSON（真实截图） ============ -->
+  <div class="slide">
+    <div class="shot-wrap fade-up d1">
+      <img class="shot" src="shots/07_export_dialog.png" style="height:60vh;">
+      <div class="tag green t-right" style="left:64%;top:46%;">SpriteSheetTool json · AI 专用</div>
+      <div class="tag amber t-bottom" style="left:66%;bottom:-1.4vh;">GIF / PNG 顺手导</div>
+    </div>
+    <div class="mid fade-up d4" style="margin-top:3vh;">JSON 里<span class="hl">连提示词都给你存好了</span></div>
+    <div class="body fade-up d5" style="margin-top:.6vh;">只要不是豆包这么憨的——啊，开玩笑的——正常 AI 拿到手，<span class="hlg">基本直接能用</span></div>
+  </div>
+
+  <!-- ============ P15 工程保存 + 兼容（真实截图） ============ -->
+  <div class="slide">
+    <div style="display:flex;align-items:center;gap:3.4vw;">
+      <img class="shot fade-up d1" src="shots/09_file_menu.png" style="height:48vh;">
+      <div style="width:42vw;display:flex;flex-direction:column;gap:2.4vh;">
+        <div class="mid fade-up d2" style="text-align:left;">没做完？<span class="hl">存个工程文件</span></div>
+        <div class="body fade-up d3" style="text-align:left;">.sstool 工程随时保存，下次打开<span class="hlg">接着改</span>，不用从头再来。</div>
+        <div class="mid fade-up d5" style="text-align:left;font-size:1.9vw;">别的软件的 JSON 也能拖进来</div>
+        <div class="body fade-up d6" style="text-align:left;">TexturePacker、Aseprite 导出的，<span class="hlb">直接导入继续改</span>，不挑上家。</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ P16 结尾引流 ============ -->
+  <div class="slide">
+    <div style="display:flex;align-items:center;gap:3vw;">
+      <div class="actor bob fade-in fi1" style="flex-direction:column;gap:1.4vh;">
+        <img src="assets/logo.png" style="width:11vw;border-radius:22px;box-shadow:0 14px 50px rgba(255,45,117,.45);">
+        <div style="font-weight:900;font-size:1.5vw;letter-spacing:.05em;">SpriteSheetTool</div>
+      </div>
+      <img class="shot fade-up d2" src="shots/08_about.png" style="height:34vh;">
+      <div style="width:34vw;display:flex;flex-direction:column;gap:1.5vh;">
+        <div class="mid fade-up d3" style="text-align:left;font-size:2vw;">被 AI 气过的兄弟，<span class="hl">来找我要</span></div>
+        <div class="body fade-up d4" style="text-align:left;"><span class="hlg">开源免费</span>（GPL v3），后面还藏着好几个小白软件</div>
+        <div class="body fade-up d5" style="text-align:left;">不过说实话……<span class="hl">做视频比写软件难多了</span></div>
+        <div class="mid fade-up d6" style="text-align:left;font-size:1.9vw;">点个小关注呗</div>
+        <div class="body fade-up d7" style="text-align:left;">下一个小白软件，<span class="hl">说不定更适合你</span></div>
+      </div>
+    </div>
   </div>
 
   <!--PART2-->
