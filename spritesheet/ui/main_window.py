@@ -17,7 +17,7 @@ import sys
 import weakref
 from pathlib import Path
 
-from PyQt6.QtCore import QPointF, QRectF, QSize, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QPointF, QRectF, QSize, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QAction, QColor, QKeySequence, QPainter, QPen, QPixmap, QUndoCommand, QUndoStack,
 )
@@ -1631,6 +1631,12 @@ class MainWindow(QMainWindow):
         self.image_viewer.action_performed_full.connect(self._on_action_performed_full)
         self.image_viewer.about_to_perform_full.connect(self._on_before_full_action)
         self.image_viewer.frames_updated.connect(self._on_frames_updated)
+        # 「点别处就弹起」：变换手柄亮着时，在预览区以外按下鼠标（原图、动作列表、
+        # 动画设置横条、菜单…）就把手柄收起来。变换用的控件全在预览区里，所以不用
+        # 逐个按钮去连，也不会误伤缩略图 Ctrl 多选。
+        app_inst = QApplication.instance()
+        if app_inst is not None:
+            app_inst.installEventFilter(self)
 
         # 左列：原图区 + 下方「动画设置」横条（整段动画参数）
         left_column = QWidget()
@@ -1981,6 +1987,11 @@ class MainWindow(QMainWindow):
                 return
         self._stop_update_thread()
         self.image_viewer.shutdown()
+        # 撤掉自己装的 app 级事件过滤器：留着它 = app 里存着一个指向已释放窗口的
+        # 指针，退出时会随机 access violation（这个坑项目里已经踩过一次）。
+        app_inst = QApplication.instance()
+        if app_inst is not None:
+            app_inst.removeEventFilter(self)
         if hasattr(self, "_history_panel") and self._history_panel is not None:
             self._history_panel.disconnect_all()
         super().closeEvent(event)
@@ -2600,6 +2611,31 @@ class MainWindow(QMainWindow):
             n = len(cur.selected_indices) if cur else 0
             # 选择图块改变帧组成：debounce 后统一记录
             self._schedule_per_action_snapshot(f"选择图块{name}({n}个)")
+
+    def eventFilter(self, obj, event):
+        """全局按下鼠标 → 如果按的不是预览区，就收起变换手柄（见 _maybe_exit_preview_transform）。"""
+        if event.type() == QEvent.Type.MouseButtonPress:
+            self._maybe_exit_preview_transform(obj)
+        return super().eventFilter(obj, event)
+
+    def _maybe_exit_preview_transform(self, pressed_obj) -> None:
+        """在预览区以外按下鼠标时收起「帧编辑」的变换手柄。
+
+        「变换控件」全在预览区（右侧预览整列：画布手柄 + 缩略图 + 帧编辑面板），
+        所以在预览区之外按下就一定是"点了别处" —— 包括点原图（哪怕是空白）、点动作
+        列表、点底部动画设置横条。缩略图上 Ctrl 多选属于变换编辑，不会被误伤。
+        """
+        preview = getattr(self, "preview", None)
+        if preview is None:
+            return
+        panel = getattr(preview, "adjust_panel", None)
+        canvas = getattr(panel, "canvas", None) if panel is not None else None
+        if panel is None or canvas is None or not canvas.transform_mode():
+            return
+        if isinstance(pressed_obj, QWidget) and (pressed_obj is preview
+                                                or preview.isAncestorOf(pressed_obj)):
+            return
+        panel._exit_transform_mode()
 
     def _on_action_performed(self, text: str):
         """右键菜单操作：用具体文字记录到当前动作栈。"""

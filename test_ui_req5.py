@@ -293,6 +293,38 @@ def main() -> int:
           f"实际: {win2.image_viewer._ignored_frames}")
     win2.close()
 
+    # 需求5: 变换按钮亮着时，点别处就弹起（变换控件在预览区里，不算）
+    print("=== 需求5: 点别处收起变换手柄 ===")
+    panel._exit_transform_mode()
+    panel._on_mode_button("rotate", True)
+    check("右侧按钮点亮、手柄出现", canvas.transform_mode() == "rotate",
+          f"实际: {canvas.transform_mode()!r}")
+    # ① 点原图空白
+    QTest.mousePress(win.image_viewer.canvas, Qt.MouseButton.LeftButton, pos=QPoint(6, 6))
+    QTest.mouseRelease(win.image_viewer.canvas, Qt.MouseButton.LeftButton, pos=QPoint(6, 6))
+    wait_ms(app, 30)
+    check("点原图空白后手柄收起", canvas.transform_mode() is None,
+          f"实际: {canvas.transform_mode()!r}")
+    check("右侧按钮弹回", not panel.btn_mode_rotate.isChecked())
+    # ② 点动作列表（预览区以外）
+    panel._on_mode_button("rotate", True)
+    check("再次点亮", canvas.transform_mode() == "rotate")
+    if win.action_list.count():
+        QTest.mousePress(win.action_list.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+        QTest.mouseRelease(win.action_list.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+        wait_ms(app, 30)
+    check("点动作列表后手柄收起", canvas.transform_mode() is None,
+          f"实际: {canvas.transform_mode()!r}")
+    # ③ 预览区内的点击不能误伤（缩略图 Ctrl 多选依赖这一点）
+    panel._on_mode_button("rotate", True)
+    if win.preview.thumb_list.count():
+        QTest.mousePress(win.preview.thumb_list.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+        QTest.mouseRelease(win.preview.thumb_list.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+        wait_ms(app, 30)
+    check("预览区内点击（缩略图）不会收起手柄", canvas.transform_mode() == "rotate",
+          f"实际: {canvas.transform_mode()!r}")
+    panel._exit_transform_mode()
+
     win.close()
     print("=" * 50)
     print(f"PASSED {passed}  |  FAILED {len(FAILURES)}")
