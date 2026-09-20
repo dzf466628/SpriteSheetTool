@@ -14,8 +14,6 @@ html,body{height:auto!important;overflow:visible!important;}
 [class*="fade"],.row{opacity:1!important;transform:none!important;}
 .token .bar i{width:100%!important;}
 .progress,.pageno,.hint,.brandtag{display:none!important;}
-/* 强制所有动画运行，角色不暂停，能看到完整走动 */
-.slide .sprite,.slide .actor,.slide .sprite img.frames{animation-play-state:running!important;}
 </style>
 </head>"""
 (here / "_check.html").write_text(html.replace("</head>", inj, 1), encoding="utf-8")

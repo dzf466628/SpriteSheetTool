@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>SpriteSheetTool JSON 渲染演示</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{background:#0e0e10;color:#f3f3f5;font-family:"Microsoft YaHei UI",system-ui,sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:4vh 2vw;}
+h1{font-size:2vw;color:#ff2d75;margin-bottom:1vh;}
+.sub{color:#a8a8b2;font-size:1.1vw;margin-bottom:3vh;}
+.row{display:flex;gap:4vw;justify-content:center;flex-wrap:wrap;}
+.anim{background:#1a1a1f;border:1px solid #2d2d35;border-radius:14px;padding:2.4vh 2vw;text-align:center;}
+.anim h2{font-size:1.3vw;margin-bottom:1.2vh;}
+.anim .tag{display:inline-block;font-size:.95vw;padding:.4vh .8vw;border-radius:6px;margin-bottom:1.4vh;font-weight:700;}
+.tag.left{background:rgba(255,84,112,.15);color:#ff5470;}
+.tag.right{background:rgba(53,210,154,.15);color:#35d29a;}
+canvas{background:#000;image-rendering:pixelated;image-rendering:crisp-edges;}
+.info{margin-top:1.2vh;font-size:1vw;color:#a8a8b2;font-family:Consolas,monospace;}
+.hint{margin-top:3vh;font-size:.95vw;color:#6f6f7a;}
+</style>
+</head>
+<body>
+<h1>按 JSON 严格渲染 · 妙蛙花走路</h1>
+<div class="sub">canvas 照 atlas rect 裁切 → 贴到 41×36 画布 → 按 10fps 播放</div>
+<div class="row">
+  <div class="anim">
+    <h2>动作 1</h2>
+    <div class="tag left">direction = left（左走）</div>
+    <div><canvas id="c1" width="41" height="36" style="width:205px;height:180px;"></canvas></div>
+    <div class="info" id="i1">frame 0 / 4 · 10fps</div>
+  </div>
+  <div class="anim">
+    <h2>动作 2</h2>
+    <div class="tag right">direction = right（右走）</div>
+    <div><canvas id="c2" width="41" height="36" style="width:205px;height:180px;"></canvas></div>
+    <div class="info" id="i2">frame 0 / 4 · 10fps</div>
+  </div>
+</div>
+<div class="hint">图：bulba_sheet.png · 41×36 逻辑画布 · anchor(20,18) · loop</div>
+
+<script>
+const data = {
+  "atlas": {"image": "assets/bulba_sheet.png", "width": 192, "height": 192},
+  "animations": [
+    {
+      "name": "动作 1", "fps": 10, "canvas": {"width": 41, "height": 36},
+      "move": {"direction": "left"},
+      "frames": [
+        {"parts":[{"rect":{"x":2,"y":52,"width":39,"height":36},"pos":{"x":0,"y":0}}]},
+        {"parts":[{"rect":{"x":50,"y":54,"width":39,"height":34},"pos":{"x":0,"y":0}}]},
+        {"parts":[{"rect":{"x":98,"y":52,"width":39,"height":36},"pos":{"x":0,"y":0}}]},
+        {"parts":[{"rect":{"x":146,"y":54,"width":41,"height":34},"pos":{"x":0,"y":0}}]}
+      ]
+    },
+    {
+      "name": "动作 2", "fps": 10, "canvas": {"width": 41, "height": 36},
+      "move": {"direction": "right"},
+      "frames": [
+        {"parts":[{"rect":{"x":6,"y":100,"width":40,"height":36},"pos":{"x":0,"y":0}}]},
+        {"parts":[{"rect":{"x":54,"y":102,"width":40,"height":34},"pos":{"x":0,"y":0}}]},
+        {"parts":[{"rect":{"x":102,"y":100,"width":40,"height":36},"pos":{"x":0,"y":0}}]},
+        {"parts":[{"rect":{"x":149,"y":102,"width":41,"height":34},"pos":{"x":0,"y":0}}]}
+      ]
+    }
+  ]
+};
+
+const atlas = new Image();
+atlas.src = data.atlas.image;
+atlas.onload = () => {
+  [data.animations[0], data.animations[1]].forEach((anim, idx) => {
+    const cv = document.getElementById('c' + (idx+1));
+    const ctx = cv.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+    const cw = anim.canvas.width, ch = anim.canvas.height;
+    let fi = 0;
+    const interval = 1000 / anim.fps;
+    setInterval(() => {
+      ctx.clearRect(0, 0, cw, ch);
+      anim.frames[fi].parts.forEach(p => {
+        const r = p.rect, pos = p.pos;
+        ctx.drawImage(atlas, r.x, r.y, r.width, r.height, pos.x, pos.y, r.width, r.height);
+      });
+      document.getElementById('i' + (idx+1)).textContent =
+        'frame ' + fi + ' / ' + anim.frames.length + ' · ' + anim.fps + 'fps · ' + anim.move.direction;
+      fi = (fi + 1) % anim.frames.length;
+    }, interval);
+  });
+};
+</script>
+</body>
+</html>

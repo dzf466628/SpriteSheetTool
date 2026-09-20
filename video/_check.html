@@ -49,12 +49,11 @@ html,body{height:100%;background:#000;overflow:hidden;
 /* ---------- 妙蛙花精灵（按工程 json 精确切帧，bulba_walkR=正面走 1x4） ---------- */
 .actor{display:flex;align-items:center;justify-content:center;will-change:transform;}
 /* 行走帧：.sprite 是视口，里面 img 帧条宽 400%，用 transform:translateX 切帧，绝不切歪 */
-.sprite{position:relative;overflow:hidden;}
-.sprite img.frames{position:absolute;left:0;top:0;width:400%;height:100%;object-fit:fill;display:block;will-change:transform;}
-@keyframes fwdFrame{from{transform:translateX(0)}to{transform:translateX(-75%)}}
-@keyframes bwdFrame{from{transform:translateX(-75%)}to{transform:translateX(0)}}
-.sprite.fwd img.frames{animation:fwdFrame .4s steps(4,end) infinite;}
-.sprite.bwd img.frames{animation:bwdFrame .4s steps(4,end) infinite;}
+.sprite{position:relative;overflow:hidden;background-repeat:no-repeat;background-size:400% 100%;}
+@keyframes fwdFrame{from{background-position:0% 0%}to{background-position:100% 0%}}
+@keyframes bwdFrame{from{background-position:100% 0%}to{background-position:0% 0%}}
+.sprite.fwd{background-image:url("assets/bulba_walkR.png");animation:fwdFrame .4s steps(4,end) infinite;}
+.sprite.bwd{background-image:url("assets/bulba_walkR.png");animation:bwdFrame .4s steps(4,end) infinite;}`n.sprite.bug{background-image:url("assets/bulba_glitch.png");animation:fwdFrame .4s steps(4,end) infinite;}
 @keyframes glitchFrame{
   0%,12%{background-position:100% 0%}
   13%,25%{background-position:33.333% 66.666%}
@@ -73,8 +72,8 @@ html,body{height:100%;background:#000;overflow:hidden;
 .sprite.glitch{overflow:visible;background-image:url("assets/bulba_sheet.png");background-repeat:no-repeat;
   background-size:400% 400%;background-position:0 0;
   animation:glitchFrame .5s steps(1,end) infinite,glitchT .16s linear infinite;}
-@keyframes moveR{from{transform:translateX(-34vw)}to{transform:translateX(34vw)}}
-@keyframes moveL{from{transform:translateX(32vw)}to{transform:translateX(-32vw)}}
+@keyframes moveR{from{transform:translateX(0)}to{transform:translateX(60vw)}}
+@keyframes moveL{from{transform:translateX(60vw)}to{transform:translateX(0)}}
 .actor.moveR{animation:moveR 2.6s linear infinite;}
 .actor.moveL{animation:moveL 2.6s linear infinite;}
 @keyframes idleBob{0%,100%{transform:translateY(0)}50%{transform:translateY(-1.4vh)}}
@@ -107,6 +106,19 @@ html,body{height:100%;background:#000;overflow:hidden;
 .token .bar{width:16vw;height:.8vh;background:#2a141c;border-radius:4px;overflow:hidden;margin-top:.6vh;margin-left:auto;}
 .token .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#ffb020,#ff5470);}
 .slide.active .token .bar i{animation:fill 8.4s linear forwards;}
+.tokenWrap{position:fixed;inset:0;pointer-events:none;z-index:99;}
+.tokenBar{position:absolute;right:0;bottom:0;width:30px;height:0;background:linear-gradient(180deg,#ffb020,#ff5470);box-shadow:0 0 30px rgba(255,84,112,.9);}
+.slide.active .tokenBar{animation:tokLoop 9s ease-in forwards;}
+@keyframes tokLoop{
+  0%{right:0;bottom:0;width:30px;height:0;}
+  25%{right:0;bottom:0;width:30px;height:100vh;}
+  25.01%{right:0;top:0;width:30px;height:30px;}
+  50%{right:0;top:0;width:100vw;height:30px;}
+  50.01%{left:0;top:0;width:30px;height:30px;}
+  75%{left:0;top:0;width:30px;height:100vh;}
+  75.01%{left:0;bottom:0;width:30px;height:30px;}
+  100%{left:0;bottom:0;width:100vw;height:30px;}
+}
 @keyframes fill{to{width:100%}}
 
 /* ---------- 真实软件截图展示 ---------- */
@@ -178,8 +190,6 @@ html,body{height:auto!important;overflow:visible!important;}
 [class*="fade"],.row{opacity:1!important;transform:none!important;}
 .token .bar i{width:100%!important;}
 .progress,.pageno,.hint,.brandtag{display:none!important;}
-/* 强制所有动画运行，角色不暂停，能看到完整走动 */
-.slide .sprite,.slide .actor,.slide .sprite img.frames{animation-play-state:running!important;}
 </style>
 </head>
 <body>
@@ -188,12 +198,16 @@ html,body{height:auto!important;overflow:visible!important;}
   <div class="brandtag"><img src="assets/logo.png" alt="">SpriteSheetTool</div>
   <div class="pageno" id="pageno"></div>
   <div class="progress" id="progress"></div>
-  <div class="hint">空格 暂停 / 继续 · 录屏即可成片</div>
+  <div class="hint">
+    <button id="btnPrev" style="background:#2a2a32;border:1px solid #3d3d45;color:#f3f3f5;padding:.6vh 1.2vw;border-radius:6px;cursor:pointer;font-size:.9vw;margin-right:1vw;">上一页</button>
+    空格 暂停 / 继续 · 录屏即可成片
+    <button id="btnNext" style="background:#2a2a32;border:1px solid #3d3d45;color:#f3f3f5;padding:.6vh 1.2vw;border-radius:6px;cursor:pointer;font-size:.9vw;margin-left:1vw;">下一页</button>
+  </div>
 
   <!-- ============ P1 鬼畜开场 ============ -->
   <div class="slide">
-    <div class="actor" style="width:34vh;height:34vh;"><div class="sprite glitch" style="width:34vh;height:34vh;"></div></div>
-    <div class="big glitch-txt fade-up d2" data-t="我的角色……好像不太对？" style="margin-top:3vh;">我的角色……好像不太对？</div>
+    <div class="actor" style="width:34vh;height:34vh;"><div class="sprite bwd" style="width:34vh;height:34vh;"></div></div>
+    <div class="big fade-up d2" data-t="我的角色……好像不太对？" style="margin-top:3vh;">我的角色……好像不太对？</div>
     <div class="body fade-up d4" style="margin-top:1.4vh;">别人做游戏靠创意，我做游戏靠——和 AI 斗智斗勇</div>
   </div>
 
@@ -230,11 +244,11 @@ html,body{height:auto!important;overflow:visible!important;}
   <div class="slide">
     <div class="lane">
       <div class="lane-label ok fade-in fi1">别人的角色</div>
-      <div class="track"><div class="actor moveR" style="position:absolute;top:0;left:0;width:22.8vh;height:20vh;"><div class="sprite fwd" style="width:22.8vh;height:20vh;"><img class="frames" src="assets/bulba_walkR.png" alt=""></div></div></div>
+      <div class="track"><div class="actor moveR" style="position:absolute;top:0;left:0;width:22.8vh;height:20vh;"><canvas id="walkR1" width="41" height="36" style="width:100%;height:100%;image-rendering:pixelated;"></canvas></div></div>
       <div class="lane-label bad fade-in fi2">我的角色</div>
-      <div class="track"><div class="actor moveL" style="position:absolute;top:0;left:0;width:22.8vh;height:20vh;"><div class="sprite bwd" style="width:22.8vh;height:20vh;"><img class="frames" src="assets/bulba_walkR.png" alt=""></div></div></div>
+      <div class="track"><div class="actor moveL" style="position:absolute;top:0;left:0;width:22.8vh;height:20vh;"><div class="sprite bwd" style="width:22.8vh;height:20vh;"></div></div></div>
     </div>
-    <div class="mid fade-up d3" style="margin-top:2.4vh;">别人往前冲，我的<span class="hl">倒着走</span>——合着是要退着打怪？</div>
+    <div class="mid fade-up d3" style="margin-top:2.4vh;">呐，<span class="hl">这种错误我都不知道该怎么形容</span>……</div>
   </div>
 
   <!-- ============ P5 鬼畜 + token 暴涨 ============ -->
@@ -242,21 +256,23 @@ html,body{height:auto!important;overflow:visible!important;}
     <div style="display:flex;align-items:center;gap:3vw;width:100%;justify-content:center;">
       <div class="chat" style="width:42vw;">
         <div class="row me" style="transition-delay:.2s"><div class="ava me"><img src="assets/logo.png" alt=""></div>
-          <div class="bub">帧顺序反了，你这是倒放啊</div></div>
+          <div class="bub">这啥啊 分裂了豆姐！</div></div>
         <div class="row db" style="transition-delay:1.4s"><div class="ava db">豆</div>
           <div class="bub">修好了！</div></div>
         <div class="row me" style="transition-delay:2.6s"><div class="ava me"><img src="assets/logo.png" alt=""></div>
           <div class="bub">怎么还原地抽搐上了？？</div></div>
         <div class="row db" style="transition-delay:3.8s"><div class="ava db">豆</div>
           <div class="bub">对不起，我再试试……</div></div>
+        <div class="row me" style="transition-delay:5.0s"><div class="ava me"><img src="assets/logo.png" alt=""></div>
+          <div class="bub">不对……不对！不对！！</div></div>
       </div>
-      <div class="actor" style="width:24vh;height:24vh;"><div class="sprite glitch" style="width:24vh;height:24vh;"></div></div>
+      <div class="actor fade-in" style="width:24vh;height:24vh;opacity:0;transition-delay:2.6s;"><div class="sprite glitch" style="width:24vh;height:24vh;"></div></div>
     </div>
     <div class="mid fade-up d6" style="margin-top:2.6vh;">来回十几轮，<span class="hl">token 烧得比我血压涨得都快</span></div>
     <div class="token fade-in fi2">
       <div class="lab">本次对话 TOKENS</div>
       <div class="num" id="tokNum">3,200</div>
-      <div class="bar"><i></i></div>
+      <div class="tokenWrap"><div class="tokenBar"><i></i></div></div>
     </div>
   </div>
 
@@ -366,7 +382,7 @@ html,body{height:auto!important;overflow:visible!important;}
       <img class="shot fade-up d1" src="shots/04_preview_closeup.png" style="height:58vh;">
       <div style="width:34vw;">
         <div class="track fade-up d2" style="width:30vw;height:22vh;background:rgba(255,255,255,.03);border-radius:12px;border-bottom:2px dashed rgba(255,255,255,.15);">
-          <div class="actor moveR" style="position:absolute;width:18.2vh;height:16vh;"><div class="sprite fwd" style="width:18.2vh;height:16vh;"><img class="frames" src="assets/bulba_walkR.png" alt=""></div></div>
+          <div class="actor moveR" style="position:absolute;width:18.2vh;height:16vh;"><div class="sprite fwd" style="width:18.2vh;height:16vh;"></div></div>
         </div>
         <div class="mid fade-up d4" style="margin-top:2.4vh;text-align:left;">右边<span class="hlg">实时预览</span></div>
         <div class="body fade-up d5" style="text-align:left;margin-top:.8vh;">这回总算是<span class="hlg">正经往前走</span>了，<br>不用闭眼祈祷。</div>
@@ -453,9 +469,11 @@ function tick(now){
     elapsed+=dt;
     // token 计数跟随第5页（index 4）
     if(cur===4&&tokEl){
-      const base=3200,peak=48600;
+      const base=3200,peak=999999999;
       const t=Math.min(1,elapsed/durations[4]);
       tokEl.textContent=fmt(Math.round(base+(peak-base)*Math.pow(t,1.4)));
+      tokEl.style.transform="scale("+(1+t*0.8)+")";
+      tokEl.style.transition="transform .3s";
     }
     if(elapsed>=durations[cur]){
       elapsed=0;cur=(cur+1)%slides.length;show(cur);
@@ -474,8 +492,48 @@ document.addEventListener('keydown',e=>{
 });
 // 点击也可暂停/继续
 document.getElementById('stage').addEventListener('click',()=>{paused=!paused;});
+// 快进快退按钮
+document.getElementById('btnNext').addEventListener('click',()=>{elapsed=durations[cur];});
+document.getElementById('btnPrev').addEventListener('click',()=>{cur=(cur-1+slides.length)%slides.length;elapsed=0;show(cur);});
 show(0);
 requestAnimationFrame(tick);
+</script>
+<script>
+// 按 json 严格渲染妙蛙花（和 json_demo.html 同一套逻辑）
+(function(){
+  var atlas = new Image();
+  atlas.src = 'assets/bulba_sheet.png';
+  atlas.onload = function(){
+    // 动作2 right（P4 上排正常走）
+    var framesR = [
+      {x:6,y:100,w:40,h:36},
+      {x:54,y:102,w:40,h:34},
+      {x:102,y:100,w:40,h:36},
+      {x:149,y:102,w:41,h:34}
+    ];
+    // 动作1 left（P4 下排倒着走）
+    var framesL = [
+      {x:2,y:52,w:39,h:36},
+      {x:50,y:54,w:39,h:34},
+      {x:98,y:52,w:39,h:36},
+      {x:146,y:54,w:41,h:34}
+    ];
+    function play(id, frames){
+      var cv = document.getElementById(id);
+      if(!cv) return;
+      var ctx = cv.getContext('2d');
+      ctx.imageSmoothingEnabled = false;
+      var fi = 0;
+      setInterval(function(){
+        var f = frames[fi];
+        ctx.clearRect(0,0,41,36);
+        ctx.drawImage(atlas, f.x, f.y, f.w, f.h, 0, 0, f.w, f.h);
+        fi = (fi+1) % frames.length;
+      }, 100);
+    }
+    play('walkR1', framesR);
+  };
+})();
 </script>
 </body>
 </html>
