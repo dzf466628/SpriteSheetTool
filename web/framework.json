@@ -1,0 +1,7 @@
+{
+  "name": "RepoPulse",
+  "description": "本地、NAS 与 GitHub 仓库状态总览、同步与托盘后台管理工具。",
+  "icon": "RepoPulse.png,
+  "version": "0.2.2",
+  "link": "index.html"
+}
