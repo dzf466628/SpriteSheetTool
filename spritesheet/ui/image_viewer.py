@@ -727,11 +727,9 @@ class _Canvas(QWidget):
                         if ctrl:
                             self._viewer.begin_ctrl_composition()
                         self._viewer.add_to_composite(idx)
-                        if ctrl and alt:
-                            # Ctrl+Alt：合成之后再把这一帧**整体追加一次**。
-                            # 用 reuse_frame_at（追加）而不是 toggle_reuse_at（来回切）——
-                            # 组合键的期望是"一次做两件事"，不是"再点一次把它取消掉"。
-                            self._viewer.reuse_frame_at(idx)
+                        # 这里**不能**再追加一份（试过 reuse_frame_at）：锚点元素属于上一帧时，
+                        # 会把**上一帧**整个复制一遍 —— 用户原话"第一帧已经松手了，选完第二帧
+                        # 第一帧又补上了"。Alt+Ctrl 一轮就是一帧，不额外追加。
                     elif alt or self._viewer.reuse_mode:
                         if idx in self._viewer.current_action.selected_indices:
                             if alt:
@@ -766,9 +764,7 @@ class _Canvas(QWidget):
                         self._viewer.begin_ctrl_composition()
                         for idx in indices:
                             self._viewer.add_to_composite(idx)
-                        if event.modifiers() & Qt.KeyboardModifier.AltModifier and indices:
-                            # Ctrl+Alt+框选：框里的元素合成一帧后，把这一帧整体再追加一次
-                            self._viewer.reuse_frame_at(indices[-1])
+                        # 同上：不在这里追加复用（会复制到"上一帧"上）
                     elif event.modifiers() & Qt.KeyboardModifier.AltModifier or self._viewer.reuse_mode:
                         # Alt+框选：已选元素追加复用帧，未选元素正常加入选择，不清空已有
                         action = self._viewer.current_action
