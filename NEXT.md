@@ -28,6 +28,22 @@
 
 ## 进行中：原图选择 / 合成帧的 Ctrl+Alt 组合键（用户已确认的规格，代码待改）
 
+用户口径（最终版，2026-xx）："**ctrl+alt 按下后，只要选中的就是这一帧；松开以后，再按就是下一帧；
+单 ctrl 和单 alt 没变化**"。
+
+- Alt+Ctrl 按住期间：**当前选中 = 这一帧的成员**（点一下加进来、再点一下移出去，实时生效）。
+- 松开组合键：这一组定格成一帧（**不额外追加**）。
+- 再次按下 Alt+Ctrl：拿到全新的一组 = 下一帧；上一轮的选中继续留着（所以"点1234"是往上加）。
+- 单击分支要按修饰键分三种，别再让 Ctrl 抢掉 Alt：
+  `ctrl and not alt` = 原合成逻辑（逐元素 add_to_composite）／
+  `ctrl and alt` = 按"普通点击"的 toggle 规则改 selected_indices，并让这组成为**本轮组**／
+  `alt and not ctrl` = 原复用逻辑（toggle_reuse_at / reuse_frame_at）。
+- 每轮 Alt+Ctrl 起手先结束上一轮（清 `_active_composite_group`），否则
+  `begin_ctrl_composition()` 会因 `_ctrl_composing` 已 True 而直接 return，元素全落进第一组、
+  帧号全是 1（用户报过"帧序号都是第一帧"）。
+
+以下是过程记录（口径以上面为准）：
+
 用户口径（原话："假如一共有4个元素1 2 3 4 第一次按住ctrl 合成12 松开以后 第二次按住alt+ctrl
 单击或者框选123 这就是第二帧 松开再按住 点击1234这就是第四帧" → 追问后更正为："应该是第二帧
 松开手 再按 就是第三帧"）：
