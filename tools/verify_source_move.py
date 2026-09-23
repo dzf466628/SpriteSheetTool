@@ -251,6 +251,33 @@ def main() -> int:
           px(viewer._pixmap, moved_offsets[1][0] + 30, moved_offsets[1][1] + 25)
           == SPRITE[1] + (255,))
 
+    print("---- 11. 检测还在跑时拖动：结果落地要补上这次的位移 ----")
+    # 这是"拖动后留在原处、跟内容错开的虚线框"的根因：后台检测算的是开始那一刻的位置，
+    # 用户在检测跑完前拖走了那张图，新元素就会落在拖动前的位置上
+    viewer._source_offsets = list(OFFSETS0)
+    viewer._recompose_sources(QSize(80, 182))
+    viewer._detect_inflight = True
+    viewer._pending_detect_shifts = []
+    check("检测在跑时拖动会把位移记下来（供结果补正）",
+          viewer.move_sources([2], 4, 3) is True
+          and viewer._pending_detect_shifts == [([(2, (0, 132, 60, 50))], 4, 3)],
+          f"记录={viewer._pending_detect_shifts}")
+    check("落在被拖那块里的新元素补上位移",
+          viewer._apply_pending_detect_shifts([(10, 140, 20, 20)]) == [(14, 143, 20, 20)])
+    check("补偿用完就清空，不会重复补", viewer._pending_detect_shifts == [])
+    check("别的块里的元素原样不动",
+          viewer._apply_pending_detect_shifts([(10, 40, 20, 20)]) == [(10, 40, 20, 20)])
+    viewer._detect_inflight = False
+    viewer._pending_detect_shifts = []
+    viewer.move_sources([2], -4, -3)
+    check("检测没在跑时不留补偿（新检测的基准就是当前状态）",
+          viewer._pending_detect_shifts == [])
+    check("帧框跟着内容走：中心在被拖块旧矩形里就算（边界算在内）",
+          viewer._belongs_to_moved((40, 140, 40, 40), [(2, (0, 132, 60, 50))]) is True
+          and viewer._belongs_to_moved((80, 140, 40, 40), [(2, (0, 132, 60, 50))]) is False)
+    viewer._source_offsets = list(OFFSETS0)
+    viewer._recompose_sources(QSize(80, 182))
+
     print("---- 9. 只有一张原图、没有动作时，工具照样能用 ----")
     win2 = MainWindow()
     win2.resize(1200, 800)
@@ -264,7 +291,9 @@ def main() -> int:
     win2._on_source_tool_toggled(True)
     wait(200)
     check("没有动作也能开工具（用户明确要求）",
-          v2._source_tool is True and v2.source_borders_visible)
+          v2._source_tool is True and v2.source_interaction is True)
+    check("单张时不画分块框（免得看着像多出来一圈框）",
+          v2.source_borders_visible is False)
     check("只有一张时它自动成为选中项（否则拖动会因为选中集合为空而拖不动）",
           v2.selected_sources() == [0], f"选中={v2.selected_sources()}")
     start = QPointF(v2._offset.x() + 30 * v2._zoom, v2._offset.y() + 25 * v2._zoom)

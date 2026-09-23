@@ -262,10 +262,13 @@ class _Canvas(QWidget):
                             shown.height() * zoom)
             p.drawPixmap(target, shown, QRectF(shown.rect()))
 
-            # 原图分块虚框（「原图选择」工具或抠图面板开着时显示）：没选中的暗虚线，
-            # 选中的主题色实线。save/restore 包住，免得影响后面的元素辅助线。
-            if self._viewer.source_borders_visible:
-                _rects = self._viewer.source_rects()
+            # 原图分块框（「原图选择」工具或抠图面板开着时显示）：没选中的**实线**暗灰、
+            # 选中的主题色实线。刻意不用虚线 —— 元素辅助线本来就是灰色虚线，再来一套
+            # 长得一样的，用户会误以为"多出来一堆错开的虚线框"。save/restore 包住，
+            # 免得影响后面的元素辅助线。
+            if self._viewer.source_borders_visible or self._viewer._band_rect is not None:
+                _rects = (self._viewer.source_rects()
+                          if self._viewer.source_borders_visible else [])
                 _selected = set(self._viewer.selected_sources())
                 p.save()
                 p.setBrush(Qt.BrushStyle.NoBrush)
@@ -275,11 +278,10 @@ class _Canvas(QWidget):
                     if _i in _selected:
                         p.setPen(QPen(QColor("#F06292"), 2))
                     else:
-                        _pen = QPen(QColor("#888888"), 1)
-                        _pen.setStyle(Qt.PenStyle.DashLine)
-                        p.setPen(_pen)
+                        p.setPen(QPen(QColor("#666666"), 1))
                     p.drawRect(_r)
-                # 框选框：半透明主题色填充 + 细虚线边框（拖动中一直跟着鼠标）
+                # 框选框：半透明主题色填充 + 细虚线边框（拖动中一直跟着鼠标）。
+                # 单独判 _band_rect：单张原图时不画分块框，但框选的手势还在，框得画出来。
                 if self._viewer._band_rect is not None:
                     p.setPen(QPen(QColor("#F06292"), 1, Qt.PenStyle.DashLine))
                     p.setBrush(QColor(240, 98, 146, 40))
@@ -490,7 +492,7 @@ class _Canvas(QWidget):
         if event.key() == Qt.Key.Key_Space:
             self._panning = True
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
-        elif event.key() == Qt.Key.Key_Escape and self._viewer.source_borders_visible:
+        elif event.key() == Qt.Key.Key_Escape and self._viewer.source_interaction:
             # 原图选择状态下的 Esc = 取消选择（工具本身还开着，跟画图软件一致）
             self._viewer.set_selected_sources([])
             self._viewer._band_start = None
@@ -642,7 +644,7 @@ class _Canvas(QWidget):
         # 原图选择 / 拖动（「原图选择」工具或抠图面板开着时）：
         # 从图上起手 = 选择/拖动，从棋盘格（图外）起手 = 框选。
         # 判定的关键是"松手前有没有真的拖开"：没拖开=点击选择，拖开了才按拖动/框选算。
-        if self._viewer.source_borders_visible and event.button() == Qt.MouseButton.LeftButton:
+        if self._viewer.source_interaction and event.button() == Qt.MouseButton.LeftButton:
             self._src_begin(event)
             event.accept()
             return
@@ -1393,6 +1395,10 @@ class ImageViewer(QWidget):
         self._detect_thread: _FrameDetectThread | None = None
         self._detect_threads: set[_FrameDetectThread] = set()
         self._detect_generation = 0
+        # 后台元素检测是否在跑 + 这段时间里发生的拖动（结果落地时要补上，见
+        # _apply_pending_detect_shifts：不补的话新元素会落在拖动前的位置上）
+        self._detect_inflight = False
+        self._pending_detect_shifts: list = []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -1528,6 +1534,9 @@ class ImageViewer(QWidget):
         """异步检测元素，避免大图 flood fill 阻塞 UI 线程。"""
         self._detect_generation += 1
         generation = self._detect_generation
+        # 新一轮检测的基准就是**当前**的帧列表，所以之前攒下的位移补偿清空
+        self._pending_detect_shifts = []
+        self._detect_inflight = True
         from spritesheet.settings import detect_min_area
         thread = _FrameDetectThread(image.copy(), min_area=detect_min_area(), parent=self)
         self._detect_thread = thread
@@ -1537,10 +1546,14 @@ class ImageViewer(QWidget):
             if generation != self._detect_generation:
                 return
             shifted = [(x, y + y_offset, w, h) for x, y, w, h in frames]
+            shifted = self._apply_pending_detect_shifts(shifted)
+            self._detect_inflight = False
             if not base_frames:
                 # 全新检测（元素索引全部重建）：旧的忽略标记无法可靠对应，清空
                 self._ignored_frames.clear()
-            self._frames = list(base_frames) + shifted
+            # 追加到**当前**帧列表，而不是检测开始时那份：开始之后用户在拖动中挪走的帧
+            # 已经在那个列表里被就地改过了，用旧的那份会把它们打回原位
+            self._frames = list(self._frames) + shifted
             self.canvas.update()
             self._update_rulers()
             self.frames_updated.emit()
@@ -2299,6 +2312,10 @@ class ImageViewer(QWidget):
         if dx == 0 and dy == 0:
             return False
         old_rects = [(i, rects[i]) for i in moved]
+        if self._detect_inflight:
+            # 后台检测还在跑：它算的是拖动前的位置，这次位移记下来，结果回来时补给
+            # 那批新元素（否则它们就"留在原处、跟内容错开"）
+            self._pending_detect_shifts.append((old_rects, dx, dy))
         for index in moved:
             x, y = self._source_offsets[index]
             self._source_offsets[index] = (x + dx, y + dy)
@@ -2313,23 +2330,62 @@ class ImageViewer(QWidget):
         self._update_rulers()
         return True
 
+    def _shift_rects(self, rects, old_rects, dx: int, dy: int) -> list:
+        """把"落在被拖动块里"的矩形整体平移 (dx, dy)，返回新列表（不改原列表）。
+
+        判定见 ``_belongs_to_moved``：只按**中心点**判会在框跨越块边界、或检测出的框比
+        原图还大时漏掉，那个框就留在原处、跟内容错开。
+        """
+        if not rects or (dx == 0 and dy == 0):
+            return [tuple(r) for r in rects]
+        out = []
+        for rect in rects:
+            if self._belongs_to_moved(rect, old_rects):
+                out.append((rect[0] + dx, rect[1] + dy, rect[2], rect[3]))
+            else:
+                out.append(tuple(rect))
+        return out
+
+    @staticmethod
+    def _belongs_to_moved(rect, old_rects) -> bool:
+        """这个框算不算"就在被拖动的那张原图里"（按中心点判，边界算在内）。
+
+        用中心点而不是"碰没碰到"：元素永远属于它中心所在的那张图。边界取闭区间，
+        是为了兜住缩放取整导致中心正好压在块边界上的情况。
+        """
+        fx, fy, fw, fh = rect
+        cx, cy = fx + fw / 2.0, fy + fh / 2.0
+        for _index, (bx, by, bw, bh) in old_rects:
+            if bx <= cx <= bx + bw and by <= cy <= by + bh:
+                return True
+        return False
+
+    def _apply_pending_detect_shifts(self, rects: list) -> list:
+        """检测结果落地前，补上"检测期间发生过的拖动"。
+
+        后台检测算的是**开始那一刻**的位置（y_offset 也是那时算的）；如果用户在检测跑完
+        之前就拖走了那张图，这批新元素会落在拖动前的位置上 —— 画出来正是用户看到的
+        "留在原处、跟内容错开的虚线框"。这里把那些位移按顺序补回去。
+        """
+        pending = self._pending_detect_shifts
+        if pending:
+            self._pending_detect_shifts = []
+            for old_rects, mdx, mdy in pending:
+                rects = self._shift_rects(rects, old_rects, mdx, mdy)
+        return rects
+
     def _shift_frames_with(self, old_rects: list, dx: int, dy: int) -> None:
         """把落在被移动块里的帧按同一位移搬走（内容与框始终粘在一起）。
 
-        判定用帧的**中心点**：跨越两块（几乎不会发生）时，跟着中心所在的那块走。
         这里只改几何；每个动作缓存的帧图/变换由主窗口在**拖动结束**时统一重算 ——
         拖动过程中每次鼠标移动都重裁一遍所有动作的帧，帧一多就会卡。
+        注意是**原地改元素**而不是换一个新列表：检测结果落地时要在这个列表上追加，
+        换新列表会让"检测期间拖动"的补偿算漏（老代码就踩过这个）。
         """
         if not self._frames or (dx == 0 and dy == 0):
             return
-        for pos, frame in enumerate(self._frames):
-            cx = frame[0] + frame[2] / 2.0
-            cy = frame[1] + frame[3] / 2.0
-            for _index, (bx, by, bw, bh) in old_rects:
-                if bx <= cx < bx + bw and by <= cy < by + bh:
-                    self._frames[pos] = type(frame)(
-                        (frame[0] + dx, frame[1] + dy, frame[2], frame[3]))
-                    break
+        for pos, rect in enumerate(self._shift_rects(self._frames, old_rects, dx, dy)):
+            self._frames[pos] = type(self._frames[pos])(rect)
 
     def _recompose_sources(self, size: QSize | None = None) -> None:
         """按当前偏移把各张原图重新拼成合成大图。
@@ -2378,17 +2434,27 @@ class ImageViewer(QWidget):
     # ---- 原图选择（左侧「原图选择」工具 + 抠图面板共用的同一份选中状态）----
 
     @property
-    def source_borders_visible(self) -> bool:
-        """是否显示原图分块边框、并进入原图选择/拖动的手势模式。
+    def source_interaction(self) -> bool:
+        """原图选择/拖动的手势要不要接管鼠标。
 
-        工具开着就显示（**只有一张也显示** —— 单张时"选哪张"没意义，但"拖动移位"有意义，
+        工具开着就接管（**只有一张也接管** —— 单张时"选哪张"没意义，但"拖动移位"有意义，
         用户明确要求这个按钮不依赖有没有动作、也不依赖几张图）；抠图面板开着时只在多张时
-        显示（一张没什么可挑的，别多画一圈框）。
+        接管（一张没什么可挑的）。
         """
         rects = self.source_rects()
         if not rects:
             return False
         return bool(self._source_tool) or (bool(self._source_panel) and len(rects) > 1)
+
+    @property
+    def source_borders_visible(self) -> bool:
+        """要不要画原图分块框。
+
+        只有**多张**时才画：单张图没有"哪一张"可区分，画一圈框就是纯噪音 ——
+        用户会把它看成"多出来的一圈（灰）虚线框"，而且它沿图片外框画，图片有透明边距时
+        看着还和内容错开。
+        """
+        return self.source_interaction and len(self.source_rects()) > 1
 
     def selected_sources(self) -> list[int]:
         """当前选中的原图索引（升序）。"""

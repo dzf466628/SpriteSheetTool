@@ -107,7 +107,9 @@ def main() -> int:
     wait(150)
     check("只有一张原图也能开工具（用户要求：不依赖动作、也不依赖张数）",
           button.isChecked() and viewer._source_tool is True)
-    check("只有一张时也显示边框（拖它有意义）", viewer.source_borders_visible)
+    check("单张时不画分块框（没哪张可区分，画一圈就是纯噪音）",
+          viewer.source_borders_visible is False)
+    check("但手势照样接管（能拖、能框）", viewer.source_interaction is True)
     check("此时确实还没有任何动作（所以这条限制真的撤掉了）", win.actions == [])
     check("单张时它自动成为选中项", viewer.selected_sources() == [0],
           f"选中={viewer.selected_sources()}")
