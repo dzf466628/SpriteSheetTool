@@ -2013,6 +2013,8 @@ class MainWindow(QMainWindow):
         self.image_viewer.source_selection_changed.connect(self._on_source_selection_changed)
         self.image_viewer.source_move_started.connect(self._on_source_move_started)
         self.image_viewer.source_move_finished.connect(self._on_source_move_finished)
+        # 双击棋盘格加图片：与工具栏"添加图片"按钮同一个入口
+        self.image_viewer.add_image_requested.connect(self._open_image)
 
         # 左列：原图区 + 下方「动画设置」横条（整段动画参数）
         left_column = QWidget()

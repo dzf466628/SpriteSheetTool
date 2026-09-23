@@ -514,6 +514,20 @@ class _Canvas(QWidget):
             return
         super().keyReleaseEvent(event)
 
+    def mouseDoubleClickEvent(self, event):
+        """双击棋盘格（图外）= 添加图片，走主窗口同一个入口。
+
+        刻意不看「原图选择」工具开没开：棋盘格本来就没有别的用途，双击它加图是顺手操作。
+        图上双击则不抢（现在没有含义，留着以后用）。
+        """
+        if event.button() == Qt.MouseButton.LeftButton:
+            viewer = self._viewer
+            if not viewer.source_rects() or viewer.source_index_at(event.position()) < 0:
+                viewer.add_image_requested.emit()
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
     # ------------------------------------------------------------ 原图选择 / 拖动
     def _src_cursor(self, over_block: bool = False, band: bool = False, moving: bool = False):
         """PS「移动工具 + 自动选择」那套光标手感。
@@ -1326,6 +1340,8 @@ class ImageViewer(QWidget):
     # 主窗口据此不要说"已移动"，也别白做一次重裁）
     source_move_started = pyqtSignal()
     source_move_finished = pyqtSignal(bool)
+    # 双击棋盘格 = 添加图片（走主窗口同一个"添加图片"入口）
+    add_image_requested = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -2221,6 +2237,9 @@ class ImageViewer(QWidget):
 
     # 多张原图叠成一张大图时的间距（必须与 append_pixmap 里的 gap 是同一个数）
     SOURCE_GAP = 16
+    # 拖动移位时画布能长到多大：同宽的图横向本来没余量，允许长大才有"随意移动"；
+    # 再大也没意义（还容易把内存吃满），到顶就夹住
+    SOURCE_MOVE_MAX = 8192
 
     def source_rects(self) -> list[tuple[int, int, int, int]]:
         """每张原图在合成大图里的矩形 (x, y, w, h)。
@@ -2256,22 +2275,25 @@ class ImageViewer(QWidget):
         return offsets
 
     def move_sources(self, indices, dx: int, dy: int) -> bool:
-        """把选中的原图整体移动 (dx, dy) 像素：夹在画布内，里面的帧跟着一起走。
+        """把选中的原图整体移动 (dx, dy) 像素：里面的帧跟着一起走，画布按需长大。
 
-        画布尺寸**固定不变**（用户定的）：拖到边缘就停住，所以帧坐标基准、导出尺寸、
-        工程格式都不受影响。返回是否真的动了 —— 被夹住导致一点没动时返回 False，
-        调用方据此不收尾（快照自己会判等，不会白记一条撤销）。
+        为什么允许画布长大：多张**同宽**的图摞在一起时，画布宽度就等于图宽，横向一点余量
+        都没有，用户拖一下就会说"不能随意移动"。长大的只是**右下边界**，左上角原点不动，
+        所以帧坐标基准 / 导出 / 工程格式都不受影响（这正是当初"画布固定"想保住的东西）。
+        往左上仍以 (0,0) 为界：要越过原点就得把全部坐标整体重算一遍，不值得。
+        返回是否真的动了 —— 被夹住一点没动时返回 False，调用方据此不收尾（快照自己会判等，
+        不会白记一条撤销）。
         """
         rects = self.source_rects()
         moved = [int(i) for i in indices if 0 <= int(i) < len(rects)]
         if not moved or self._pixmap is None or self._pixmap.isNull():
             return False
         width, height = self._pixmap.width(), self._pixmap.height()
-        # 夹取按**整组**算：组里最靠边的块也得留在画布内，所以取各块允许范围的交集
+        # 夹取按**整组**算：组里最靠边的块也得守规矩，所以取各块允许范围的交集
         low_x = max(-rects[i][0] for i in moved)
-        high_x = min(width - (rects[i][0] + rects[i][2]) for i in moved)
+        high_x = min(self.SOURCE_MOVE_MAX - (rects[i][0] + rects[i][2]) for i in moved)
         low_y = max(-rects[i][1] for i in moved)
-        high_y = min(height - (rects[i][1] + rects[i][3]) for i in moved)
+        high_y = min(self.SOURCE_MOVE_MAX - (rects[i][1] + rects[i][3]) for i in moved)
         dx = max(low_x, min(high_x, int(dx)))
         dy = max(low_y, min(high_y, int(dy)))
         if dx == 0 and dy == 0:
@@ -2281,7 +2303,12 @@ class ImageViewer(QWidget):
             x, y = self._source_offsets[index]
             self._source_offsets[index] = (x + dx, y + dy)
         self._shift_frames_with(old_rects, dx, dy)
-        self._recompose_sources()
+        # 有块越过右下边界就把画布长到刚好装下。只长不缩：拖动中画布忽大忽小很晃眼，
+        # 留白本身也无害（导出用的是帧，不是这张工作图）
+        need_w, need_h = width, height
+        for x, y, w, h in self.source_rects():
+            need_w, need_h = max(need_w, x + w), max(need_h, y + h)
+        self._recompose_sources(QSize(need_w, need_h))
         self.canvas.update()
         self._update_rulers()
         return True
@@ -2304,11 +2331,15 @@ class ImageViewer(QWidget):
                         (frame[0] + dx, frame[1] + dy, frame[2], frame[3]))
                     break
 
-    def _recompose_sources(self) -> None:
-        """按当前偏移把各张原图重新拼成合成大图（尺寸不动，只换内容）。"""
+    def _recompose_sources(self, size: QSize | None = None) -> None:
+        """按当前偏移把各张原图重新拼成合成大图。
+
+        ``size`` 给了就按它新建（拖到右下边界外时画布要长大），不给就沿用当前尺寸。
+        """
         if self._pixmap is None or self._pixmap.isNull() or not self._source_images:
             return
-        combined = QPixmap(self._pixmap.size())
+        target = size if size is not None and size.isValid() else self._pixmap.size()
+        combined = QPixmap(target)
         combined.fill(Qt.GlobalColor.transparent)
         painter = QPainter(combined)
         for (x, y), pm in zip(self._source_offsets, self._source_images):

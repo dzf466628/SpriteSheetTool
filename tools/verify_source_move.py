@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PIL import Image
-from PyQt6.QtCore import QEvent, QPointF, Qt
+from PyQt6.QtCore import QEvent, QPointF, QSize, Qt
 from PyQt6.QtGui import QMouseEvent
 from PyQt6.QtWidgets import QApplication
 
@@ -131,17 +131,36 @@ def main() -> int:
           px(viewer._pixmap, 3, 66 + 2)[3] == 0, f"实际 {px(viewer._pixmap, 3, 66 + 2)}")
     check("第 1 块没被顺带挪动", px(viewer._pixmap, 30, 25) == SPRITE[0] + (255,))
 
-    print("---- 3. 夹取：不许拖出画布，拖不动就老实说没动 ----")
-    check("往右下猛拖 -> 夹在画布内",
-          viewer.move_sources([1], 999, 999) is True
-          and viewer._source_offsets[1] == (20, 132),
-          f"偏移={viewer._source_offsets[1]}")
-    check("第 3 块已经在最底部，再往下拖返回 False（一点没动）",
-          viewer.move_sources([2], 0, 10) is False)
-    check("第 1 块已经在左上角，再往左上拖返回 False",
+    print("---- 3. 夹取：左上以 (0,0) 为界，右下按需长大画布 ----")
+    viewer._source_offsets = list(OFFSETS0)          # 第 2 节挪过一块，先摆回原样
+    viewer._recompose_sources(QSize(80, 182))
+    check("移动前画布宽度=最宽的图（同宽的图横向一点余量都没有，这就是"
+          "\"不能随意移动\"的根因）",
+          (viewer._pixmap.width(), viewer._pixmap.height()) == (80, 182),
+          f"实际 {viewer._pixmap.width()}×{viewer._pixmap.height()}")
+    check("第 1 块已经在左上角，往左上拖返回 False（一点没动）",
           viewer.move_sources([0], -10, -10) is False)
+    check("往右下拖 -> 位置就是你要的那个数，不再撞墙",
+          viewer.move_sources([1], 30, 40) is True
+          and viewer._source_offsets[1] == (30, 106),
+          f"偏移={viewer._source_offsets[1]}")
+    check("画布长到装得下：宽 30+60=90（高不动，下面那块本来就占到底 182）",
+          (viewer._pixmap.width(), viewer._pixmap.height()) == (90, 182),
+          f"实际 {viewer._pixmap.width()}×{viewer._pixmap.height()}")
+    check("原点没动：第 1 块的偏移还是 (0,0)", viewer._source_offsets[0] == (0, 0))
+    check("内容也跟到新位置",
+          px(viewer._pixmap, 30 + 30, 106 + 25) == SPRITE[1] + (255,),
+          f"实际 {px(viewer._pixmap, 60, 131)}")
+    check("最下面那块往右下拖也得动（不是\"到底了就拖不动\"）",
+          viewer.move_sources([2], 5, 6) is True
+          and viewer._source_offsets[2] == (5, 138),
+          f"偏移={viewer._source_offsets[2]}")
+    check("拖到 8192 上限才夹住（不会无限长大）",
+          viewer.move_sources([1], 99999, 0) is True
+          and viewer._source_offsets[1][0] == 8192 - 60,
+          f"偏移={viewer._source_offsets[1]}")
     viewer._source_offsets = list(OFFSETS0)
-    viewer._recompose_sources()
+    viewer._recompose_sources(QSize(80, 182))       # 收回原尺寸，后面还要按原几何核对
     viewer.canvas.update()
 
     print("---- 4. 帧跟着原图走，别的块里的帧不动 ----")
@@ -260,12 +279,29 @@ def main() -> int:
         QEvent.Type.MouseButtonRelease, end, end, Qt.MouseButton.LeftButton,
         Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
     wait(400)
-    # 单张原图时画布**就等于**这张图，没有余量可挪：夹取应当老实地把它留在原地
-    check("单张时画布与图同尺寸，拖动被正确夹住（无余量可移）",
-          v2._source_offsets == [(0, 0)], f"偏移={v2._source_offsets}")
-    check("也没白记一条撤销（夹住=一点没动）",
-          "已移动原图" not in win2.lbl_status.text(),
+    check("单张原图、无动作也能拖动移位（用户明确要求）",
+          v2._source_offsets == [(12, 9)], f"偏移={v2._source_offsets}")
+    check("画布跟着长到 80+12 × 50+9",
+          (v2._pixmap.width(), v2._pixmap.height()) == (92, 59),
+          f"实际 {v2._pixmap.width()}×{v2._pixmap.height()}")
+    check("状态栏如实报告", "已移动原图" in win2.lbl_status.text(),
           f"状态栏={win2.lbl_status.text()!r}")
+
+    print("---- 10. 双击棋盘格 = 添加图片 ----")
+    # 别真弹模态文件对话框把测试卡死：先摘掉主窗口那头的连接
+    viewer.add_image_requested.disconnect(win._open_image)
+    hits: list[int] = []
+    viewer.add_image_requested.connect(lambda: hits.append(1))
+    checker = canvas_point(SIZES[0][0] + 30, 10)     # 图右侧的棋盘格
+    inside = canvas_point(30, 25)                   # 图里面
+    for pt, label in ((checker, "棋盘格"), (inside, "图上")):
+        canvas.mouseDoubleClickEvent(QMouseEvent(
+            QEvent.Type.MouseButtonDblClick, pt, pt, Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        app.processEvents()
+    check("双击棋盘格发出添加图片请求", len(hits) == 1, f"次数={len(hits)}")
+    check("双击图上不抢（现在没有含义，留着以后用）", len(hits) == 1,
+          f"次数={len(hits)}")
 
     win2.close()
     win.close()
