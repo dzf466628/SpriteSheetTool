@@ -726,10 +726,17 @@ class _Canvas(QWidget):
                     if ctrl or self._viewer.compose_mode:
                         if ctrl:
                             self._viewer.begin_ctrl_composition()
-                        self._viewer.add_to_composite(idx)
-                        # 这里**不能**再追加一份（试过 reuse_frame_at）：锚点元素属于上一帧时，
-                        # 会把**上一帧**整个复制一遍 —— 用户原话"第一帧已经松手了，选完第二帧
-                        # 第一帧又补上了"。Alt+Ctrl 一轮就是一帧，不额外追加。
+                        if (ctrl and alt and idx in self._viewer.current_action.selected_indices):
+                            # Alt+Ctrl 按住期间"选中的就是这一帧"：再点已选中的 = 从这一帧移出
+                            # （用户明确要求）。所以这条组合键用普通点击的 toggle 规则，
+                            # 而不是 add_to_composite 的"只加不减"。
+                            self._viewer.current_action.selected_indices.remove(idx)
+                            active = self._viewer._active_composite_group
+                            if active and idx in active:
+                                active.remove(idx)
+                            self._viewer._normalize_composite_groups()
+                        else:
+                            self._viewer.add_to_composite(idx)
                     elif alt or self._viewer.reuse_mode:
                         if idx in self._viewer.current_action.selected_indices:
                             if alt:
