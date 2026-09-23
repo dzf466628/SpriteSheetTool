@@ -726,6 +726,9 @@ class _Canvas(QWidget):
                     if ctrl or self._viewer.compose_mode:
                         if ctrl:
                             self._viewer.begin_ctrl_composition()
+                        if ctrl and alt:
+                            # 每轮 Alt+Ctrl 自成一帧：起手先封掉上一轮（第一帧不再被动）
+                            self._viewer.seal_alt_ctrl_round()
                         if (ctrl and alt and idx in self._viewer.current_action.selected_indices):
                             # Alt+Ctrl 按住期间"选中的就是这一帧"：再点已选中的 = 从这一帧移出
                             # （用户明确要求）。所以这条组合键用普通点击的 toggle 规则，
@@ -769,6 +772,9 @@ class _Canvas(QWidget):
                     if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
                         # Ctrl+框选：激活合成模式，将框选的所有元素合成为一帧
                         self._viewer.begin_ctrl_composition()
+                        if event.modifiers() & Qt.KeyboardModifier.AltModifier:
+                            # Alt+Ctrl+框选同样"一轮一帧"：先封上一轮，别再碰上一帧
+                            self._viewer.seal_alt_ctrl_round()
                         for idx in indices:
                             self._viewer.add_to_composite(idx)
                         # 同上：不在这里追加复用（会复制到"上一帧"上）
@@ -1702,6 +1708,20 @@ class ImageViewer(QWidget):
             action.composite_groups.append(self._active_composite_group)
         if idx not in self._active_composite_group:
             self._active_composite_group.append(idx)
+
+    def seal_alt_ctrl_round(self) -> None:
+        """Alt+Ctrl 组合键：**每一轮自成一帧**，封掉之后绝不再被追加。
+
+        为什么必须在"点击起手"封，而不是等按键松开：松开时是否走到
+        ``end_ctrl_composition()`` 取决于原生按键监听，Alt+Ctrl 这种组合未必触发；
+        一旦没触发，``_active_composite_group`` 还挂着，下一次点击就会继续往
+        **上一帧那一组**里塞 —— 用户的原话："松开再点击就不要动第一帧了，就变第二帧了啊"。
+        这里不看按键时序，只在每次起手把上一组摘掉（组本身仍留在 composite_groups 里，
+        所以第一帧的内容一个字节都不会变），下一次 add_to_composite 自然另起一组 = 新的一帧。
+
+        只服务 Alt+Ctrl 这条路径，单 Ctrl / 单 Alt 的行为不受影响。
+        """
+        self._active_composite_group = None
 
     def _normalize_composite_groups(self) -> None:
         if not self.current_action:
