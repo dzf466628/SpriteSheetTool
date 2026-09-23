@@ -117,7 +117,10 @@ def main() -> int:
     check("自动猜色猜的是第 1 块的底色", panel._bg_color == BG[0], f"实际 {panel._bg_color}")
 
     before_no_mode = canvas.grab().toImage()
-    viewer._source_panel = False
+    # 隔离"面板那一路"：两个开关都关掉取基线，再只把面板打开 —— 否则工具本身没动作时
+    # 是**默认开着**的（用户要求），两边的框一样，差异点会是 0，测不出东西
+    _keep_tool, _keep_panel = viewer._source_tool, viewer._source_panel
+    viewer._source_tool, viewer._source_panel = False, False
     canvas.update()
     for _ in range(4):
         app.processEvents()
@@ -127,6 +130,8 @@ def main() -> int:
     for _ in range(4):
         app.processEvents()
     with_mode = canvas.grab().toImage()
+    viewer._source_tool, viewer._source_panel = _keep_tool, _keep_panel
+    canvas.update()
     diff = sum(1 for y in range(0, min(without.height(), with_mode.height()), 3)
                for x in range(0, min(without.width(), with_mode.width()), 3)
                if without.pixel(x, y) != with_mode.pixel(x, y))
@@ -161,8 +166,8 @@ def main() -> int:
     check("取消后预览被清掉、浮层隐藏",
           viewer._preview_pixmap is None and not panel.isVisible())
     check("取消后按钮弹起", not viewer._v_toolbar.btn_key.isChecked())
-    check("取消后分块显示关掉",
-          viewer._source_panel is False and not viewer.source_borders_visible)
+    check("取消后抠图那一路的钩子全清掉（取色目标/分块显示标记）",
+          viewer._source_panel is False and viewer._pick_target is None)
     check("取消后选中项保留（选中是选择工具的状态，面板只是借用）",
           viewer.selected_sources() == [1], f"选中={viewer.selected_sources()}")
     check("取消后原图身份没变", viewer._pixmap is baked)
@@ -187,8 +192,8 @@ def main() -> int:
     check("应用后原图换成抠好的图", viewer._pixmap is not baked)
     check("应用后三张底色全透明",
           all(px(viewer._pixmap, 5, rects[i][1] + 5)[3] == 0 for i in range(3)))
-    check("应用后分块显示关掉",
-          viewer._source_panel is False and not viewer.source_borders_visible)
+    check("应用后抠图那一路的钩子全清掉",
+          viewer._source_panel is False and viewer._pick_target is None)
     check("应用后没留下预览", viewer._preview_pixmap is None)
     index_before = win._undo_stack.index()
     win._do_undo()

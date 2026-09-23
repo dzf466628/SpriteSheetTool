@@ -105,7 +105,9 @@ def main() -> int:
     wait(400)
     button.setChecked(True)
     wait(150)
-    check("只有一张原图也能开工具（用户要求：不依赖动作、也不依赖张数）",
+    check("没有动作时默认就把工具打开了（用户要求：没有动作时默认原图拖动）",
+          button.isChecked() and viewer._source_tool is True)
+    check("只有一张原图也能开工具（不依赖动作、也不依赖张数）",
           button.isChecked() and viewer._source_tool is True)
     check("单张时不画分块框（没哪张可区分，画一圈就是纯噪音）",
           viewer.source_borders_visible is False)
@@ -318,6 +320,7 @@ def main() -> int:
     check("预览清掉", viewer._preview_pixmap is None)
     check("选中项保留", viewer.selected_sources() == [1], f"选中={viewer.selected_sources()}")
 
+    win.image_viewer.shutdown()       # 显式收尾（幂等）：真机上偶发的退出时崩溃要靠它
     win.close()
     print(f"\nSOURCE SELECT VERIFY {'OK' if not failed else 'FAILED'}  {passed} 通过 / {failed} 失败")
     return 1 if failed else 0

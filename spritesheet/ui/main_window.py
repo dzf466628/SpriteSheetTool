@@ -3252,6 +3252,11 @@ class MainWindow(QMainWindow):
         self.btn_add_action.setText("+ 添加动作")
         source_count = len(self.image_viewer._source_images)
         verb = "已加载" if source_count == 1 else "已添加"
+        # 还没有动作时**默认打开「原图选择 / 移动」**（用户要求）：这种时候画布上能拖的
+        # 只有原图 —— 框选元素没有地方存（selected_indices 属于动作），点了只会提示
+        # "请先添加动作"。先切按钮再写状态栏，免得加载提示被工具提示盖掉。
+        if source_count == 1 and not self.actions:
+            self.image_viewer._v_toolbar.btn_source.setChecked(True)
         self.lbl_status.setText(
             f"{verb}第 {source_count} 张原图：{pm.width()}×{pm.height()}，"
             f"当前共检测到 {len(self.image_viewer._frames)} 个元素"
@@ -3315,6 +3320,10 @@ class MainWindow(QMainWindow):
         # 新建动作直接进入重命名状态
         card.start_rename()
         self.lbl_status.setText(f"已添加动作「{name}」，共 {len(action.frames)} 帧")
+        # 有动作了：把"没有动作时默认打开的原图拖动"退回去，画布拖动回到它的主要用途
+        # —— 框选元素。只在这个"从无到有"的节点上切一次，用户中途手动切的照样算数。
+        if len(self.actions) == 1 and self.image_viewer._v_toolbar.btn_source.isChecked():
+            self.image_viewer._v_toolbar.btn_source.setChecked(False)
         self._push_snapshot_done()
         self._history_panel.rebuild()
 

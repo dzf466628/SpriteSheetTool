@@ -578,6 +578,8 @@ class _Canvas(QWidget):
             # 所以不能在按下之后才把它选上来再拖
             if index >= 0 and selected and viewer._source_tool:
                 self._src_moving = True
+                # 归属一次定死：拖动中几何一直在变，靠"当前重叠"重判会把邻居的元素框带走
+                viewer.begin_source_move(viewer.selected_sources())
                 viewer.source_move_started.emit()
         if self._src_moving:
             last = self._src_last or pos
@@ -621,6 +623,7 @@ class _Canvas(QWidget):
             elif not additive:
                 viewer.set_selected_sources([])
         elif moving:
+            viewer.end_source_move()
             viewer.source_move_finished.emit(applied)
         elif additive:
             viewer.toggle_source_selection(index, True)
@@ -631,6 +634,13 @@ class _Canvas(QWidget):
 
     def mousePressEvent(self, event):
         self.setFocus(Qt.FocusReason.MouseFocusReason)
+        # 空格平移**永远优先**：用户按住空格就是想挪画布，任何模式都不该抢这一下
+        # （原图选择模式特别需要：挪完再挑图、再拖）
+        if self._panning and event.button() == Qt.MouseButton.LeftButton:
+            self._pan_start = event.position() - self._viewer._offset
+            self._viewer.canvas_pressed.emit()
+            event.accept()
+            return
         # 吸管模式（抠图面板开着时）：这一下只用来取色，绝不能走进框选/加图逻辑。
         # 坐标换算与 _frame_at_point 用的是同一套：图坐标 = (画布坐标 - 偏移) / 缩放。
         pick = getattr(self._viewer, "_pick_target", None)
@@ -652,9 +662,6 @@ class _Canvas(QWidget):
         if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton,
                               Qt.MouseButton.MiddleButton):
             self._viewer.canvas_pressed.emit()
-        if self._panning and event.button() == Qt.MouseButton.LeftButton:
-            self._pan_start = event.position() - self._viewer._offset
-            return
         if event.button() == Qt.MouseButton.LeftButton and self._viewer._pixmap:
             if not self._viewer.current_action:
                 # 有图但还没有动作：框选出来的帧没有地方存（selected_indices 属于动作），
@@ -669,12 +676,7 @@ class _Canvas(QWidget):
             self._open_file_dialog()
 
     def mouseMoveEvent(self, event):
-        if self._src_press is not None:
-            self._src_drag(event)
-            return
-        if self._viewer._source_tool:
-            # 悬停反馈：图上是"可移动"光标、棋盘格上回到普通箭头（PS 移动工具那套手感）
-            self._src_cursor(self._viewer.source_index_at(event.position()) >= 0)
+        # 空格平移优先（与按下时的判定一致），否则"空格拖着拖着变成拖图/框选"了
         if self._panning and self._pan_start is not None:
             self._viewer._offset = event.position() - self._pan_start
             self._viewer._update_rulers()
@@ -683,17 +685,20 @@ class _Canvas(QWidget):
         if self._src_press is not None:
             self._src_drag(event)
             return
+        if self._viewer._source_tool:
+            # 悬停反馈：图上是"可移动"光标、棋盘格上回到普通箭头（PS 移动工具那套手感）
+            self._src_cursor(self._viewer.source_index_at(event.position()) >= 0)
         if self._drag_start is not None:
             self._selection_rect = QRectF(self._drag_start, event.position()).normalized()
             self.update()
 
     def mouseReleaseEvent(self, event):
+        if self._panning:
+            self._pan_start = None
+            return
         if self._src_press is not None:
             self._src_end(event)
             event.accept()
-            return
-        if self._panning:
-            self._pan_start = None
             return
         if self._drag_start is not None and self._selection_rect is not None:
             rect = self._selection_rect
@@ -1399,6 +1404,11 @@ class ImageViewer(QWidget):
         # _apply_pending_detect_shifts：不补的话新元素会落在拖动前的位置上）
         self._detect_inflight = False
         self._pending_detect_shifts: list = []
+        # 正在被检测的那张原图的下标（-1 = 整张画布重检）：检测期间拖动时，只有拖的是
+        # 这张图才需要给结果补位移
+        self._detect_owner_index = -1
+        # 拖动开始时定下的"搬哪些帧"（见 begin_source_move）
+        self._move_frame_owner: set | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -1521,7 +1531,8 @@ class ImageViewer(QWidget):
         self._source_offsets.append((0, y_offset))
         # 旧元素可立即继续显示；新增图片的元素由后台线程补充。
         self._frames = old_frames
-        self._start_frame_detection(pm.toImage(), base_frames=old_frames, y_offset=y_offset)
+        self._start_frame_detection(pm.toImage(), base_frames=old_frames, y_offset=y_offset,
+                                   owner_index=len(self._source_images) - 1)
         self.fit_view()
         self.canvas.update()
         self._update_rulers()
@@ -1529,14 +1540,20 @@ class ImageViewer(QWidget):
         return True
 
     def _start_frame_detection(
-        self, image: QImage, base_frames: list[tuple[int, int, int, int]], y_offset: int
+        self, image: QImage, base_frames: list[tuple[int, int, int, int]], y_offset: int,
+        owner_index: int = -1,
     ) -> None:
-        """异步检测元素，避免大图 flood fill 阻塞 UI 线程。"""
+        """异步检测元素，避免大图 flood fill 阻塞 UI 线程。
+
+        ``owner_index`` = 这次检测的是第几张原图（-1 = 整张画布重检，如抠图后重检）：
+        检测期间用户拖了那张图时，结果要按它的位移补正（见 _apply_pending_detect_shifts）。
+        """
         self._detect_generation += 1
         generation = self._detect_generation
         # 新一轮检测的基准就是**当前**的帧列表，所以之前攒下的位移补偿清空
         self._pending_detect_shifts = []
         self._detect_inflight = True
+        self._detect_owner_index = owner_index
         from spritesheet.settings import detect_min_area
         thread = _FrameDetectThread(image.copy(), min_area=detect_min_area(), parent=self)
         self._detect_thread = thread
@@ -2312,14 +2329,15 @@ class ImageViewer(QWidget):
         if dx == 0 and dy == 0:
             return False
         old_rects = [(i, rects[i]) for i in moved]
-        if self._detect_inflight:
-            # 后台检测还在跑：它算的是拖动前的位置，这次位移记下来，结果回来时补给
-            # 那批新元素（否则它们就"留在原处、跟内容错开"）
+        if self._detect_inflight and (self._detect_owner_index < 0
+                                      or self._detect_owner_index in moved):
+            # 后台检测还在跑，而且被拖的正是它正在检测的那张图：它算的是拖动前的位置，
+            # 这次位移记下来，结果回来时补给那批新元素（否则它们就"留在原处、跟内容错开"）
             self._pending_detect_shifts.append((old_rects, dx, dy))
         for index in moved:
             x, y = self._source_offsets[index]
             self._source_offsets[index] = (x + dx, y + dy)
-        self._shift_frames_with(old_rects, dx, dy)
+        self._shift_frames_with(old_rects, dx, dy, owner=self._move_frame_owner)
         # 有块越过右下边界就把画布长到刚好装下。只长不缩：拖动中画布忽大忽小很晃眼，
         # 留白本身也无害（导出用的是帧，不是这张工作图）
         need_w, need_h = width, height
@@ -2370,22 +2388,60 @@ class ImageViewer(QWidget):
         pending = self._pending_detect_shifts
         if pending:
             self._pending_detect_shifts = []
+            whole_canvas = self._detect_owner_index < 0
             for old_rects, mdx, mdy in pending:
-                rects = self._shift_rects(rects, old_rects, mdx, mdy)
+                if whole_canvas:
+                    # 整张画布重检：结果里混着所有图的元素，只能按几何判（旧矩形 = 拖动前的位置）
+                    rects = self._shift_rects(rects, old_rects, mdx, mdy)
+                else:
+                    # 这批元素**全来自正在被检测的那张图**，被拖的也是它 → 整批一起搬。
+                    # 不按几何判：几何判会在"扫过邻居"时误伤邻居的元素（用户报过这个）
+                    rects = [(x + mdx, y + mdy, w, h) for x, y, w, h in rects]
         return rects
 
-    def _shift_frames_with(self, old_rects: list, dx: int, dy: int) -> None:
+    def begin_source_move(self, indices) -> None:
+        """拖动开始：把"哪些帧属于这几张图"一次定死。
+
+        为什么必须定死：拖动中几何一直在变，如果每次都按"当前几何重叠"重新判，被拖的图
+        **扫过邻居时邻居的元素框会被一起带走** —— 用户看到的就是"拖动时路过另一张图，
+        就带走了另一张图那么大的一圈灰色虚线"（邻居整张图算一个元素时，那圈正好和图一样大）。
+        归属只在拖动开始时算一次，之后整场就只搬这一批。
+        """
+        rects = self.source_rects()
+        pairs = [(int(i), rects[int(i)]) for i in indices if 0 <= int(i) < len(rects)]
+        if not pairs:
+            self._move_frame_owner = None
+            return
+        self._move_frame_owner = {
+            pos for pos, frame in enumerate(self._frames)
+            if self._belongs_to_moved(frame, pairs)
+        }
+
+    def end_source_move(self) -> None:
+        """拖动结束：清掉定死的归属，下次拖动重新算。"""
+        self._move_frame_owner = None
+
+    def _shift_frames_with(self, old_rects: list, dx: int, dy: int,
+                           owner: set | None = None) -> None:
         """把落在被移动块里的帧按同一位移搬走（内容与框始终粘在一起）。
 
-        这里只改几何；每个动作缓存的帧图/变换由主窗口在**拖动结束**时统一重算 ——
-        拖动过程中每次鼠标移动都重裁一遍所有动作的帧，帧一多就会卡。
+        ``owner`` 就是"拖动开始定下的那一批帧索引"（``begin_source_move``）；不给时按当前
+        几何判一次（脚本/测试直接调 API 的情况）。这里只改几何；每个动作缓存的帧图/变换
+        由主窗口在**拖动结束**时统一重算 —— 拖动中每次鼠标移动都重裁一遍会明显卡顿。
+
         注意是**原地改元素**而不是换一个新列表：检测结果落地时要在这个列表上追加，
-        换新列表会让"检测期间拖动"的补偿算漏（老代码就踩过这个）。
+        换新列表会切断那份引用（老代码踩过这个）。
         """
         if not self._frames or (dx == 0 and dy == 0):
             return
-        for pos, rect in enumerate(self._shift_rects(self._frames, old_rects, dx, dy)):
-            self._frames[pos] = type(self._frames[pos])(rect)
+        if owner is None:
+            owner = {pos for pos, frame in enumerate(self._frames)
+                     if self._belongs_to_moved(frame, old_rects)}
+        for pos in owner:
+            if not 0 <= pos < len(self._frames):
+                continue
+            frame = self._frames[pos]
+            self._frames[pos] = type(frame)((frame[0] + dx, frame[1] + dy, frame[2], frame[3]))
 
     def _recompose_sources(self, size: QSize | None = None) -> None:
         """按当前偏移把各张原图重新拼成合成大图。

@@ -97,6 +97,14 @@ def main() -> int:
     print()
     print("=== 1. 点原图画布 → 提示 ===")
     check("初始没有提示", not canvas._toast.active(), canvas._toast.text())
+    # 没有动作时「原图选择 / 移动」默认就是开的（用户要求）：此时画布拖动是"拖原图"，
+    # 不会弹提示。要测"没有动作就提示"这条老路径，得先把那个默认模式关掉（用户手动关的
+    # 情况），提示逻辑本身必须还在。
+    check("没有动作时「原图选择 / 移动」默认已打开",
+          win.image_viewer._v_toolbar.btn_source.isChecked())
+    win.image_viewer._v_toolbar.btn_source.setChecked(False)
+    app.processEvents()
+    check("关掉后原图手势不再接管画布", win.image_viewer.source_interaction is False)
     before = bottom_pixels(canvas)
     click_center(canvas)
     app.processEvents()

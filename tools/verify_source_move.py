@@ -176,6 +176,10 @@ def main() -> int:
     win._on_add_action_clicked()
     wait(300)
     check("动作建出来了", len(win.actions) == 1, f"动作数={len(win.actions)}")
+    check("有了动作之后，原图拖动自动退回（画布拖动回到'框选元素'这个主用途）",
+          viewer._source_tool is False)
+    win._on_source_tool_toggled(True)       # 本节要测拖动，把工具再打开
+    wait(150)
     action = win.actions[0]
     # 帧要"属于这个动作"才会被裁进 frame_rects（_frames 只是检测出来的候选）
     action.selected_indices = [0, 1]
@@ -278,6 +282,51 @@ def main() -> int:
     viewer._source_offsets = list(OFFSETS0)
     viewer._recompose_sources(QSize(80, 182))
 
+    print("---- 12. 拖动扫过邻居：不能把邻居的元素框一起带走 ----")
+    # 用户原话："拖动的时候如果路过另一张图，就会带走另一个图大小的灰色虚线"。
+    # 根因是归属按"当前几何重叠"逐次重判：被拖的图扫过邻居时，邻居的框被算成自己的。
+    viewer._source_offsets = list(OFFSETS0)
+    viewer._recompose_sources(QSize(80, 182))
+    viewer._frames = [(20, 15, 21, 21), (20, 81, 21, 21), (20, 147, 21, 21)]
+    before = [tuple(f) for f in viewer._frames]
+    viewer.set_selected_sources([0])
+    viewer.begin_source_move([0])            # 拖动开始：归属一次定死
+    for _ in range(12):                      # 逐次小步往下拖，模拟真实拖动扫过第 2 块
+        viewer.move_sources([0], 0, 5)
+    check("只有第 1 块里的框跟着走",
+          tuple(viewer._frames[0]) == (20, before[0][1] + 60, 21, 21),
+          f"实际 {tuple(viewer._frames[0])}")
+    check("被扫过的第 2 块的框一动不动",
+          tuple(viewer._frames[1]) == before[1], f"实际 {tuple(viewer._frames[1])}")
+    check("第 3 块的框也一动不动", tuple(viewer._frames[2]) == before[2])
+    viewer.end_source_move()
+    check("拖动结束后归属清掉（下次拖动重新算）", viewer._move_frame_owner is None)
+    check("没有定死归属时（脚本直接调 API）仍按几何判一次",
+          viewer._belongs_to_moved((30, 100, 10, 10), [(1, (0, 66, 60, 50))]) is True)
+
+    print("---- 13. 空格平移优先：原图选择模式下也不抢这一下 ----")
+    viewer._source_offsets = list(OFFSETS0)
+    viewer._recompose_sources(QSize(80, 182))
+    viewer.set_source_tool(True)
+    viewer.set_selected_sources([0])
+    canvas._panning = True                   # 等价于"空格按住"
+    before_offset = QPointF(viewer._offset)
+    start, end = canvas_point(30, 25), canvas_point(120, 70)
+    canvas.mousePressEvent(QMouseEvent(
+        QEvent.Type.MouseButtonPress, start, start, Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+    check("空格按住时原图手势不接管（否则空格就没法平移了）", canvas._src_press is None)
+    canvas.mouseMoveEvent(QMouseEvent(
+        QEvent.Type.MouseMove, end, end, Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+    check("画布跟着平移了", viewer._offset != before_offset,
+          f"偏移 {before_offset} -> {viewer._offset}")
+    canvas.mouseReleaseEvent(QMouseEvent(
+        QEvent.Type.MouseButtonRelease, end, end, Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+    check("松开后平移状态清掉", canvas._pan_start is None)
+    canvas._panning = False
+
     print("---- 9. 只有一张原图、没有动作时，工具照样能用 ----")
     win2 = MainWindow()
     win2.resize(1200, 800)
@@ -332,7 +381,9 @@ def main() -> int:
     check("双击图上不抢（现在没有含义，留着以后用）", len(hits) == 1,
           f"次数={len(hits)}")
 
+    win2.image_viewer.shutdown()      # 显式收尾（幂等）：真机上偶发的退出时崩溃要靠它
     win2.close()
+    win.image_viewer.shutdown()
     win.close()
     print(f"\nSOURCE MOVE VERIFY {'OK' if not failed else 'FAILED'}  {passed} 通过 / {failed} 失败")
     return 1 if failed else 0
