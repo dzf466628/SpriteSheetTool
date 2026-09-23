@@ -225,7 +225,7 @@ git push
 
 | 文件 | 行数 | 说明 |
 |---|---|---|
-| `spritesheet/ui/main_window.py` | 3472 行 | 主窗口逻辑（+ 多标签文档 / 撤销命令） |
+| `spritesheet/ui/main_window.py` | 3485 行 | 主窗口逻辑（+ 多标签文档 / 撤销命令） |
 | `spritesheet/ui/preview.py` | 3045 行 | 画布渲染核心，拆分风险高 |
 | `spritesheet/ui/image_viewer.py` | 2196 行 | 原图区：元素检测 + 帧复用 + 标尺画布 + 左右两条浮动工具条 + 原图分块 |
 | `spritesheet/ui/widgets.py` | 1478 行 | 自定义控件集合 |

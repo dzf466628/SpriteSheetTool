@@ -86,10 +86,11 @@
   上面那条"快照存引用"也要求不能反复替换 `_pixmap`。
 - 抠背景属**工程级**操作 → `_push_snapshot(..., current_only=False)`；抠完调
   `action.invalidate_transforms()` 并走 `_on_frames_updated()`，否则动作卡里还是旧帧。
-- **`current_only=False` 落在全局栈，而 Ctrl+Z 走 `_active_stack()`** —— 选中动作时它指向
-  动作自己的栈，所以这种全局操作**那时 Ctrl+Z 够不到**（"添加原图"同样是这个行为，
-  属既有约定，本轮没动它）。抠图应用后若当前有动作，状态栏会提示"按 Ctrl+H 从全局历史回退"。
-  要统一得改 `_active_stack()` 的兜底逻辑，那是单独一件事、会影响所有既有全局操作。
+- **撤销取用顺序（2026-09-23 已统一）**：`_do_undo` 以前只认 `_active_stack()` —— 选中动作时
+  它指向动作自己的栈，于是抠除背景 / 添加原图这类记在**全局栈**的工程级操作
+  "按 Ctrl+Z 完全没反应"。现在改成：**动作栈优先，撤空了才落到全局栈**（重做同规）。
+  注意这**不是**"按时间交错"——是分栈优先，所以动作栈里还有记录时会先撤动作内的；
+  回归见 `tools/verify_undo_route.py`（21 项断言）。
 - **`QUndoStack` 的 `undo()` 只减 `index()`，不减 `count()`**（命令要留着给重做用）。
   验证撤销时看 `index()`，看 `count()` 会得出"撤销不生效"的错误结论（本轮探针踩过一次）。
 - **有动作时不要重新检测元素**：重检会重建 `_frames`，用户排好的帧（`frame_rects`/
@@ -113,3 +114,7 @@
 - `tools/verify_single_instance.py` **失败时会留下跑着 `main.py` 的孤儿进程**，
   它们占着单实例管道，会让后续同类测试"发出去但收不到"。遇到就查
   `Get-CimInstance Win32_Process` 并按命令行确认后清掉。
+  **2026-09-23 补充**：单实例管道是**全机共享**的 —— 桌面上那份副本
+  （`C:\Users\dudu\Desktop\SpriteSheetTool\SpriteSheetTool\main.py`）一跑起来同样会抢走
+  转发请求，症状一模一样。所以排查时一定要看命令行里跑的是**哪一份代码**：
+  桌面副本与 `D:\SpriteSheetTool\SpriteSheetTool.exe` 都是旧版本，本身也不含左侧竖条。

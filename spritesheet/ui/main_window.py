@@ -949,15 +949,28 @@ class MainWindow(QMainWindow):
         return self._undo_stack
 
     def _do_undo(self) -> None:
-        # 全局历史只展示不撤回，避免破坏多动作结构
+        """撤销：优先当前动作的栈，动作栈撤不动了再落到全局栈。
+
+        为什么要有"落到全局栈"这一步：抠除背景、添加原图这类**工程级**操作用
+        ``_push_snapshot(..., current_only=False)`` 记在全局栈里，而以前这里只认
+        ``_active_stack()`` —— 选中动作时它指向动作自己的栈，于是按 Ctrl+Z 会出现
+        "点了完全没反应"（全局记录明明在，却够不到）。现在动作内操作先撤，
+        撤完了才落到全局；顺序约定写进 NEXT.md。
+        """
         stack = self._active_stack()
         if stack.canUndo():
             stack.undo()
+            return
+        if stack is not self._undo_stack and self._undo_stack.canUndo():
+            self._undo_stack.undo()
 
     def _do_redo(self) -> None:
         stack = self._active_stack()
         if stack.canRedo():
             stack.redo()
+            return
+        if stack is not self._undo_stack and self._undo_stack.canRedo():
+            self._undo_stack.redo()
 
     def _capture_snapshot(self, current_only: bool = True, focus_action: Action | None = None) -> dict:
         """纯数据快照：不编码任何 PNG。
@@ -2476,10 +2489,10 @@ class MainWindow(QMainWindow):
             f"已抠除背景：清掉 {stats.get('changed_pct', 0.0):.1f}% 的像素，"
             f"内容占比 {stats.get('content_before_pct', 0.0):.1f}% → "
             f"{stats.get('content_after_pct', 0.0):.1f}%"
-            # 抠图是全局操作，记在全局栈（与"添加原图"同一套）；而 Ctrl+Z 走的是
-            # _active_stack()，选中动作时指向动作自己的栈 —— 所以这种时候 Ctrl+Z 够不到它，
-            # 得从全局历史回退。这里明确说一声，免得用户以为点了个没反应的操作。
-            + ("（已记入全局历史，按 Ctrl+H 可回退）"
+            # 抠图是全局操作，记在全局栈（与"添加原图"同一套）。Ctrl+Z 会**先撤动作内
+            # 的操作**，动作栈撤空了才轮到它 —— 所以选中动作时这里说清回退入口，
+            # 免得用户以为点了个没反应的操作。
+            + ("（已记入全局历史：Ctrl+Z 会先撤动作内的操作，Ctrl+H 可直达这一条）"
                if viewer.current_action is not None else "")
         )
 
