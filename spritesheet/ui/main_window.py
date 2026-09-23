@@ -40,6 +40,7 @@ from spritesheet.updater import UPDATE_URL, UpdateCheckThread, UpdateDownloadThr
 
 from .anim_settings import AnimSettingsBar
 from .image_viewer import SUPPORTED_IMAGE_EXT, ImageViewer
+from .key_panel import KeyPanel
 from .models import Action, MACARON_COLORS
 from .preview import ActionPreviewWidget
 from .settings_dialog import SettingsDialog
@@ -1971,6 +1972,12 @@ class MainWindow(QMainWindow):
         # 只用原图这一个入口，**不用 app 级事件过滤器** —— 全局过滤器会误伤预览画布上的
         # 手柄点击（悬浮动画正常、一点击就退出），这个坑踩过一次就不再来第二次。
         self.image_viewer.canvas_pressed.connect(self._exit_preview_transform)
+        # 左侧竖条工具条的撤销/重做按钮：与菜单、Ctrl+Z/Ctrl+Y 走同一套处理
+        # （_do_undo/_do_redo 内部用 _active_stack()，栈空时安全地什么都不做）
+        self.image_viewer.undo_requested.connect(self._do_undo)
+        self.image_viewer.redo_requested.connect(self._do_redo)
+        # 左侧竖条「抠除背景」：打开参数浮层（点第二下等于关掉/取消）
+        self.image_viewer.key_requested.connect(self._open_key_panel)
 
         # 左列：原图区 + 下方「动画设置」横条（整段动画参数）
         left_column = QWidget()
@@ -2392,6 +2399,90 @@ class MainWindow(QMainWindow):
             card.raise_()
         self._sync_history_button()
 
+    # ---------------------------------------------------------------- 抠除背景
+
+    def _open_key_panel(self) -> None:
+        """左侧竖条「抠除背景」：打开参数浮层（预览不动原图，点"应用"才落地）。"""
+        viewer = self.image_viewer
+        button = viewer._v_toolbar.btn_key
+        if not button.isChecked():
+            self._close_key_panel()          # 再点一下按钮 = 关掉（等于取消）
+            return
+        if viewer._pixmap is None or viewer._pixmap.isNull():
+            button.setChecked(False)
+            self.lbl_status.setText("先添加图片，再抠背景")
+            return
+        panel = getattr(self, "_key_panel", None)
+        if panel is None:
+            panel = KeyPanel(viewer, viewer.canvas)
+            panel.applied.connect(self._apply_key_panel)
+            panel.cancelled.connect(self._close_key_panel)
+            panel.pick_mode_changed.connect(self._on_key_pick_mode)
+            self._key_panel = panel
+        panel.start()
+
+    def _close_key_panel(self) -> None:
+        """关掉面板：清掉预览。原图、撤销栈、帧编排全程没被碰过。"""
+        panel = getattr(self, "_key_panel", None)
+        if panel is not None and panel.isVisible():
+            panel.cancel()
+        self.image_viewer._preview_pixmap = None
+        self.image_viewer.canvas.update()
+        button = self.image_viewer._v_toolbar.btn_key
+        if button.isChecked():
+            button.setChecked(False)
+
+    def _on_key_pick_mode(self, on: bool) -> None:
+        """吸管模式：画布换十字光标并抢焦点（Esc 退出由面板自己处理）。"""
+        canvas = self.image_viewer.canvas
+        if on:
+            canvas.setCursor(Qt.CursorShape.CrossCursor)
+            canvas.setFocus(Qt.FocusReason.OtherFocusReason)
+        else:
+            canvas.unsetCursor()
+        self.lbl_status.setText("吸管：在原图上点一下，取那一点的颜色当背景色" if on else "")
+
+    def _apply_key_panel(self, keyed, stats: dict) -> None:
+        """把抠好的结果换成原图：记一条全局撤销，Ctrl+Z 能整个撤回来。"""
+        viewer = self.image_viewer
+        if keyed is None or keyed.isNull():
+            return
+        # 先抓 before（含旧原图引用），再换图 —— 顺序反了撤销就回不去了
+        self._push_snapshot("抠除背景", current_only=False)
+        viewer._preview_pixmap = None
+        viewer._pixmap = keyed
+        if not self.actions:
+            # 还没编排过动作：抠完背景就该重新认元素，直接重检一遍。
+            # 不用 set_pixmap()：那个会把 _source_images 重置成单张，多张原图的信息会丢。
+            viewer._frames = []
+            viewer._start_frame_detection(keyed.toImage(), base_frames=[], y_offset=0)
+            viewer.fit_view()
+        else:
+            # 已经排过帧了：只换原图，绝不重检 —— 重检会把用户排好的帧全毁掉
+            for action in self.actions:
+                action.invalidate_transforms()
+            for action in self.actions:
+                viewer.crop_frames_for_action(action)
+            self._on_frames_updated()
+        viewer.canvas.update()
+        viewer._update_rulers()
+        self.preview.set_source_pixmap(keyed)
+        self._push_snapshot_done()
+        self._mark_project_dirty()
+        button = viewer._v_toolbar.btn_key
+        if button.isChecked():
+            button.setChecked(False)
+        self.lbl_status.setText(
+            f"已抠除背景：清掉 {stats.get('changed_pct', 0.0):.1f}% 的像素，"
+            f"内容占比 {stats.get('content_before_pct', 0.0):.1f}% → "
+            f"{stats.get('content_after_pct', 0.0):.1f}%"
+            # 抠图是全局操作，记在全局栈（与"添加原图"同一套）；而 Ctrl+Z 走的是
+            # _active_stack()，选中动作时指向动作自己的栈 —— 所以这种时候 Ctrl+Z 够不到它，
+            # 得从全局历史回退。这里明确说一声，免得用户以为点了个没反应的操作。
+            + ("（已记入全局历史，按 Ctrl+H 可回退）"
+               if viewer.current_action is not None else "")
+        )
+
     def _init_history_card(self) -> None:
         """启动后建好历史记录卡片（默认隐藏，用户点工具栏按钮或 Ctrl+H 再打开）。"""
         card = self._ensure_history_card()
@@ -2610,6 +2701,11 @@ class MainWindow(QMainWindow):
         self.image_viewer.shutdown()
         if hasattr(self, "_history_panel") and self._history_panel is not None:
             self._history_panel.disconnect_all()
+        # 关窗前把抠图面板的钩子清掉：viewer._pick_target / _block_target 指向面板，
+        # 面板（弱引用之外）又挂在画布上，留着就是一对循环引用，退出时容易在 Qt
+        # 析构里 fail-fast。
+        if getattr(self, "_key_panel", None) is not None:
+            self._close_key_panel()
         super().closeEvent(event)
 
     def _open_image(self):

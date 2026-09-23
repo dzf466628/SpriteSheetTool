@@ -225,11 +225,18 @@ git push
 
 | 文件 | 行数 | 说明 |
 |---|---|---|
-| `spritesheet/ui/preview.py` | ~2026 行 | 画布渲染核心，拆分风险高 |
-| `spritesheet/ui/main_window.py` | ~1600 行 | 主窗口逻辑 |
-| `spritesheet/ui/image_viewer.py` | ~1339 行 | 帧预览控件 |
-| `spritesheet/ui/widgets.py` | ~1228 行 | 自定义控件集合 |
-| `spritesheet/ui/export_dialog.py` | ~1184 行 | 导出对话框 |
+| `spritesheet/ui/main_window.py` | 3472 行 | 主窗口逻辑（+ 多标签文档 / 撤销命令） |
+| `spritesheet/ui/preview.py` | 3045 行 | 画布渲染核心，拆分风险高 |
+| `spritesheet/ui/image_viewer.py` | 2196 行 | 原图区：元素检测 + 帧复用 + 标尺画布 + 左右两条浮动工具条 + 原图分块 |
+| `spritesheet/ui/widgets.py` | 1478 行 | 自定义控件集合 |
+| `spritesheet/ui/export_dialog.py` | 1285 行 | 导出对话框 |
+
+> 新增的两个抠图文件放一起作参考（都不算大，但"新功能别往已有的两个大文件里塞"这条照旧）：
+> `spritesheet/keying.py` 算法 321 行（纯 Pillow）、`spritesheet/ui/key_panel.py` 参数浮层 572 行。
+
+> 行数按 2026-09-23 实测，口径为 `splitlines()` 的**物理行数（含空行）**；
+> 早先那版数字用的是"非空行数"，两套口径混着看会以为文件缩水了，已统一。
+> 只作"这些文件偏大、别往里堆"的参考，涨得明显了再改一次即可。
 
 **原因**：软件目前功能正常，没有大问题。强行拆分大文件容易引入回归 bug，风险大于收益。
 
@@ -257,8 +264,7 @@ SpriteSheetTool/
 ├── installer.iss            # Inno Setup 安装包配置
 ├── SpriteSheetTool.spec     # PyInstaller 配置（必须进 Git）
 ├── smoke_test.py            # 冒烟回归（18项）
-├── bench.py                 # 性能基准
-├── tools/                   # 开发辅助脚本（回归/静态扫描/诊断）
+├── tools/                   # 开发辅助脚本（回归/静态扫描/性能采样/诊断）
 ├── spritesheet/             # 核心代码
 │   ├── __init__.py          # 版本号
 │   ├── importer.py          # JSON 工程导入
@@ -354,4 +360,4 @@ git push
 
 ---
 
-*最后更新：2026-09-17 · 2号电脑编写 · 适用于 v1.1.34+*
+*最后更新：2026-09-23（同步 v1.1.35 的行数与脚本清单）· 2号电脑编写 · 适用于 v1.1.35+*

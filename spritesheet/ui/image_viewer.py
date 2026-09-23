@@ -26,7 +26,8 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QButtonGroup, QFileDialog, QGridLayout, QHBoxLayout, QMenu, QPushButton, QWidget,
+    QApplication, QButtonGroup, QFileDialog, QGridLayout, QHBoxLayout, QMenu, QPushButton,
+    QVBoxLayout, QWidget,
 )
 
 from spritesheet.settings import last_directory, set_last_directory
@@ -219,6 +220,14 @@ class _Canvas(QWidget):
         badge = getattr(self._viewer, "_json_badge", None)
         if badge is not None:
             badge.move(6, 6)
+        # 左侧竖条工具条：默认贴左边缘（JSON 徽标下方），用户拖过则只保证不跑出画布
+        v_bar = getattr(self._viewer, "_v_toolbar", None)
+        if v_bar is not None:
+            if v_bar.moved_by_user():
+                v_bar.move(max(0, min(v_bar.x(), self.width() - v_bar.width())),
+                           max(0, min(v_bar.y(), self.height() - v_bar.height())))
+            else:
+                v_bar.move(VerticalToolBar.HOME_X, VerticalToolBar.HOME_Y)
         self.update()
 
     def paintEvent(self, event):
@@ -234,12 +243,34 @@ class _Canvas(QWidget):
             p.fillRect(self.rect(), QColor("#FFFFFF"))
 
         if self._viewer._pixmap and not self._viewer._pixmap.isNull():
+            # 抠图预览：有预览图就画预览图（尺寸与原图相同）。只在这里换，不动 _pixmap，
+            # 所以撤销栈、帧、动作在预览期间完全不受影响。
+            shown = self._viewer._preview_pixmap or self._viewer._pixmap
             zoom = self._viewer._zoom
             offset = self._viewer._offset
             target = QRectF(offset.x(), offset.y(),
-                            self._viewer._pixmap.width() * zoom,
-                            self._viewer._pixmap.height() * zoom)
-            p.drawPixmap(target, self._viewer._pixmap, QRectF(self._viewer._pixmap.rect()))
+                            shown.width() * zoom,
+                            shown.height() * zoom)
+            p.drawPixmap(target, shown, QRectF(shown.rect()))
+
+            # 原图分块虚框（抠图面板选「只抠这张」时显示）：其它块暗虚线，
+            # 当前选中的那块主题色实线。save/restore 包住，免得影响后面的元素辅助线。
+            if self._viewer._source_mode:
+                _rects = self._viewer.source_rects()
+                if len(_rects) > 1:
+                    p.save()
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    for _i, (_sx, _sy, _sw, _sh) in enumerate(_rects):
+                        _r = QRectF(offset.x() + _sx * zoom, offset.y() + _sy * zoom,
+                                    _sw * zoom, _sh * zoom)
+                        if _i == self._viewer._source_highlight:
+                            p.setPen(QPen(QColor("#F06292"), 2))
+                        else:
+                            _pen = QPen(QColor("#888888"), 1)
+                            _pen.setStyle(Qt.PenStyle.DashLine)
+                            p.setPen(_pen)
+                        p.drawRect(_r)
+                    p.restore()
 
             # 绘制元素辅助线（普通灰色虚线，当前动作选中变当前色，多动作色块依次排）
             if self._viewer._frames:
@@ -463,6 +494,25 @@ class _Canvas(QWidget):
 
     def mousePressEvent(self, event):
         self.setFocus(Qt.FocusReason.MouseFocusReason)
+        # 吸管模式（抠图面板开着时）：这一下只用来取色，绝不能走进框选/加图逻辑。
+        # 坐标换算与 _frame_at_point 用的是同一套：图坐标 = (画布坐标 - 偏移) / 缩放。
+        pick = getattr(self._viewer, "_pick_target", None)
+        if pick is not None and event.button() == Qt.MouseButton.LeftButton:
+            zoom = self._viewer._zoom or 1.0
+            pos = event.position()
+            pick.sample_at(int((pos.x() - self._viewer._offset.x()) / zoom),
+                           int((pos.y() - self._viewer._offset.y()) / zoom))
+            event.accept()
+            return
+        # 原图分块选择（抠图面板选「只抠这张」时）：点在某一块的范围内就选中它；
+        # 点空了不拦，照旧走下面的框选逻辑。
+        block = getattr(self._viewer, "_block_target", None)
+        if block is not None and event.button() == Qt.MouseButton.LeftButton:
+            index = self._viewer.source_index_at(event.position())
+            if index >= 0:
+                block(index)
+                event.accept()
+                return
         # 在原图上按下（含空白、含空格平移）：通知主窗口收起右侧变换手柄
         if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton,
                               Qt.MouseButton.MiddleButton):
@@ -710,6 +760,29 @@ class _DragGrip(QWidget):
         p.end()
 
 
+class _DragGripH(_DragGrip):
+    """竖条工具条用的拖动把手：把「三根短竖线」转 90° 变成「三根短横线」。
+
+    纯旋转版本 —— 控件 20×12（原版 12×20），线长 18、间距 1、边缘留白都与原版一一对应，
+    所以观感完全一致。原版 ``_DragGrip`` 一字未改，右上角那条横工具条不受影响。
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        # 转置后的尺寸：宽度 = 原版高度（线长 18 + 上下各 1），高度 = 原版宽度
+        self.setFixedSize(self.LINE_H + 2, self.LINES + (self.LINES - 1) * self.GAP + self.SHIFT_RIGHT)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setPen(QPen(QColor("#a0a0a0"), 1.0))     # 1 像素细线
+        x0 = max(0, (self.width() - self.LINE_H) // 2)
+        # 与原版同一套排布（只是把 x/y 对调）：靠下对齐，最下一根距控件下边 3px
+        for i in range(self.LINES):
+            y = self.height() - 3 - (self.LINES - 1 - i) * (1 + self.GAP)
+            p.drawLine(x0, y, x0 + self.LINE_H, y)
+        p.end()
+
+
 class FloatingToolBar(QWidget):
     """画布右上角浮动工具条：放大/缩小/透明背景/黑背景/白背景。"""
 
@@ -880,6 +953,136 @@ class FloatingToolBar(QWidget):
         super().mouseReleaseEvent(event)
 
 
+class VerticalToolBar(QWidget):
+    """画布左侧浮动**竖条**工具条：外观与右上角 FloatingToolBar 完全同款，只是竖着排。
+
+    - 尺寸/配色/圆角/悬停反馈与右上角一致（按钮 24×24、图标 16、卡片 QColor(30,30,30,220)
+      + 1px #444 + 圆角 6）；
+    - 底部是「3 根细短横线」的拖动把手（``_DragGripH``，由右上角那根竖线版转 90° 而来）；
+    - 按住空白处可拖动，用户拖过之后就不再被搬回默认位置（与右上角同一套规则）；
+    - 高度按当前可见按钮数自适应（``_sync_height``），以后往里加按钮不用改常量。
+
+    默认位置在画布左边缘、左上角 JSON 徽标（y=6，高 24）下方，见 ``HOME_Y``。
+    """
+
+    undo_requested = pyqtSignal()
+    redo_requested = pyqtSignal()
+    key_requested = pyqtSignal()
+
+    BTN = 24            # 与右上角工具条同一尺寸
+    W = BTN + 12        # 左右各留 6px → 36px 宽
+    MARGIN_TOP = 4
+    MARGIN_BOTTOM = 2
+    SPACING = 2
+    HOME_X = 6
+    # 左上角 JSON 徽标占 y=6..30，竖条从 38 起，留 8px 间隙不打架
+    HOME_Y = 38
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedWidth(self.W)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._drag_offset = None
+        self._moved_by_user = False
+        self.setToolTip("拖动空白处可移动工具条")
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+
+        side = (self.W - self.BTN) // 2
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(side, self.MARGIN_TOP, side, self.MARGIN_BOTTOM)
+        layout.setSpacing(self.SPACING)
+
+        # 主工具：抠除背景。点开参数浮层（预览不动原图，点"应用"才落地）。
+        # 之所以现在才加这个按钮：功能没落地之前放上去就是个"点了没反应"的死按钮。
+        self.btn_key = self._make_button("remove_bg", "抠除背景", checkable=True)
+        self.btn_key.toggled.connect(self.key_requested)
+        layout.addWidget(self.btn_key)
+
+        self.btn_undo = self._make_button("undo", "撤销（Ctrl+Z）")
+        self.btn_undo.clicked.connect(self.undo_requested)
+        layout.addWidget(self.btn_undo)
+
+        self.btn_redo = self._make_button("redo", "重做（Ctrl+Y）")
+        self.btn_redo.clicked.connect(self.redo_requested)
+        layout.addWidget(self.btn_redo)
+
+        # 拖动把手：三根细短**横**线，贴到最下面（stretch 把可能的空隙吃掉）。
+        # 竖条里用横向把手才像"抓这里拖"（用户看了竖线版后要求转 90°）
+        layout.addStretch(1)
+        self.grip = _DragGripH()
+        layout.addWidget(self.grip, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        self._sync_height()
+
+    def _sync_height(self) -> None:
+        """按当前可见子控件自适应高度：以后加按钮不用手改常量。"""
+        layout = self.layout()
+        margins = layout.contentsMargins()
+        height = margins.top() + margins.bottom()
+        count = 0
+        for i in range(layout.count()):
+            widget = layout.itemAt(i).widget()
+            if widget is not None and not widget.isHidden():
+                height += widget.height()
+                count += 1
+        height += max(0, count - 1) * layout.spacing()
+        self.setFixedHeight(height)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setBrush(QColor(30, 30, 30, 220))
+        p.setPen(QPen(QColor("#444"), 1))
+        p.drawRoundedRect(self.rect(), 6, 6)
+        p.end()
+
+    def _make_button(self, icon_kind: str, tip: str, checkable: bool = False) -> QPushButton:
+        """与 FloatingToolBar._make_button 同一套样式（两边各自持有，互不影响）。"""
+        btn = QPushButton()
+        btn.setFixedSize(self.BTN, self.BTN)
+        btn.setIcon(make_tool_icon(icon_kind, 16))
+        btn.setIconSize(QSize(16, 16))
+        btn.setToolTip(tip)
+        btn.setCheckable(checkable)
+        btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none; border-radius: 3px; }"
+            "QPushButton:hover { background: rgba(233,30,99,0.3); }"
+            "QPushButton:checked { background: rgba(233,30,99,0.5); }"
+        )
+        return btn
+
+    # ---- 拖动工具条（空白处按下拖）----
+    def moved_by_user(self) -> bool:
+        """用户是否自己挪过位置（挪过之后就不再被强行搬回左边）。"""
+        return self._moved_by_user
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = event.position().toPoint()
+            self.raise_()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_offset is None:
+            super().mouseMoveEvent(event)
+            return
+        parent = self.parentWidget()
+        want = self.mapToParent(event.position().toPoint() - self._drag_offset)
+        if parent is not None:
+            # 只限制在画布范围内，别被拖到看不见的地方
+            want.setX(max(0, min(parent.width() - self.width(), want.x())))
+            want.setY(max(0, min(parent.height() - self.height(), want.y())))
+        self.move(want)
+        self._moved_by_user = True
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+
 class JsonBadge(QWidget):
     """画布左上角浮动徽标：当前工程有关联 JSON 时显示红色 JSON ✓。
 
@@ -970,11 +1173,27 @@ class ImageViewer(QWidget):
     project_dropped = pyqtSignal(str)  # 拖入 SSTOOL 工程时转发给主窗口处理
     json_dropped_current = pyqtSignal(str)  # 画布上拖入 JSON：直接加入当前工程
     image_path_dropped = pyqtSignal(str)  # 画布上拖入图片路径（用于自动找同名 JSON）
+    # 左侧竖条工具条上的撤销/重做：转发给主窗口的 _do_undo / _do_redo
+    # （撤销作用在哪个栈由主窗口 _active_stack() 决定，这里不重复判断）
+    undo_requested = pyqtSignal()
+    redo_requested = pyqtSignal()
+    key_requested = pyqtSignal()          # 「抠除背景」：主窗口据此打开参数浮层
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         # 状态
         self._pixmap: QPixmap | None = None
+        # 抠图预览：只给画布画，不替换 _pixmap —— 这样撤销栈/帧/动作全程不动，
+        # "取消"就是把这里清空，零副作用（快照存的是 _pixmap 的引用，不能乱换）
+        self._preview_pixmap: QPixmap | None = None
+        # 吸管模式：非 None 时画布点击会先交给它取色（key_panel.KeyPanel.sample_at）
+        self._pick_target = None
+        # 原图分块（多张原图叠成一张大图时，每张原图占的那一块）：
+        # 位置**不额外存一份状态**，按 append_pixmap 的同一套算法现算 —— 见 source_rects()。
+        # 抠图面板选「只抠这张」时开虚框，点哪块就选中哪块。
+        self._source_mode = False
+        self._source_highlight: int | None = None
+        self._block_target = None        # 画布点击选分块的回调（与 _pick_target 同理）
         self._source_images: list[QPixmap] = []
         self._zoom = 1.0
         self._offset = QPointF(0, 0)
@@ -1038,6 +1257,14 @@ class ImageViewer(QWidget):
         self._toolbar.bg_changed.connect(self._on_bg_changed)
         self._toolbar.compose_toggled.connect(self.set_compose_mode)
         self._toolbar.reuse_toggled.connect(self.set_reuse_mode)
+
+        # 左侧浮动竖条工具条（与右上角同款外观，竖着排；位置由画布 resizeEvent 维持）
+        self._v_toolbar = VerticalToolBar(self.canvas)
+        self._v_toolbar.move(VerticalToolBar.HOME_X, VerticalToolBar.HOME_Y)
+        self._v_toolbar.undo_requested.connect(self.undo_requested)
+        self._v_toolbar.redo_requested.connect(self.redo_requested)
+        self._v_toolbar.key_requested.connect(self.key_requested)
+        self._v_toolbar.raise_()
 
         # 左上角 JSON 徽标（有关联 JSON 时显示）
         self._json_badge = JsonBadge(self.canvas)
@@ -1828,6 +2055,43 @@ class ImageViewer(QWidget):
     def _image_top_left(self) -> QPointF:
         """图片左上角在画布视图中的坐标。"""
         return self._offset
+
+    # 多张原图叠成一张大图时的间距（必须与 append_pixmap 里的 gap 是同一个数）
+    SOURCE_GAP = 16
+
+    def source_rects(self) -> list[tuple[int, int, int, int]]:
+        """每张原图在合成大图里的矩形 (x, y, w, h)。
+
+        位置是**现算**的，不额外存一份状态：完全重放 append_pixmap 的拼装算法
+        （第 i 张原图在 y = 前面所有高度之和 + i×16），所以不可能跟实际拼装结果脱节。
+        万一算出来跟当前原图尺寸对不上（比如工程导入给的是"合成图 + 源图"这种组合），
+        就退化成"整张算一块"—— 宁可不给选，也不能给出错的块。
+        """
+        if not self._source_images:
+            return []
+        rects = []
+        y = 0
+        for index, pm in enumerate(self._source_images):
+            if index:
+                y += self.SOURCE_GAP
+            rects.append((0, y, pm.width(), pm.height()))
+            y += pm.height()
+        if self._pixmap is None or self._pixmap.isNull():
+            return rects
+        if y != self._pixmap.height() or any(w > self._pixmap.width() for _, _, w, _ in rects):
+            return [(0, 0, self._pixmap.width(), self._pixmap.height())]
+        return rects
+
+    def source_index_at(self, pos: QPointF) -> int:
+        """画布坐标点落在第几张原图上；不在任何一块里返回 -1。"""
+        if not self._pixmap:
+            return -1
+        ix = (pos.x() - self._offset.x()) / (self._zoom or 1.0)
+        iy = (pos.y() - self._offset.y()) / (self._zoom or 1.0)
+        for index, (sx, sy, sw, sh) in enumerate(self.source_rects()):
+            if sx <= ix < sx + sw and sy <= iy < sy + sh:
+                return index
+        return -1
 
     def _frame_at_point(self, pos: QPointF) -> int:
         """返回图片坐标点所在的 frame 索引，没有返回-1。"""

@@ -5,7 +5,7 @@
 
 - 技术栈：Python 3.10+（开发/打包用 **3.12.10**）· PyQt6 6.11 · Pillow 12.3（GIF 导出）
 - 主题：深色界面 + 单一玫红强调色
-- 当前版本：**v1.1.34**　|　许可证：**GNU GPL v3**（开源免费，可自由使用/修改/再分发）
+- 当前版本：**v1.1.35**　|　许可证：**GNU GPL v3**（开源免费，可自由使用/修改/再分发）
 
 **目录**：[功能特性](#功能特性) · [环境要求](#环境要求) · [新电脑部署](#新电脑部署快速开始) ·
 [日常使用](#日常使用) · [打包发布](#打包发布生成安装包) · [自动更新](#自动更新) ·
@@ -23,6 +23,13 @@
 - **动作编排**：每个动作独立保存选中元素、帧序、颜色与全部动画参数，切换动作不丢失；
   一个元素可同时属于多个动作
 - **元素选中**：点击 / 框选（Ctrl 追加），帧序即选中顺序，右侧预览实时同步
+- **两条浮动工具条**：右上角横条（合成帧 / 帧复用 / 放大缩小 / 背景透明·黑·白 / 历史记录）
+  与左侧竖条（抠除背景 / 撤销 / 重做）；两条都可以按住空白处拖动，拖过之后不再被搬回原位
+- **抠除背景**（传统算法，不加载 AI 模型，零新增依赖）：自动从四边猜背景色，或用吸管在图上
+  点一下取色；容差 / 软边 / 收边 / 去色溢 / 只清边缘连通 五个参数**边调边看**（预览不动原图），
+  点「应用」才真正落到原图上并且可以撤销。**多张原图时可以点画布选哪一张**（作用范围：
+  只抠这张 / 抠全部；抠全部时每张各自猜色）。算法在 `spritesheet/keying.py`，
+  界面在 `spritesheet/ui/key_panel.py`
 - **合成帧**：Ctrl+点击（或按住 Ctrl 框选）把多个元素合成为一张帧
 - **帧复用**：同一元素可出现在多帧 —— 点击「Alt+复用」按钮（或按住 Alt 点击已选元素）
   追加一帧；再按住 Alt 点击已复用元素取消最近一次复用；元素左上角按帧号依次显示色块
@@ -337,11 +344,11 @@ SpriteSheetTool/
 ├── update_server/              # 自动更新服务器部署说明
 ├── installer/                  # 产出的安装包（SpriteSheetTool_v.X.Y.Z.exe，不进版本库）
 ├── smoke_test.py               # offscreen 冒烟回归（18 项，跨全部主流程）
-├── bench.py                    # 性能基准（关键热路径 A/B）
-├── tools/                      # 开发辅助脚本（回归 / 静态扫描 / 搬移与等价性取证）
+├── tools/                      # 开发辅助脚本（回归 / 静态扫描 / 性能采样 / 搬移与等价性取证）
 └── spritesheet/
     ├── __init__.py             # 版本号（__version__）
     ├── importer.py             # JSON 工程导入（TP/Aseprite/本工具格式）
+    ├── keying.py               # 抠除背景算法（纯 Pillow，不依赖 Qt，可脱离界面单测）
     ├── project_file.py         # .sstool 工程读写 + QPixmap/JSON 片段辅助
     ├── settings.py             # 软件设置键值（QSettings，工程缩略图开关）
     ├── single_instance.py      # 单实例守卫（QLocalServer/Socket 转发打开请求）
@@ -349,8 +356,10 @@ SpriteSheetTool/
     └── ui/
         ├── main_window.py      # 主窗口装配 + 更新下载弹窗 + 撤销命令
         ├── widgets.py          # 通用控件：动作卡牌/标尺/紧凑输入/缩略播放器/棋盘格
-        ├── image_viewer.py     # 原图区：元素检测 + 标尺画布 + 浮动工具条 + 帧复用
+        ├── image_viewer.py     # 原图区：元素检测 + 标尺画布 + 左右两条浮动工具条 + 帧复用
+        ├── key_panel.py        # 抠除背景的参数浮层（画布上的浮动卡片 + 实时预览 + 吸管）
         ├── preview.py          # 预览区：预览画布 + 自由变换手柄 + 动画调节组
+        ├── anim_settings.py    # 原图区下方动画设置横条（动画设置 / 变换 / 微调 三分区）
         ├── export_dialog.py    # 导出弹窗：动作选择 + 预览 + 图集打包/GIF/JSON
         ├── settings_dialog.py  # 软件设置弹窗：缩略图开关 + 检查更新
         ├── models.py           # 数据模型：Action 动作 + 主题色常量
@@ -416,17 +425,23 @@ settings_dialog / settings   是叶子（只被 main_window 引用），不反�
 # 2. offscreen 冒烟回归：载图→检测元素→建动作→变换→导出 PNG/JSON/GIF/.sstool→工程往返
 .venv\Scripts\python.exe smoke_test.py
 
-# 3. 性能基准（可选）
-.venv\Scripts\python.exe bench.py
+# 3. 性能采样（可选；原根目录 bench.py 已在 5b49887 清理时删除，
+#    现在统一用 tools/ 下的采样脚本）
+.venv\Scripts\python.exe tools\profile_hotpaths.py
 ```
 
-要一次跑完**整套**专项回归（下面表格里 21 个 `verify_*.py`，实测约 **20 秒**，
-全部通过时没有输出；有失败会打印 `FAILED: 脚本名`）：
+要一次跑完**整套**专项回归（25 个 `verify_*.py` 里除 2 个搬移取证脚本外的 **23 个**，
+实测约 **20 秒**，全部通过时没有输出；有失败会打印 `FAILED: 脚本名`）：
 
 ```powershell
 Get-ChildItem tools\verify_*.py | Where-Object { $_.Name -notin @('verify_move.py','verify_class_members.py') } |
   ForEach-Object { .venv\Scripts\python.exe $_.FullName; if ($LASTEXITCODE -ne 0) { "FAILED: $($_.Name)" } }
 ```
+
+> 这套里有 **3 个离不开真实环境**，必须在**真实 windows 平台**（不要设 `QT_QPA_PLATFORM=offscreen`）
+> 且能联网时才有意义：`verify_glyphs.py`（offscreen 没有真字体，字形断言会退化）、
+> `verify_icon_imagelist.py`（走 shell 的 `SHGetFileInfo`）、`verify_updater.py`（要连更新源站）。
+> 其余 20 个都是纯 offscreen，实测 20 个合计约 19 秒。
 
 ### 专项回归脚本
 
@@ -445,6 +460,8 @@ Get-ChildItem tools\verify_*.py | Where-Object { $_.Name -notin @('verify_move.p
 | `verify_transform_modes.py` | 自由变换各模式的**角点数值**回归（旋转/缩放/斜切/透视/扭曲各自该怎么联动） |
 | `verify_glyphs.py` | **字形**回归（必须跑真实 windows 平台：叉号不是缺字方框、三段文字对齐、标签不因标脏改变外观） |
 | `verify_header.py` | 顶部名称栏（无图标 / 首字母更大 / 两段按大写带垂直对齐） |
+| `verify_keying.py` | 抠除背景算法（32 项：猜色/边界/容差/软边/收边/去色溢/不改输入/与朴素逐像素 flood fill 差分/性能） |
+| `verify_key_panel.py` | 抠除背景界面接线（41 项：竖条按钮/浮层/预览零副作用/原图分块点选/只抠这张不误伤别的图/抠全部各自猜色/应用撤销/无图兜底） |
 | `verify_menu.py` | 菜单结构与顺序（含「检查更新」已移出文件菜单） |
 | `verify_frame_badges.py` | 帧号色块排版（多动作复用同一元素时不得互相遮盖） |
 | `verify_composite_badges.py` | 合成帧色块排版（多动作合成同一组元素时不得互相遮盖） |
@@ -454,6 +471,8 @@ Get-ChildItem tools\verify_*.py | Where-Object { $_.Name -notin @('verify_move.p
 | `verify_roundtrip.py` | 导出→导入逐字段往返审计（四种 JSON 格式，含逐帧像素与帧间位移） |
 | `verify_single_instance.py` | 单实例（协议 / 探测 / 真起第二个进程的端到端转发） |
 | `verify_updater.py` | 更新检查端到端核对（地址可达 / 证书严格校验 / 版本列表解析） |
+| `verify_anim_settings.py` | 动画设置横条（动作级控件已迁到横条 / 每个控件写入当前动作 / 切动作整体同步 / 横条「变换·微调」作用于全部帧 / 无动作时禁用） |
+| `verify_frame_duration.py` | 逐帧时长（默认跟随 fps 与逐帧覆盖 / 本工具 JSON 与 Aseprite 的 duration 写出 / GIF 读回每帧时长 / .sstool 往返 / 导入保留） |
 | `verify_checker.py` | 棋盘格平铺改造的逐像素等价验证 |
 | `verify_perf_equiv.py` | 性能优化等价性验证（对照原算法，含真实素材） |
 | `verify_icon_ratio.py` | 图标文件层（方形帧 / 图比例不变 / 按高度铺满 / 逐档独立缩放） |
@@ -470,10 +489,9 @@ Get-ChildItem tools\verify_*.py | Where-Object { $_.Name -notin @('verify_move.p
 | `inspect_theme.py` | 界面配色**诊断**（不是断言）：整窗渲染找"成条的浅色区域"并打印各部件颜色 |
 | `profile_hotpaths.py` | 热路径采样（先测再改：重绘 / 打包 / 导出 / 检测） |
 | `inspect_project_file.py` | 实存一个工程并检查其文件布局与缩略图 |
-| `bench.py` | 性能基准（关键热路径 A/B，仓库根目录） |
 | `make_icons.py` | 从源 PNG 生成多尺寸 `.ico`（方形帧；`--extract` 取原图；`--frames` 导出等比缩放序列） |
 | `inspect_icon.py` | 打印 `.ico` 内嵌尺寸表并校验是否全是标准方形尺寸 |
-| `static_scan.py` | 扫描未使用导入 / 疑似死代码（AST） |
+| `static_scan.py` | 扫描未使用导入 / 疑似死代码（AST）。口径：`utf-8-sig` 读文件（BOM 不再误报语法错）、跳过 `__future__`、**顶层 def 只在整棵扫描树都没被引用时才算疑似死代码**（所以跨模块调用的公开 API 不会误报） |
 | `check_spacing.py` | 检查顶层与类内定义的空行规范 |
 | `block_tool.py` | 按限定名定位 / 剪切 / 抽取代码块（含 AST 一致性比对） |
 | `free_names.py` | 列出某个代码块引用的自由名字（据此确定新模块需要哪些 import，不靠猜） |
@@ -492,11 +510,13 @@ Get-ChildItem tools\verify_*.py | Where-Object { $_.Name -notin @('verify_move.p
 
 ## 版本历史（近期）
 
-每个版本都在 `installer/` 下留了安装包（目前保留 v1.1.20 起共 15 个）；**缺陷的成因、
-修复方式与回归证据**记在 `SPLIT_GUIDE.md §9`（下面"详见"列就是对应的条目）。
+每个版本都在 `installer/` 下留了安装包（该目录**不进版本库**，各机器留存的版本数不同：
+本机现有 v1.1.33 ~ v1.1.35 三个）；**缺陷的成因、修复方式与回归证据**记在
+`SPLIT_GUIDE.md §9`（下面"详见"列就是对应的条目）。
 
 | 版本 | 主要变化 | 详见 |
 | --- | --- | --- |
+| v1.1.35 | 撤销/重做 + 历史记录面板（Ctrl+Z / Ctrl+Y / Ctrl+H，树状按动作分组、每动作独立栈、历史步数可设）；四块面板改圆角悬浮卡片，最大化时自动脱出成悬浮窗；底部横条改名「动作编辑」；导出对话框删掉重复的「导出 JSON」总开关、本工具格式改名「SpriteSheetTool json-AI专用」；导入新增豆包视频关键帧格式识别 | NEXT.md |
 | v1.1.34 | 删掉工程标签上的未保存圆点（那个点本来就不是有意设计的） | §9.14 ④ |
 | v1.1.33 | 拖偏移时帧真的移动（松手才重算画布区域）；无动作时点图片/控件给提示；变换按钮等宽 + 清空变换悬停图标转白 | §9.14 ①②③ |
 | v1.1.32 | 「清空变换」改红色；关闭叉号下移 3px 与工程名对齐；修当前帧微调的显示不同步 | — |
