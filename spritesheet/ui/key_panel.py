@@ -27,6 +27,37 @@ from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QHBoxLayout, QLabel,
 
 from spritesheet import keying
 
+# 面板内按钮统一外观：深底细边 + **悬浮/按下反馈**（用户要求"按钮要添加悬浮动效"）。
+# 主题里虽然也有 hover，但作用范围按钮自己带 QSS，会把主题那份盖掉一半，
+# 干脆在这里给面板所有按钮一套统一样式，免得"有的有反馈、有的没有"。
+BUTTON_QSS = (
+    "QPushButton { background: #333333; border: 1px solid #484848; border-radius: 4px;"
+    " color: #e6e6e6; font-size: 11px; padding: 0 8px; }"
+    "QPushButton:hover { background: #434343; border-color: #F06292; color: #ffffff; }"
+    "QPushButton:pressed { background: #2a2a2a; border-color: #E91E63; }"
+    "QPushButton:disabled { color: #7a7a7a; background: #2e2e2e; border-color: #3b3b3b; }"
+)
+BUTTON_ACCENT_QSS = (
+    "QPushButton { background: rgba(233,30,99,0.85); border: 1px solid transparent;"
+    " border-radius: 4px; color: #ffffff; font-size: 11px; padding: 0 10px; }"
+    "QPushButton:hover { background: rgba(240,98,146,1.0); }"
+    "QPushButton:pressed { background: rgba(200,20,80,1.0); }"
+    "QPushButton:disabled { background: #4a4a4a; color: #8a8a8a; }"
+)
+
+
+class _HintLabel(QLabel):
+    """提示 / 警告文字：**有内容才占位**，空的时候整行收掉。
+
+    抠图面板上"信息"越攒越多，用户明确说"那个信息窗口可以不要" ——
+    统计那行已经删了；剩下这条是真正的警告（抠图失败、几乎没清掉东西…），
+    留着有用，但没警告时不该占着一块空白。
+    """
+
+    def setText(self, text: str) -> None:
+        super().setText(text)
+        self.setVisible(bool(text))
+
 
 def _opaque_count(img: Image.Image) -> int:
     """内容像素数（alpha ≥ 128）。走 Pillow 的 alpha 直方图，统计在 C 层做。"""
@@ -128,24 +159,31 @@ class KeyPanel(QWidget):
         layout.addLayout(title_row)
 
         # ---- 背景色取样 ----
+        # 行首标签固定 48px：两行（取样色 / 作用范围）的控件因此**左边缘对齐成一列**，
+        # 不靠猜（"按数字对齐"是这个工程的老规矩）
         pick_row = QHBoxLayout()
         pick_row.setSpacing(4)
-        pick_row.addWidget(self._hint_label("取样色"))
+        pick_row.addWidget(self._hint_label("取样色", 48))
         self.swatch = QLabel()
-        self.swatch.setFixedSize(20, 20)
+        self.swatch.setFixedSize(22, 22)
         self.swatch.setToolTip("当前拿去抠的背景色（吸管取色 / 自动猜色都会更新它）")
         pick_row.addWidget(self.swatch)
         self.btn_pick = QPushButton("吸管")
         self.btn_pick.setCheckable(True)
-        self.btn_pick.setFixedHeight(20)
+        self.btn_pick.setFixedHeight(22)
+        self.btn_pick.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_pick.setToolTip("打开后在原图上点一下，就用那一点的颜色当背景色")
+        self.btn_pick.setStyleSheet(BUTTON_QSS)
         self.btn_pick.toggled.connect(self._on_pick_toggled)
         pick_row.addWidget(self.btn_pick)
         self.btn_guess = QPushButton("重新猜色")
-        self.btn_guess.setFixedHeight(20)
+        self.btn_guess.setFixedHeight(22)
+        self.btn_guess.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_guess.setToolTip("重新从四边取样猜背景色（默认就是这么来的）")
+        self.btn_guess.setStyleSheet(BUTTON_QSS)
         self.btn_guess.clicked.connect(self._guess_color)
         pick_row.addWidget(self.btn_guess)
+        pick_row.addStretch(1)
         layout.addLayout(pick_row)
 
         # ---- 作用范围（只有多张原图时才有意义，单张时整块隐藏）----
@@ -153,7 +191,7 @@ class KeyPanel(QWidget):
         scope_layout = QHBoxLayout(self.scope_row)
         scope_layout.setContentsMargins(0, 0, 0, 0)
         scope_layout.setSpacing(4)
-        scope_layout.addWidget(self._hint_label("作用范围"))
+        scope_layout.addWidget(self._hint_label("作用范围", 48))
         self._scope_group = QButtonGroup(self)
         self.btn_this = self._make_scope_button(
             "只抠选中的", "只处理画布上粉色实线框住的原图（可点选、也可拖框多选）")
@@ -183,32 +221,32 @@ class KeyPanel(QWidget):
 
         layout.addWidget(self._separator())
 
-        self.lbl_stats = self._hint_label("")
-        self.lbl_stats.setWordWrap(True)
-        layout.addWidget(self.lbl_stats)
-        self.lbl_hint = self._hint_label("")
+        # 统计那行（内容 xx% → yy% · 清掉 zz% · 连通块 n 个）**整块删掉**：
+        # 用户明确说"那个信息窗口可以不要"。判断效果看画布上的预览就够了，
+        # 参数行自己就是"我调了什么"的说明书。位置腾出来给参数和按钮，面板也更矮。
+        # 留下的 lbl_hint 只承担警告（空的时候不占位，见 _HintLabel）。
+        self.lbl_hint = _HintLabel("")
         self.lbl_hint.setWordWrap(True)
         self.lbl_hint.setStyleSheet("color: #ffb74d; font-size: 11px;")
         layout.addWidget(self.lbl_hint)
 
-        # ---- 应用 / 取消 ----
+        # ---- 应用 / 取消（等宽：一眼看出是"二选一"的收尾动作）----
         btn_row = QHBoxLayout()
         btn_row.setSpacing(6)
         self.btn_cancel = QPushButton("取消")
         self.btn_cancel.setFixedHeight(24)
+        self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_cancel.setStyleSheet(BUTTON_QSS)
         self.btn_cancel.setToolTip("放弃这次抠图（原图一点没动）")
         self.btn_cancel.clicked.connect(self._on_cancel)
-        btn_row.addWidget(self.btn_cancel)
+        btn_row.addWidget(self.btn_cancel, 1)
         self.btn_apply = QPushButton("应用")
         self.btn_apply.setFixedHeight(24)
+        self.btn_apply.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_apply.setToolTip("把抠好的结果换成原图（可以用 Ctrl+Z 撤销）")
-        self.btn_apply.setStyleSheet(
-            "QPushButton { background: rgba(233,30,99,0.85); border: none; border-radius: 3px;"
-            " color: #fff; font-size: 11px; }"
-            "QPushButton:hover { background: rgba(233,30,99,1.0); }"
-        )
+        self.btn_apply.setStyleSheet(BUTTON_ACCENT_QSS)
         self.btn_apply.clicked.connect(self._on_apply)
-        btn_row.addWidget(self.btn_apply)
+        btn_row.addWidget(self.btn_apply, 1)
         layout.addLayout(btn_row)
 
         # 画布尺寸变化时跟着竖条重新贴边
@@ -225,24 +263,30 @@ class KeyPanel(QWidget):
         """弱引用解析：viewer 已被回收时返回 None（退出阶段才可能出现）。"""
         return self._viewer_ref()
 
-    def _hint_label(self, text: str) -> QLabel:
+    def _hint_label(self, text: str, width: int = 0) -> QLabel:
+        """行首说明文字；给 ``width`` 时固定宽度，让上下两行控件对齐成一列。"""
         label = QLabel(text)
         label.setStyleSheet("color: #bdbdbd; font-size: 11px;")
+        if width:
+            label.setFixedWidth(width)
         return label
 
     def _make_scope_button(self, text: str, tip: str) -> QPushButton:
         """作用范围按钮：跟工程里其它"模式二选一"一个套路（QButtonGroup + checkable）。
 
-        未选中的样式直接继承主题里的 QPushButton，这里只补选中态，
-        免得整块按钮跟工程其它地方长得不一样。
+        样式统一用 BUTTON_QSS（含悬浮/按下反馈）再补一条选中态，
+        免得这两个按钮跟面板里其它按钮"有的有反馈、有的没有"。
         """
         button = QPushButton(text)
         button.setCheckable(True)
-        button.setFixedHeight(20)
+        button.setFixedHeight(22)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setToolTip(tip)
         button.setStyleSheet(
-            "QPushButton:checked { background: rgba(233,30,99,0.85);"
+            BUTTON_QSS
+            + "QPushButton:checked { background: rgba(233,30,99,0.85);"
             " border-color: #E91E63; color: #ffffff; }"
+            "QPushButton:checked:hover { background: rgba(240,98,146,1.0); }"
         )
         return button
 
@@ -499,25 +543,14 @@ class KeyPanel(QWidget):
         self._viewer._preview_pixmap = self._preview
         self._viewer.canvas.update()
 
+        # 统计那行（"第 N 张：内容 x% → y% · 清掉 z% · 连通块 n 个"）按用户要求整块删了，
+        # 面板只留**能让人改动作**的提示：多张时的取样色规则、几乎没清掉东西、快速预览。
+        # 纯数字仍然算在 stats 里（日志/测试还在用），只是不再往面板上贴。
         total = len(self._block_pils)
-        if total <= 1:
-            scope = ""
-        elif len(indices) > 1:
-            scope = f"全部 {len(indices)} 张" if self._scope == "all" else f"选中的 {len(indices)} 张"
-        else:
-            scope = f"第 {indices[0] + 1} 张"
-        self.lbl_stats.setText(
-            (scope + "：" if scope else "")
-            + f"内容 {stats['content_before_pct']:.1f}% → {stats['content_after_pct']:.1f}% · "
-            f"清掉 {stats['changed_pct']:.1f}% · 连通块 {stats['components']} 个"
-            + ("" if despill else "　（快速预览）")
-        )
         hints = []
         if total > 1 and len(indices) > 1:
             hints.append("抠全部：每张原图各自猜色" if self._scope == "all"
                          else "选中的每张各自猜色（取样色不参与）")
-        elif total > 1:
-            hints.append(f"第 {indices[0] + 1} 张取样色 rgb{tuple(stats['bg_color'])}")
         if stats["changed_pct"] < 0.1:
             hints.append("几乎没清掉东西：把容差调大，或关掉「只清边缘连通」"
                          "（背景可能被角色围住了）")

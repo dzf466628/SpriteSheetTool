@@ -22,7 +22,8 @@ import traceback
 from pathlib import Path
 
 from PyQt6.QtCore import (
-    QAbstractNativeEventFilter, QEvent, QPointF, QRectF, QSize, QThread, QTimer, Qt, pyqtSignal,
+    QAbstractNativeEventFilter, QEvent, QPointF, QRect, QRectF, QSize, QThread, QTimer, Qt,
+    pyqtSignal,
 )
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
@@ -271,15 +272,26 @@ class _Canvas(QWidget):
                           if self._viewer.source_borders_visible else [])
                 _selected = set(self._viewer.selected_sources())
                 p.save()
+                # 描边统一 1px 且**四边一样粗**：原来选中是 2px、未选中 1px，粗细不一致；
+                # 而且 2px 画在小数坐标上时四边被反锯齿啃得深浅不一（看着像"上边粗下边细"）。
+                # 所以关掉反锯齿 + 把矩形对齐到整数**设备**像素再画，只靠颜色区分选中。
+                p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 for _i, (_sx, _sy, _sw, _sh) in enumerate(_rects):
-                    _r = QRectF(offset.x() + _sx * zoom, offset.y() + _sy * zoom,
-                                _sw * zoom, _sh * zoom)
+                    _x = round(offset.x() + _sx * zoom)
+                    _y = round(offset.y() + _sy * zoom)
+                    _r = QRect(_x, _y,
+                               max(1, round(_sw * zoom)), max(1, round(_sh * zoom)))
                     if _i in _selected:
-                        p.setPen(QPen(QColor("#F06292"), 2))
+                        # 选中：主题色描边 + 同色淡填充。1px 描边光靠颜色不够醒目，
+                        # 填充补上"这是选中的"这层信息（和画布上"当前动作的帧"一个套路）。
+                        p.setPen(QPen(QColor("#F06292"), 1))
+                        p.setBrush(QColor(240, 98, 146, 30))
                     else:
                         p.setPen(QPen(QColor("#666666"), 1))
+                        p.setBrush(Qt.BrushStyle.NoBrush)
                     p.drawRect(_r)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
                 # 框选框：半透明主题色填充 + 细虚线边框（拖动中一直跟着鼠标）。
                 # 单独判 _band_rect：单张原图时不画分块框，但框选的手势还在，框得画出来。
                 if self._viewer._band_rect is not None:

@@ -113,6 +113,18 @@ def main() -> int:
           panel.btn_this.isChecked() and panel._scope == "single"
           and viewer.selected_sources() == [0])
     check("面板开着时画布显示分块边框", viewer.source_borders_visible)
+    # 版面（用户要求"重新排版 + 那个信息窗口可以不要 + 按钮要加悬浮动效"）
+    check("统计信息那行已经删掉（用户说那个信息窗口不要）", not hasattr(panel, "lbl_stats"))
+    check("没有警告时提示行不占位",
+          panel.lbl_hint.text() == "" and not panel.lbl_hint.isVisible(),
+          f"文案={panel.lbl_hint.text()!r} 可见={panel.lbl_hint.isVisible()}")
+    _btns = (panel.btn_pick, panel.btn_guess, panel.btn_cancel, panel.btn_apply,
+             panel.btn_this, panel.btn_all)
+    check("面板每个按钮都带悬浮反馈（:hover 规则）",
+          all(":hover" in b.styleSheet() for b in _btns),
+          "缺 hover：" + ",".join(b.text() for b in _btns if ":hover" not in b.styleSheet()))
+    check("收尾两个按钮等宽、高度一致",
+          panel.btn_cancel.minimumHeight() == panel.btn_apply.minimumHeight() == 24)
     check("分块图裁得对", panel._block_pils[0].tobytes() == sources[0].tobytes())
     check("自动猜色猜的是第 1 块的底色", panel._bg_color == BG[0], f"实际 {panel._bg_color}")
 
