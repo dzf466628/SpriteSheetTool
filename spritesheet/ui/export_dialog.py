@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """导出弹窗：动作选择 + 预览 + 导出选项（从 main_window.py 拆出，纯搬移，逻辑未改动）。
 

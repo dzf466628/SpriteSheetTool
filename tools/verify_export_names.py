@@ -1,4 +1,4 @@
-﻿"""导出同名处理回归。
+"""导出同名处理回归。
 
 两件事要证明：
   1) `ExportDialog._planned_names()` 预告的路径与 `_export_to_directory()` 实际写入的
@@ -150,13 +150,13 @@ def check_naming() -> None:
           f"实际 {names}")
 
     # 关掉 JSON：png + sstool = 2 个 -> 仍然直接放在所选目录下（PNG 图集总是会导出）
-    dlg.cb_json.setChecked(False)
+    dlg._json_fmt_checks[FMT_NATIVE].setChecked(False)
     check("关掉 JSON 后是 2 个文件（图集 + 工程）", dlg._file_count() == 2,
           f"实际 {dlg._file_count()}")
     check("两个文件时不建文件夹", dlg.target_root(tmp) == tmp, f"实际 {dlg.target_root(tmp)}")
 
     # 开 JSON、关工程：png + json = 2 个 -> 也不建文件夹
-    dlg.cb_json.setChecked(True)
+    dlg._json_fmt_checks[FMT_NATIVE].setChecked(True)
     dlg.cb_project.setChecked(False)
     for fmt, box in dlg._json_fmt_checks.items():
         box.setChecked(fmt == FMT_NATIVE)
@@ -180,11 +180,17 @@ def check_naming() -> None:
 
 
 def check_defaults() -> None:
-    """导出选项的默认值与顺序：默认导出 SSTOOL 工程，且排在 JSON 之前。"""
+    """导出选项的默认值与顺序：默认导出 SSTOOL 工程；最完整的产物排在上面。
+
+    注：「导出 JSON」那个总开关已删除（commit 6045740，「导出对话框删掉重复的
+    导出 JSON 总开关」），现在由右侧「JSON 格式（可多选）」分组框里**本工具格式**
+    那个复选框承担「默认导出 JSON」的角色，所以这里断言的是它。
+    """
     print("\n=== 导出选项默认值与顺序 ===")
     win, dlg = build_dialog(separate=False, apply_overrides=False)
     check("默认勾选「导出 SSTOOL 工程」", dlg.cb_project.isChecked())
-    check("默认勾选「导出 JSON」", dlg.cb_json.isChecked())
+    check("默认勾选「导出 JSON」（本工具格式）",
+          dlg._json_fmt_checks[FMT_NATIVE].isChecked())
     check("默认不勾选 GIF / 分别导出",
           not dlg.cb_gif.isChecked() and not dlg.cb_separate.isChecked())
 
@@ -193,12 +199,25 @@ def check_defaults() -> None:
     layout = dlg.cb_project.parentWidget().layout()
     for i in range(layout.count()):
         widget = layout.itemAt(i).widget()
-        if widget in (dlg.cb_project, dlg.cb_json, dlg.cb_gif, dlg.cb_separate):
+        if widget in (dlg.cb_project, dlg.cb_gif, dlg.cb_separate):
             order.append(widget.text())
     print(f"    附加选项顺序: {order}")
-    check("SSTOOL 工程排在 JSON 之前",
-          order.index(dlg.cb_project.text()) < order.index(dlg.cb_json.text()),
+    check("附加选项顺序为 工程 / GIF / 分别导出（顺序即优先级）",
+          order == ["导出 SSTOOL 工程", "导出 GIF（预览）", "分别导出"],
           f"实际 {order}")
+
+    # JSON 格式整组排在「附加选项」组之后：工程文件与 JSON 都排在下半部分之前
+    def index_of(target):
+        for i in range(layout.count()):
+            if layout.itemAt(i).widget() is target:
+                return i
+        return -1
+
+    json_box = dlg._json_fmt_checks[FMT_NATIVE].parentWidget()
+    idx_project, idx_json = index_of(dlg.cb_project), index_of(json_box)
+    print(f"    工程复选框在第 {idx_project} 位，JSON 格式分组框在第 {idx_json} 位")
+    check("SSTOOL 工程排在 JSON 格式分组框之前",
+          -1 < idx_project < idx_json, f"工程 {idx_project} / JSON {idx_json}")
 
     # 默认导出就应该产出 <工程名>.sstool
     tmp = Path(tempfile.mkdtemp(prefix="sstool_export_default_"))

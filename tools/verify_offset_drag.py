@@ -7,7 +7,12 @@
 改之前的行为：偏移一变就立刻重算并集 → 画布（安全区）跟着长大/移动，而画布是
 **居中**画的，于是"帧看起来钉在原地、只有区域在动"。改之后：按下时冻结画布尺寸与
 各帧位置，把"相对按下时刻的偏移增量"加到当前帧上（帧真的位移），松开再按新偏移
-重算并集并刷新「画布大小」标签。
+重算并集并刷新画布。
+
+> 注：原来这里还断言过面板上的「画布大小」标签（`panel.lbl_canvas`）。该标签在
+> 帧编辑面板重做时已被移除，`_refresh_canvas_label()` 现在只同步偏移控件，
+> 所以标签类断言已删除 —— "松手才重算" 这件事由 `canvas._paint_layout()`
+> 的尺寸断言直接证明（更靠近真实行为，不依赖某个界面标签是否存在）。
 
 这个回归用**真信号 + 真像素**验证：
   * 真信号：QTest 在真滑块上按下/移动/松开（走 sliderPressed/sliderValueChanged/
@@ -103,8 +108,7 @@ def main() -> int:
     print("=== 0. 起始状态 ===")
     frozen_w, frozen_h, _, _ = canvas._paint_layout()
     bbox0 = pink_bbox(canvas)
-    print(f"  画布区域 {frozen_w}×{frozen_h}，当前帧包围盒 {bbox0}，"
-          f"标签「{panel.lbl_canvas.text()}」")
+    print(f"  画布区域 {frozen_w}×{frozen_h}，当前帧包围盒 {bbox0}")
     check("起始画布区域 = 帧尺寸", (frozen_w, frozen_h) == (FRAME_W, FRAME_W),
           f"实际 {frozen_w}×{frozen_h}")
     check("起始就能看到当前帧", bbox0 is not None, "没找到玫红像素")
@@ -124,36 +128,29 @@ def main() -> int:
     dx, dy = action.frame_offsets.get(0, (0, 0))
     drag_w, drag_h, positions, _ = canvas._paint_layout()
     bbox1 = pink_bbox(canvas)
-    label_during = panel.lbl_canvas.text()
-    print(f"  偏移 = ({dx},{dy})，绘制用画布区域 {drag_w}×{drag_h}，包围盒 {bbox1}，"
-          f"标签「{label_during}」")
+    print(f"  偏移 = ({dx},{dy})，绘制用画布区域 {drag_w}×{drag_h}，包围盒 {bbox1}")
     check("拖动确实改了偏移（滑块 → 数据）", dx != 0, f"偏移 {dx}")
     check("拖动期间画布区域尺寸冻结不变", (drag_w, drag_h) == (frozen_w, frozen_h),
           f"{drag_w}×{drag_h} vs 冻结 {frozen_w}×{frozen_h}")
     check("拖动期间当前帧**真的右移**了（像素证据）",
           bbox1 is not None and bbox0 is not None and bbox1[0] - bbox0[0] == dx,
           f"包围盒左边界 {bbox0[0]} → {bbox1[0]}（偏移 {dx}）")
-    check("拖动期间「画布大小」标签不跟着变（松手才算）",
-          label_during == f"{frozen_w} × {frozen_h}", f"标签「{label_during}」")
     check("帧已经画出旧画布区域之外（真的是帧在动，不是区域在动）",
           bbox1 is not None and bbox1[2] > 20 + frozen_w,
           f"帧右边界 {bbox1[2] if bbox1 else None} > 画布右边界 {20 + frozen_w}")
 
     print()
-    print("=== 3. 松手：重算区域 + 刷新标签 ===")
+    print("=== 3. 松手：重算区域 ===")
     QTest.mouseRelease(slider, Qt.MouseButton.LeftButton,
                        pos=QPoint(centre.x() + 40, centre.y()))
     app.processEvents()
     after_w, after_h, _, _ = canvas._paint_layout()
-    label_after = panel.lbl_canvas.text()
-    print(f"  画布区域 {after_w}×{after_h}，标签「{label_after}」")
+    print(f"  画布区域 {after_w}×{after_h}")
     check("松手解除冻结", not canvas.layout_frozen(), "还是冻结状态")
     check("松手后区域按新偏移重算（变宽）", after_w > frozen_w,
           f"{frozen_w} → {after_w}")
     check("松手后区域宽度 = 帧宽 + 偏移", after_w == FRAME_W + dx,
           f"实际 {after_w}，期望 {FRAME_W + dx}")
-    check("松手后标签同步", label_after == f"{after_w} × {after_h}",
-          f"标签「{label_after}」")
 
     print()
     print("=== 4. 方向按钮：按住冻结、连点累计、松开重算 ===")
@@ -190,7 +187,7 @@ def main() -> int:
     panel._on_offset_label_changed(12)
     app.processEvents()
     live_w = canvas._paint_layout()[0]
-    print(f"  数字框输入 12 → 区域 {live_w}，标签「{panel.lbl_canvas.text()}」")
+    print(f"  数字框输入 12 → 区域 {live_w}")
     check("数字框改动立刻重算区域（没有冻结）", live_w == FRAME_W + 12,
           f"实际 {live_w}")
 

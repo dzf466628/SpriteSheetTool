@@ -4,7 +4,9 @@ Asserts the requested menu layout:
   - 文件 sits on the LEFT, 编辑 on the RIGHT
   - 文件 order: 添加图片 / 导入 JSON 工程… / — / 新建工程 / 打开工程… / 保存工程
                 / 工程另存为… / — / 退出
-  - 编辑 order: 撤销 / — / 软件设置…
+  - 编辑 order: 撤销 / 重做 / 历史记录面板 / — / 软件设置…
+    （重做与历史记录面板是后加的，见 NEXT.md 待办第 2 项：Ctrl+Z 撤回 +
+     Ctrl+Y 重做 + Ctrl+H 历史弹窗，commit 69b1d46）
   - 检查更新 is NOT in 文件 any more: it lives inside 编辑 → 软件设置…
   - 新建工程 is back, and it opens a NEW TAB (see tools/verify_tabs.py)
 
@@ -28,7 +30,7 @@ EXPECTED_FILE_ITEMS = [
     "添加图片", "导入 JSON 工程…", "---", "新建工程", "打开工程…", "保存工程",
     "工程另存为…", "---", "退出",
 ]
-EXPECTED_EDIT_ITEMS = ["撤销", "---", "软件设置…"]
+EXPECTED_EDIT_ITEMS = ["撤销", "重做", "历史记录面板", "---", "软件设置…"]
 EXPECTED_HELP_ITEMS = ["关于 SpriteSheetTool"]
 
 
@@ -67,7 +69,7 @@ def main() -> int:
         ok = False
         print(f"  [FAIL] 期望 {EXPECTED_EDIT_ITEMS}")
     else:
-        print("  [OK]   编辑菜单含「软件设置…」")
+        print("  [OK]   编辑菜单顺序符合预期（撤销 / 重做 / 历史记录面板 / 软件设置…）")
 
     if any("新建工程" in t for t in items):
         print("  [OK]   文件菜单里有「新建工程」（Ctrl+N，新开标签页）")

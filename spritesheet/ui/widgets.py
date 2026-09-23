@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """通用小部件与图标/像素工具（从 main_window.py 拆出，纯搬移，逻辑未改动）。
 
