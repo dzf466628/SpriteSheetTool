@@ -253,24 +253,29 @@ class _Canvas(QWidget):
                             shown.height() * zoom)
             p.drawPixmap(target, shown, QRectF(shown.rect()))
 
-            # 原图分块虚框（抠图面板选「只抠这张」时显示）：其它块暗虚线，
-            # 当前选中的那块主题色实线。save/restore 包住，免得影响后面的元素辅助线。
-            if self._viewer._source_mode:
+            # 原图分块虚框（「原图选择」工具或抠图面板开着时显示）：没选中的暗虚线，
+            # 选中的主题色实线。save/restore 包住，免得影响后面的元素辅助线。
+            if self._viewer.source_borders_visible:
                 _rects = self._viewer.source_rects()
-                if len(_rects) > 1:
-                    p.save()
-                    p.setBrush(Qt.BrushStyle.NoBrush)
-                    for _i, (_sx, _sy, _sw, _sh) in enumerate(_rects):
-                        _r = QRectF(offset.x() + _sx * zoom, offset.y() + _sy * zoom,
-                                    _sw * zoom, _sh * zoom)
-                        if _i == self._viewer._source_highlight:
-                            p.setPen(QPen(QColor("#F06292"), 2))
-                        else:
-                            _pen = QPen(QColor("#888888"), 1)
-                            _pen.setStyle(Qt.PenStyle.DashLine)
-                            p.setPen(_pen)
-                        p.drawRect(_r)
-                    p.restore()
+                _selected = set(self._viewer.selected_sources())
+                p.save()
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                for _i, (_sx, _sy, _sw, _sh) in enumerate(_rects):
+                    _r = QRectF(offset.x() + _sx * zoom, offset.y() + _sy * zoom,
+                                _sw * zoom, _sh * zoom)
+                    if _i in _selected:
+                        p.setPen(QPen(QColor("#F06292"), 2))
+                    else:
+                        _pen = QPen(QColor("#888888"), 1)
+                        _pen.setStyle(Qt.PenStyle.DashLine)
+                        p.setPen(_pen)
+                    p.drawRect(_r)
+                # 框选框：半透明主题色填充 + 细虚线边框（拖动中一直跟着鼠标）
+                if self._viewer._band_rect is not None:
+                    p.setPen(QPen(QColor("#F06292"), 1, Qt.PenStyle.DashLine))
+                    p.setBrush(QColor(240, 98, 146, 40))
+                    p.drawRect(self._viewer._band_rect)
+                p.restore()
 
             # 绘制元素辅助线（普通灰色虚线，当前动作选中变当前色，多动作色块依次排）
             if self._viewer._frames:
@@ -476,6 +481,14 @@ class _Canvas(QWidget):
         if event.key() == Qt.Key.Key_Space:
             self._panning = True
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        elif event.key() == Qt.Key.Key_Escape and self._viewer.source_borders_visible:
+            # 原图选择状态下的 Esc = 取消选择（工具本身还开着，跟画图软件一致）
+            self._viewer.set_selected_sources([])
+            self._viewer._band_start = None
+            self._viewer._band_rect = None
+            self.update()
+            event.accept()
+            return
         elif event.key() == Qt.Key.Key_Control:
             self._viewer.begin_ctrl_composition()
             event.accept()
@@ -504,15 +517,17 @@ class _Canvas(QWidget):
                            int((pos.y() - self._viewer._offset.y()) / zoom))
             event.accept()
             return
-        # 原图分块选择（抠图面板选「只抠这张」时）：点在某一块的范围内就选中它；
-        # 点空了不拦，照旧走下面的框选逻辑。
-        block = getattr(self._viewer, "_block_target", None)
-        if block is not None and event.button() == Qt.MouseButton.LeftButton:
-            index = self._viewer.source_index_at(event.position())
-            if index >= 0:
-                block(index)
-                event.accept()
-                return
+        # 原图分块选择（「原图选择」工具或抠图面板开着时）：按下先记框选起点，
+        # 松开时再判定 —— 位移很小算"点选某一张"，拖开了算"框选碰到的那几张"。
+        # 这样"点选"和"框选"共用一套手势，不会出现点了没反应的情况。
+        if self._viewer.source_borders_visible and event.button() == Qt.MouseButton.LeftButton:
+            self._viewer._band_start = event.position()
+            self._viewer._band_rect = QRectF(event.position(), event.position())
+            self._viewer._band_add = bool(event.modifiers() & (
+                Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
+            self.update()
+            event.accept()
+            return
         # 在原图上按下（含空白、含空格平移）：通知主窗口收起右侧变换手柄
         if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton,
                               Qt.MouseButton.MiddleButton):
@@ -539,11 +554,41 @@ class _Canvas(QWidget):
             self._viewer._update_rulers()
             self.update()
             return
+        if self._viewer._band_start is not None:
+            self._viewer._band_rect = QRectF(self._viewer._band_start,
+                                             event.position()).normalized()
+            self.update()
+            return
         if self._drag_start is not None:
             self._selection_rect = QRectF(self._drag_start, event.position()).normalized()
             self.update()
 
     def mouseReleaseEvent(self, event):
+        if self._viewer._band_start is not None:
+            start = self._viewer._band_start
+            rect = QRectF(start, event.position()).normalized()
+            additive = self._viewer._band_add
+            self._viewer._band_start = None
+            self._viewer._band_rect = None
+            self._viewer._band_add = False
+            if rect.width() < 5 and rect.height() < 5:
+                # 位移很小 = 点选：点中哪张选哪张，点空 = 取消选择
+                index = self._viewer.source_index_at(event.position())
+                if index >= 0:
+                    self._viewer.toggle_source_selection(index, additive)
+                elif not additive:
+                    self._viewer.set_selected_sources([])
+            else:
+                # 拖开了 = 框选：选中框碰到的那几张（Ctrl/Shift 时追加）
+                hits = self._viewer.source_indices_in_rect(rect)
+                if additive:
+                    merged = set(self._viewer.selected_sources()) | set(hits)
+                    self._viewer.set_selected_sources(merged)
+                else:
+                    self._viewer.set_selected_sources(hits)
+            self.update()
+            event.accept()
+            return
         if self._panning:
             self._pan_start = None
             return
@@ -968,6 +1013,7 @@ class VerticalToolBar(QWidget):
     undo_requested = pyqtSignal()
     redo_requested = pyqtSignal()
     key_requested = pyqtSignal()
+    source_tool_requested = pyqtSignal(bool)   # 「原图选择」开关（带勾选状态）
 
     BTN = 24            # 与右上角工具条同一尺寸
     W = BTN + 12        # 左右各留 6px → 36px 宽
@@ -991,6 +1037,13 @@ class VerticalToolBar(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(side, self.MARGIN_TOP, side, self.MARGIN_BOTTOM)
         layout.setSpacing(self.SPACING)
+
+        # 「原图选择」：点选/框选要处理哪张原图，选中持续高亮（拖动改位置是下一步）。
+        # 放在抠图按钮**上面**：先选图再抠图，顺序跟实际操作一致。
+        self.btn_source = self._make_button("select_source", "原图选择（点选 / 框选）",
+                                            checkable=True)
+        self.btn_source.toggled.connect(self.source_tool_requested)
+        layout.addWidget(self.btn_source)
 
         # 主工具：抠除背景。点开参数浮层（预览不动原图，点"应用"才落地）。
         # 之所以现在才加这个按钮：功能没落地之前放上去就是个"点了没反应"的死按钮。
@@ -1178,6 +1231,8 @@ class ImageViewer(QWidget):
     undo_requested = pyqtSignal()
     redo_requested = pyqtSignal()
     key_requested = pyqtSignal()          # 「抠除背景」：主窗口据此打开参数浮层
+    source_tool_requested = pyqtSignal(bool)   # 「原图选择」开关；主窗口先校验再真正开
+    source_selection_changed = pyqtSignal()    # 选中项变了（主窗口刷新状态栏提示）
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1190,10 +1245,14 @@ class ImageViewer(QWidget):
         self._pick_target = None
         # 原图分块（多张原图叠成一张大图时，每张原图占的那一块）：
         # 位置**不额外存一份状态**，按 append_pixmap 的同一套算法现算 —— 见 source_rects()。
-        # 抠图面板选「只抠这张」时开虚框，点哪块就选中哪块。
-        self._source_mode = False
-        self._source_highlight: int | None = None
-        self._block_target = None        # 画布点击选分块的回调（与 _pick_target 同理）
+        # _source_tool：左侧「原图选择」工具开着；_source_panel：抠图面板开着 ——
+        # 两者任一为真就显示分块边框（面板开着时也能直接点画布换张，和工具行为一致）。
+        self._source_tool = False
+        self._source_panel = False
+        self._selected_sources: set[int] = set()
+        self._band_start = None          # 框选起点（画布坐标）
+        self._band_rect = None           # 框选矩形
+        self._band_add = False           # 框选时是否按住 Ctrl/Shift（追加）
         self._source_images: list[QPixmap] = []
         self._zoom = 1.0
         self._offset = QPointF(0, 0)
@@ -1264,6 +1323,7 @@ class ImageViewer(QWidget):
         self._v_toolbar.undo_requested.connect(self.undo_requested)
         self._v_toolbar.redo_requested.connect(self.redo_requested)
         self._v_toolbar.key_requested.connect(self.key_requested)
+        self._v_toolbar.source_tool_requested.connect(self.source_tool_requested)
         self._v_toolbar.raise_()
 
         # 左上角 JSON 徽标（有关联 JSON 时显示）
@@ -1306,6 +1366,8 @@ class ImageViewer(QWidget):
         self._pixmap = pm
         self._source_images = [pm]
         self._frames = []
+        # 换了原图，原来的选中索引可能指向另一张图了 —— 直接清空，别留脏状态
+        self._selected_sources.clear()
         self._start_frame_detection(pm.toImage(), base_frames=[], y_offset=0)
         self.fit_view()
         self.canvas.update()
@@ -1323,7 +1385,9 @@ class ImageViewer(QWidget):
 
         old_pixmap = self._pixmap
         old_frames = list(self._frames)
-        gap = 16
+        # 间隙常量只留一份：分块位置是**按这个算法现算**的（source_rects 重放拼装），
+        # 这里要是写死另一个数字，虚框就会跟实际内容错位
+        gap = self.SOURCE_GAP
         combined = QPixmap(max(old_pixmap.width(), pm.width()), old_pixmap.height() + gap + pm.height())
         combined.fill(Qt.GlobalColor.transparent)
         painter = QPainter(combined)
@@ -2092,6 +2156,75 @@ class ImageViewer(QWidget):
             if sx <= ix < sx + sw and sy <= iy < sy + sh:
                 return index
         return -1
+
+    def source_indices_in_rect(self, rect: QRectF) -> list[int]:
+        """画布矩形碰到的所有原图（框选用）。"""
+        if not self._pixmap:
+            return []
+        # 严格水平/垂直的拖动会得到"零宽或零高"的矩形，而 QRectF.intersects 对**空矩形
+        # 恒为 False** —— 用户明明拖了一整条，却一个都选不中。给这种退化情形补半像素。
+        if rect.width() < 0.5 or rect.height() < 0.5:
+            rect = rect.adjusted(-0.5, -0.5, 0.5, 0.5)
+        zoom = self._zoom or 1.0
+        hits = []
+        for index, (sx, sy, sw, sh) in enumerate(self.source_rects()):
+            block = QRectF(self._offset.x() + sx * zoom, self._offset.y() + sy * zoom,
+                           sw * zoom, sh * zoom)
+            if block.intersects(rect):
+                hits.append(index)
+        return hits
+
+    # ---- 原图选择（左侧「原图选择」工具 + 抠图面板共用的同一份选中状态）----
+
+    @property
+    def source_borders_visible(self) -> bool:
+        """是否显示原图分块边框：工具开着或抠图面板开着，且确实不止一张原图。"""
+        return bool(self._source_tool or self._source_panel) and len(self.source_rects()) > 1
+
+    def selected_sources(self) -> list[int]:
+        """当前选中的原图索引（升序）。"""
+        return sorted(self._selected_sources)
+
+    def set_selected_sources(self, indices, notify: bool = True) -> None:
+        """整批设置选中项（会自动丢掉越界索引，避免状态变脏后点出界）。"""
+        count = len(self.source_rects())
+        self._selected_sources = {int(i) for i in indices if 0 <= int(i) < count}
+        self.canvas.update()
+        if notify:
+            self.source_selection_changed.emit()
+
+    def toggle_source_selection(self, index: int, additive: bool = False) -> None:
+        """点选一张原图：additive（Ctrl/Shift）时切换该张的选中态，否则独占选中它。"""
+        count = len(self.source_rects())
+        if not (0 <= index < count):
+            return
+        if additive:
+            if index in self._selected_sources:
+                self._selected_sources.discard(index)
+            else:
+                self._selected_sources.add(index)
+        else:
+            self._selected_sources = {index}
+        self.canvas.update()
+        self.source_selection_changed.emit()
+
+    def selected_source_blocks(self) -> list[tuple]:
+        """选中的 (索引, 矩形) 列表，按索引升序。"""
+        rects = self.source_rects()
+        return [(i, rects[i]) for i in self.selected_sources() if i < len(rects)]
+
+    def set_source_tool(self, on: bool) -> None:
+        """开关「原图选择」工具。关掉时清掉框选过程状态（选中结果保留，方便接着抠图）。"""
+        self._source_tool = bool(on)
+        if not on:
+            self._band_start = None
+            self._band_rect = None
+        if on:
+            self.canvas.setCursor(Qt.CursorShape.CrossCursor)
+            self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
+        else:
+            self.canvas.unsetCursor()
+        self.canvas.update()
 
     def _frame_at_point(self, pos: QPointF) -> int:
         """返回图片坐标点所在的 frame 索引，没有返回-1。"""

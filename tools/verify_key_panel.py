@@ -109,20 +109,20 @@ def main() -> int:
     check("按钮点开后浮层出现", panel.isVisible())
     check("面板贴在竖条右边", panel.x() > viewer._v_toolbar.x() + viewer._v_toolbar.width())
     check("多张原图时才显示作用范围", panel.scope_row.isVisible())
-    check("默认「只抠这张」且选中第 1 张",
+    check("默认「只抠选中的」且自动选中第 1 张",
           panel.btn_this.isChecked() and panel._scope == "single"
-          and panel._block == 0 and viewer._source_highlight == 0)
-    check("画布拿到了选块回调", viewer._block_target is not None)
+          and viewer.selected_sources() == [0])
+    check("面板开着时画布显示分块边框", viewer.source_borders_visible)
     check("分块图裁得对", panel._block_pils[0].tobytes() == sources[0].tobytes())
     check("自动猜色猜的是第 1 块的底色", panel._bg_color == BG[0], f"实际 {panel._bg_color}")
 
     before_no_mode = canvas.grab().toImage()
-    viewer._source_mode = False
+    viewer._source_panel = False
     canvas.update()
     for _ in range(4):
         app.processEvents()
     without = canvas.grab().toImage()
-    viewer._source_mode = True
+    viewer._source_panel = True
     canvas.update()
     for _ in range(4):
         app.processEvents()
@@ -132,13 +132,17 @@ def main() -> int:
                if without.pixel(x, y) != with_mode.pixel(x, y))
     check("分块虚框确实画在画布上", diff > 0 and before_no_mode is not None, f"差异点={diff}")
 
-    print("---- 4. 只抠这张：不能误伤别的原图 ----")
+    print("---- 4. 只抠选中的：不能误伤别的原图 ----")
     local = canvas_point(30, rects[1][1] + 25)
     canvas.mousePressEvent(QMouseEvent(
         QEvent.Type.MouseButtonPress, local, local, Qt.MouseButton.LeftButton,
         Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+    canvas.mouseReleaseEvent(QMouseEvent(
+        QEvent.Type.MouseButtonRelease, local, local, Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
     wait(900)
-    check("选中的块变成第 2 张", panel._block == 1 and viewer._source_highlight == 1)
+    check("选中的块变成第 2 张", viewer.selected_sources() == [1],
+          f"选中={viewer.selected_sources()}")
     check("猜色跟着换成第 2 张的底色", panel._bg_color == BG[1], f"实际 {panel._bg_color}")
     check("点块没被当成框选", canvas._drag_start is None)
     preview = viewer._preview_pixmap
@@ -158,7 +162,9 @@ def main() -> int:
           viewer._preview_pixmap is None and not panel.isVisible())
     check("取消后按钮弹起", not viewer._v_toolbar.btn_key.isChecked())
     check("取消后分块显示关掉",
-          viewer._source_mode is False and viewer._block_target is None)
+          viewer._source_panel is False and not viewer.source_borders_visible)
+    check("取消后选中项保留（选中是选择工具的状态，面板只是借用）",
+          viewer.selected_sources() == [1], f"选中={viewer.selected_sources()}")
     check("取消后原图身份没变", viewer._pixmap is baked)
 
     print("---- 6. 抠全部：每张各自猜色 ----")
@@ -181,9 +187,8 @@ def main() -> int:
     check("应用后原图换成抠好的图", viewer._pixmap is not baked)
     check("应用后三张底色全透明",
           all(px(viewer._pixmap, 5, rects[i][1] + 5)[3] == 0 for i in range(3)))
-    check("应用后分块显示与钩子都清掉",
-          viewer._source_mode is False and viewer._source_highlight is None
-          and viewer._block_target is None)
+    check("应用后分块显示关掉",
+          viewer._source_panel is False and not viewer.source_borders_visible)
     check("应用后没留下预览", viewer._preview_pixmap is None)
     index_before = win._undo_stack.index()
     win._do_undo()

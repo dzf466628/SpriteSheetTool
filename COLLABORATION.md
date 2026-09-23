@@ -225,14 +225,14 @@ git push
 
 | 文件 | 行数 | 说明 |
 |---|---|---|
-| `spritesheet/ui/main_window.py` | 3485 行 | 主窗口逻辑（+ 多标签文档 / 撤销命令） |
+| `spritesheet/ui/main_window.py` | 3523 行 | 主窗口逻辑（+ 多标签文档 / 撤销命令） |
 | `spritesheet/ui/preview.py` | 3045 行 | 画布渲染核心，拆分风险高 |
-| `spritesheet/ui/image_viewer.py` | 2196 行 | 原图区：元素检测 + 帧复用 + 标尺画布 + 左右两条浮动工具条 + 原图分块 |
+| `spritesheet/ui/image_viewer.py` | 2329 行 | 原图区：元素检测 + 帧复用 + 标尺画布 + 左右两条浮动工具条 + 原图分块与选择 |
 | `spritesheet/ui/widgets.py` | 1478 行 | 自定义控件集合 |
 | `spritesheet/ui/export_dialog.py` | 1285 行 | 导出对话框 |
 
 > 新增的两个抠图文件放一起作参考（都不算大，但"新功能别往已有的两个大文件里塞"这条照旧）：
-> `spritesheet/keying.py` 算法 321 行（纯 Pillow）、`spritesheet/ui/key_panel.py` 参数浮层 572 行。
+> `spritesheet/keying.py` 算法 321 行（纯 Pillow）、`spritesheet/ui/key_panel.py` 参数浮层 601 行。
 
 > 行数按 2026-09-23 实测，口径为 `splitlines()` 的**物理行数（含空行）**；
 > 早先那版数字用的是"非空行数"，两套口径混着看会以为文件缩水了，已统一。

@@ -1991,6 +1991,8 @@ class MainWindow(QMainWindow):
         self.image_viewer.redo_requested.connect(self._do_redo)
         # 左侧竖条「抠除背景」：打开参数浮层（点第二下等于关掉/取消）
         self.image_viewer.key_requested.connect(self._open_key_panel)
+        self.image_viewer.source_tool_requested.connect(self._on_source_tool_toggled)
+        self.image_viewer.source_selection_changed.connect(self._on_source_selection_changed)
 
         # 左列：原图区 + 下方「动画设置」横条（整段动画参数）
         left_column = QWidget()
@@ -2414,6 +2416,42 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- 抠除背景
 
+    def _on_source_tool_toggled(self, on: bool) -> None:
+        """左侧竖条「原图选择」：先校验再真正开模式（不做点了没反应的按钮）。
+
+        校验放在主窗口：只有一张原图时"选哪张/框选"都没有意义，直接说清楚原因并把
+        按钮弹回去，而不是让用户进去以后发现点什么都没反应。
+        """
+        viewer = self.image_viewer
+        button = viewer._v_toolbar.btn_source
+        if not on:
+            viewer.set_source_tool(False)
+            self.lbl_status.setText("")
+            return
+        if viewer._pixmap is None or viewer._pixmap.isNull():
+            button.setChecked(False)
+            self.lbl_status.setText("先添加图片，再选原图")
+            return
+        if len(viewer.source_rects()) <= 1:
+            button.setChecked(False)
+            self.lbl_status.setText("只有一张原图，不需要选择（再添加图片才会有多张）")
+            return
+        viewer.set_source_tool(True)
+        self.lbl_status.setText(
+            "原图选择：点一下选中某张原图，按住拖一个框可以一次选多张（Esc 取消选择）"
+        )
+
+    def _on_source_selection_changed(self) -> None:
+        """选中项变了：状态栏说清现在选的是哪几张（用户据此判断下一步抠哪张）。"""
+        picked = self.image_viewer.selected_sources()
+        if not picked:
+            self.lbl_status.setText("已取消选择")
+        elif len(picked) == 1:
+            self.lbl_status.setText(f"已选中第 {picked[0] + 1} 张原图")
+        else:
+            numbers = "、".join(str(i + 1) for i in picked)
+            self.lbl_status.setText(f"已选中 {len(picked)} 张原图（第 {numbers} 张）")
+
     def _open_key_panel(self) -> None:
         """左侧竖条「抠除背景」：打开参数浮层（预览不动原图，点"应用"才落地）。"""
         viewer = self.image_viewer
@@ -2714,7 +2752,7 @@ class MainWindow(QMainWindow):
         self.image_viewer.shutdown()
         if hasattr(self, "_history_panel") and self._history_panel is not None:
             self._history_panel.disconnect_all()
-        # 关窗前把抠图面板的钩子清掉：viewer._pick_target / _block_target 指向面板，
+        # 关窗前把抠图面板的钩子清掉：viewer._pick_target 指向面板，
         # 面板（弱引用之外）又挂在画布上，留着就是一对循环引用，退出时容易在 Qt
         # 析构里 fail-fast。
         if getattr(self, "_key_panel", None) is not None:

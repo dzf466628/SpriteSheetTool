@@ -76,8 +76,8 @@ class KeyPanel(QWidget):
     def __init__(self, viewer, parent=None) -> None:
         super().__init__(parent)
         # 用弱引用持有 viewer：面板挂在画布上（Qt 父子树已经保证它活着），若再强引用回
-        # viewer 就形成一对 Python 循环引用 —— viewer._pick_target / _block_target 又都
-        # 指向本面板。解释器退出时 GC 顺序会让 Qt 在析构中 fail-fast（0xC0000409），
+        # viewer 就形成一对 Python 循环引用 —— viewer._pick_target 又指向本面板。
+        # 解释器退出时 GC 顺序会让 Qt 在析构中 fail-fast（0xC0000409），
         # HistoryPanel 为此踩过坑，这里照同一套处理。
         self._viewer_ref = weakref.ref(viewer)
         self._source_pixmap = None
@@ -89,10 +89,10 @@ class KeyPanel(QWidget):
         self._sliders: dict = {}
         self._values: dict = {}
         self._drag_offset = None
-        # 原图分块：多张原图时「只抠这张」/「抠全部」指的就是这些块
+        # 原图分块：多张原图时「只抠选中的」/「抠全部」指的就是这些块。
+        # 具体抠哪几块由 viewer 的选中状态决定（见 _target_indices），这里不另存一份。
         self._rects: list = []
         self._block_pils: list = []
-        self._block = 0
         self._scope = "single"
 
         self.setObjectName("keyPanel")
@@ -155,7 +155,8 @@ class KeyPanel(QWidget):
         scope_layout.setSpacing(4)
         scope_layout.addWidget(self._hint_label("作用范围"))
         self._scope_group = QButtonGroup(self)
-        self.btn_this = self._make_scope_button("只抠这张", "只处理画布上粉色虚框里的那张原图")
+        self.btn_this = self._make_scope_button(
+            "只抠选中的", "只处理画布上粉色实线框住的原图（可点选、也可拖框多选）")
         self.btn_all = self._make_scope_button("抠全部", "每张原图各自猜自己的背景色，全部抠一遍")
         self.btn_this.setChecked(True)
         for button in (self.btn_this, self.btn_all):
@@ -213,6 +214,10 @@ class KeyPanel(QWidget):
         # 画布尺寸变化时跟着竖条重新贴边
         if parent is not None:
             parent.installEventFilter(self)
+        # 选中项在画布上变了（工具或面板里点选/框选/Esc）：面板要跟着换目标并重算预览。
+        # 只连一次（放在构造里），重复连会一次点击触发多遍重算。
+        if viewer is not None:
+            viewer.source_selection_changed.connect(self._on_selection_changed)
 
     # ------------------------------------------------------------ 小工具
     @property
@@ -284,14 +289,16 @@ class KeyPanel(QWidget):
             self._rects = [(0, 0, self._source_pil.width, self._source_pil.height)]
         self._block_pils = [self._source_pil.crop((x, y, x + w, y + h))
                             for (x, y, w, h) in self._rects]
-        self._block = 0
         self._scope = "single"
         multi = len(self._rects) > 1
         self.scope_row.setVisible(multi)
         self.btn_this.setChecked(True)
-        viewer._source_mode = multi
-        viewer._source_highlight = 0 if multi else None
-        viewer._block_target = self.select_block if multi else None
+        # 分块边框与"点哪张"由 viewer 的**同一份**选中状态负责（「原图选择」工具也是它），
+        # 面板只管读 —— 这样工具与面板不会各搞一套、互相打架
+        viewer._source_panel = multi
+        if multi and not viewer.selected_sources():
+            # 一张都没选就先默认选中第一张：否则「只抠选中的」在画布上看不见对象
+            viewer.set_selected_sources([0])
         self._guess_color(silent=True)
         self.adjustSize()
         self.sync_position()
@@ -299,53 +306,63 @@ class KeyPanel(QWidget):
         self.raise_()
 
     def cancel(self) -> None:
-        """取消/关闭：把预览清掉，原图与撤销栈一点没动。"""
+        """取消/关闭：把预览清掉，原图与撤销栈一点没动。选中项保留（工具还要用）。"""
         self._fast_timer.stop()
         self._full_timer.stop()
         self.btn_pick.setChecked(False)
         self._preview = None
-        self._clear_source_mode()
+        self._release_viewer()
         self.hide()
 
-    def _clear_source_mode(self) -> None:
-        """收起原图分块虚框与点击选块的钩子（应用/取消都要走这里，别漏）。"""
+    def _release_viewer(self) -> None:
+        """收起预览与取色钩子、关掉面板那侧的边框（应用/取消都要走这里，别漏）。
+
+        注意**不清选中项**：选中是「原图选择」工具的状态，面板只是借来用，
+        关掉面板顺手清掉的话，用户刚框选好的一批图就白选了。
+        """
         viewer = self._viewer
+        if viewer is None:
+            return
         viewer._preview_pixmap = None
-        viewer._source_mode = False
-        viewer._source_highlight = None
-        viewer._block_target = None
+        viewer._source_panel = False
+        viewer._pick_target = None
         viewer.canvas.update()
 
-    def select_block(self, index: int) -> None:
-        """画布上点了某一张原图：换块 -> 重新猜这一块的背景色 -> 重算预览。"""
-        if not (0 <= index < len(self._block_pils)):
+    def _on_selection_changed(self) -> None:
+        """画布上的选中项变了：刷新取色控件可用状态，并重算一版预览。"""
+        if not self.isVisible():
             return
-        self._block = index
-        self._viewer._source_highlight = index
-        self._viewer.canvas.update()
-        self.lbl_hint.setText(f"已选中第 {index + 1} 张原图（点别的虚框可以换）")
-        self._guess_color(silent=True)
+        self._sync_scope_controls()
+        if len(self._target_indices()) == 1:
+            # 换成另一张原图了：取样色必须跟着换，否则会拿上一张的底色去抠这一张
+            self._guess_color(silent=True)
+        self._fast_timer.start(self.FAST_DELAY)
+        self._full_timer.start(self.FULL_DELAY)
 
     def _current_block_pil(self):
-        """当前选中那块的 Pillow 图（没有块时返回 None）。"""
-        if not self._block_pils:
+        """取色/猜色针对的那一块（多选时不猜色，只取第一块当参考）。"""
+        indices = self._target_indices()
+        if not indices:
             return None
-        return self._block_pils[self._block]
+        return self._block_pils[indices[0]]
 
     def _on_scope_changed(self, scope: str) -> None:
         self._scope = scope
-        all_mode = scope == "all" and len(self._block_pils) > 1
-        # 「抠全部」时每张原图各自猜色，取样色不参与 —— 那就把取色控件关掉，
-        # 而不是留着几个"点了没反应"的按钮
-        for widget in (self.btn_pick, self.btn_guess, self.swatch):
-            widget.setEnabled(not all_mode)
-        if all_mode and self.btn_pick.isChecked():
-            self.btn_pick.setChecked(False)
-        self.lbl_hint.setText(
-            "抠全部：每张原图各自猜自己的背景色（取样色不参与）" if all_mode else ""
-        )
+        self._sync_scope_controls()
         self._fast_timer.start(self.FAST_DELAY)
         self._full_timer.start(self.FULL_DELAY)
+
+    def _sync_scope_controls(self) -> None:
+        """只有"正好处理一块"时取样色才有意义。
+
+        多块时每块各自猜色（多张原图底色常常不一样），取样色不参与 —— 那就把取色
+        控件关掉，而不是留着几个"点了没反应"的按钮。
+        """
+        single = len(self._target_indices()) == 1
+        for widget in (self.btn_pick, self.btn_guess, self.swatch):
+            widget.setEnabled(single)
+        if not single and self.btn_pick.isChecked():
+            self.btn_pick.setChecked(False)
 
     def sync_position(self) -> None:
         """贴到左侧竖条右边；竖条被拖走后也跟着走；超出画布就夹回来。"""
@@ -416,13 +433,23 @@ class KeyPanel(QWidget):
         self._full_timer.start(self.FULL_DELAY)
 
     # ------------------------------------------------------------ 预览
-    def _target_blocks(self) -> list:
-        """要处理的块：只抠这张 -> 选中的那一块；抠全部 -> 每一块。"""
-        if self._scope == "all" and len(self._block_pils) > 1:
-            return [(self._rects[i], self._block_pils[i]) for i in range(len(self._block_pils))]
+    def _target_indices(self) -> list:
+        """要处理的块索引：只抠选中的 -> 画布上选中的那些；抠全部 -> 每一块。
+
+        选中的一张都没有时兜底成第 1 张 —— 否则「只抠选中的」会变成点了没反应的按钮。
+        """
         if not self._block_pils:
             return []
-        return [(self._rects[self._block], self._block_pils[self._block])]
+        if self._scope == "all" and len(self._block_pils) > 1:
+            return list(range(len(self._block_pils)))
+        viewer = self._viewer
+        picked = viewer.selected_sources() if viewer is not None else []
+        indices = [i for i in picked if i < len(self._block_pils)]
+        return indices or [0]
+
+    def _target_blocks(self) -> list:
+        """要处理的 (矩形, 图像) 列表，顺序与 _target_indices() 一致。"""
+        return [(self._rects[i], self._block_pils[i]) for i in self._target_indices()]
 
     def _run_blocks(self, blocks: list, params: dict):
         """逐块抠，再贴回整张原图的副本上 —— 块以外的像素一个都不碰。
@@ -462,6 +489,7 @@ class KeyPanel(QWidget):
         if not despill:
             params["despill"] = 0
         try:
+            indices = self._target_indices()
             preview_pil, stats = self._run_blocks(self._target_blocks(), params)
         except Exception as exc:                     # noqa: BLE001 - 界面别被算法异常打挂
             self.lbl_hint.setText(f"抠图失败：{exc}")
@@ -471,13 +499,13 @@ class KeyPanel(QWidget):
         self._viewer._preview_pixmap = self._preview
         self._viewer.canvas.update()
 
-        blocks = len(self._block_pils)
-        if self._scope == "all" and blocks > 1:
-            scope = f"全部 {blocks} 张"
-        elif blocks > 1:
-            scope = f"第 {self._block + 1} 张"
-        else:
+        total = len(self._block_pils)
+        if total <= 1:
             scope = ""
+        elif len(indices) > 1:
+            scope = f"全部 {len(indices)} 张" if self._scope == "all" else f"选中的 {len(indices)} 张"
+        else:
+            scope = f"第 {indices[0] + 1} 张"
         self.lbl_stats.setText(
             (scope + "：" if scope else "")
             + f"内容 {stats['content_before_pct']:.1f}% → {stats['content_after_pct']:.1f}% · "
@@ -485,10 +513,11 @@ class KeyPanel(QWidget):
             + ("" if despill else "　（快速预览）")
         )
         hints = []
-        if self._scope == "all" and blocks > 1:
-            hints.append("抠全部：每张原图各自猜色")
-        elif blocks > 1:
-            hints.append(f"第 {self._block + 1} 张取样色 rgb{tuple(stats['bg_color'])}")
+        if total > 1 and len(indices) > 1:
+            hints.append("抠全部：每张原图各自猜色" if self._scope == "all"
+                         else "选中的每张各自猜色（取样色不参与）")
+        elif total > 1:
+            hints.append(f"第 {indices[0] + 1} 张取样色 rgb{tuple(stats['bg_color'])}")
         if stats["changed_pct"] < 0.1:
             hints.append("几乎没清掉东西：把容差调大，或关掉「只清边缘连通」"
                          "（背景可能被角色围住了）")
@@ -512,7 +541,7 @@ class KeyPanel(QWidget):
         self.btn_pick.setChecked(False)
         preview, stats = self._preview, dict(self._stats)
         self._preview = None
-        self._clear_source_mode()
+        self._release_viewer()
         self.hide()
         self.applied.emit(preview, stats)
 
