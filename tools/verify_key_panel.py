@@ -115,9 +115,19 @@ def main() -> int:
     check("面板开着时画布显示分块边框", viewer.source_borders_visible)
     # 版面（用户要求"重新排版 + 那个信息窗口可以不要 + 按钮要加悬浮动效"）
     check("统计信息那行已经删掉（用户说那个信息窗口不要）", not hasattr(panel, "lbl_stats"))
-    check("没有警告时提示行不占位",
-          panel.lbl_hint.text() == "" and not panel.lbl_hint.isVisible(),
-          f"文案={panel.lbl_hint.text()!r} 可见={panel.lbl_hint.isVisible()}")
+    check("提示行固定两行高（避免按钮来回跳）",
+          panel.lbl_hint.minimumHeight() == panel.lbl_hint.maximumHeight()
+          and panel.lbl_hint.height() >= panel.lbl_hint.fontMetrics().lineSpacing() * 2,
+          f"高={panel.lbl_hint.height()} 最小={panel.lbl_hint.minimumHeight()}")
+    _h0 = panel.height()
+    panel.lbl_hint.setText("警告一")
+    app.processEvents()
+    _h1 = panel.height()
+    panel.lbl_hint.setText("警告一　警告二　警告三")
+    app.processEvents()
+    check("提示一行 / 两行 / 清空，面板高度都不变（按钮不再来回跳）",
+          panel.height() == _h0 == _h1, f"{_h0} -> {_h1} -> {panel.height()}")
+    panel.lbl_hint.setText("")
     _btns = (panel.btn_pick, panel.btn_guess, panel.btn_cancel, panel.btn_apply,
              panel.btn_this, panel.btn_all)
     check("面板每个按钮都带悬浮反馈（:hover 规则）",

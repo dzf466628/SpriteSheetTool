@@ -47,16 +47,24 @@ BUTTON_ACCENT_QSS = (
 
 
 class _HintLabel(QLabel):
-    """提示 / 警告文字：**有内容才占位**，空的时候整行收掉。
+    """提示 / 警告文字：**固定占两行高**。
 
-    抠图面板上"信息"越攒越多，用户明确说"那个信息窗口可以不要" ——
-    统计那行已经删了；剩下这条是真正的警告（抠图失败、几乎没清掉东西…），
-    留着有用，但没警告时不该占着一块空白。
+    用户反馈："黄色的那个提示文字容器保持两行高度不然总跳" —— 提示时有时无，
+    面板高度跟着变，下面的按钮就来回跳。统计那行删掉之后，这里是面板里唯一会变高的
+    元素，所以给它 11px 字的**两行**固定高度：有一行提示也好、两行也好、空着也好，
+    下面的按钮都钉在原地。
     """
 
-    def setText(self, text: str) -> None:
-        super().setText(text)
-        self.setVisible(bool(text))
+    LINES = 2
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        font = self.font()
+        font.setPixelSize(11)
+        self.setFont(font)
+        self.setWordWrap(True)
+        # 按字体度量算两行高（含行距），不写字面数字 —— 换字体/换 DPI 也不会切字
+        self.setFixedHeight(self.fontMetrics().lineSpacing() * self.LINES + 2)
 
 
 def _opaque_count(img: Image.Image) -> int:
@@ -224,9 +232,9 @@ class KeyPanel(QWidget):
         # 统计那行（内容 xx% → yy% · 清掉 zz% · 连通块 n 个）**整块删掉**：
         # 用户明确说"那个信息窗口可以不要"。判断效果看画布上的预览就够了，
         # 参数行自己就是"我调了什么"的说明书。位置腾出来给参数和按钮，面板也更矮。
-        # 留下的 lbl_hint 只承担警告（空的时候不占位，见 _HintLabel）。
+        # 留下的 lbl_hint 只承担警告，而且**固定两行高**（见 _HintLabel），
+        # 免得提示时有时无把下面的按钮顶得来回跳。
         self.lbl_hint = _HintLabel("")
-        self.lbl_hint.setWordWrap(True)
         self.lbl_hint.setStyleSheet("color: #ffb74d; font-size: 11px;")
         layout.addWidget(self.lbl_hint)
 

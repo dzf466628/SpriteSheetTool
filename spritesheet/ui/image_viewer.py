@@ -283,13 +283,13 @@ class _Canvas(QWidget):
                     _r = QRect(_x, _y,
                                max(1, round(_sw * zoom)), max(1, round(_sh * zoom)))
                     if _i in _selected:
-                        # 选中：主题色描边 + 同色淡填充。1px 描边光靠颜色不够醒目，
-                        # 填充补上"这是选中的"这层信息（和画布上"当前动作的帧"一个套路）。
+                        # 选中只靠 1px 主题色描边区分，**不加半透明填充** ——
+                        # 加过 12% 粉色填充，用户反馈"很影响观察"（抠图预览时整块被染粉，
+                        # 根本看不出边缘抠得对不对）。粗细一致也靠这里保证：所有块同 1px。
                         p.setPen(QPen(QColor("#F06292"), 1))
-                        p.setBrush(QColor(240, 98, 146, 30))
                     else:
                         p.setPen(QPen(QColor("#666666"), 1))
-                        p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.setBrush(Qt.BrushStyle.NoBrush)
                     p.drawRect(_r)
                 p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
                 # 框选框：半透明主题色填充 + 细虚线边框（拖动中一直跟着鼠标）。
