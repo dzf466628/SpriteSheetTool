@@ -1048,6 +1048,9 @@ class MainWindow(QMainWindow):
             # 这类会改原图的操作，undo 时把原图指回追加前，redo 指回追加后。
             snap["pixmap"] = viewer._pixmap
             snap["source_images"] = list(viewer._source_images)
+            # 每张原图在合成大图里的位置（拖动移位改它）：不存进快照的话，
+            # 撤销"移动原图"就回不到原位
+            snap["source_offsets"] = [tuple(o) for o in viewer._source_offsets]
         return snap
 
     def _apply_action_data(self, action: Action, raw: dict) -> None:
@@ -1159,6 +1162,11 @@ class MainWindow(QMainWindow):
                 if "pixmap" in snap:
                     viewer._pixmap = snap["pixmap"]
                     viewer._source_images = list(snap.get("source_images") or [])
+                    # 偏移要跟着原图一起还原（旧快照没这个字段就留空，source_rects
+                    # 会自己回退到重放拼装算法）
+                    offsets = snap.get("source_offsets")
+                    viewer._source_offsets = ([tuple(map(int, o)) for o in offsets]
+                                              if offsets else [])
                 vstate = snap.get("viewer") or {}
                 if vstate.get("frames"):
                     viewer._frames = [tuple(map(int, r)) for r in vstate["frames"]]
@@ -1364,6 +1372,9 @@ class MainWindow(QMainWindow):
                 "zoom": viewer._zoom, "offset": [viewer._offset.x(), viewer._offset.y()],
                 "bg_mode": viewer._bg_mode, "compose_mode": viewer.compose_mode,
                 "manual_compose": viewer._manual_compose,
+                # 每张原图在合成大图里的位置（拖动移位改的是它）：存进工程，
+                # 下次打开才是你摆好的样子
+                "source_offsets": [list(o) for o in viewer._source_offsets],
             },
             "preview": {
                 "action_index": current_action_index,
@@ -1419,6 +1430,7 @@ class MainWindow(QMainWindow):
             "actions": list(self.actions),
             "pixmap": v._pixmap,
             "source_images": list(v._source_images),
+            "source_offsets": [tuple(o) for o in v._source_offsets],
             "frames": list(v._frames),
             "frame_logical": dict(v._frame_logical),
             "ignored_frames": set(v._ignored_frames),
@@ -1449,6 +1461,7 @@ class MainWindow(QMainWindow):
             "actions": [],
             "pixmap": None,
             "source_images": [],
+            "source_offsets": [],
             "frames": [],
             "frame_logical": {},
             "ignored_frames": set(),
@@ -1486,6 +1499,7 @@ class MainWindow(QMainWindow):
         self.actions = list(doc["actions"])
         viewer._pixmap = doc["pixmap"]
         viewer._source_images = list(doc["source_images"])
+        viewer._source_offsets = [tuple(o) for o in (doc.get("source_offsets") or [])]
         viewer._frames = list(doc["frames"])
         viewer._frame_logical = dict(doc["frame_logical"])
         viewer._ignored_frames = set(doc.get("ignored_frames") or [])
@@ -1811,6 +1825,10 @@ class MainWindow(QMainWindow):
         # and re-export functional by treating that image as the sole source.
         if not viewer._source_images:
             viewer._source_images = [combined]
+        # 每张原图的位置：新工程有 source_offsets；老工程没有就留空，
+        # source_rects() 会回退到重放拼装算法（等价于原来的行为）
+        offsets = viewer_state.get("source_offsets")
+        viewer._source_offsets = ([tuple(map(int, o)) for o in offsets] if offsets else [])
         viewer._frames = [tuple(map(int, x)) for x in viewer_state.get("frames", [])]
         viewer._frame_logical = {int(k): tuple(map(int, v)) for k, v in (viewer_state.get("frame_logical") or {}).items()}
         viewer._ignored_frames = set(viewer_state.get("ignored_frames") or [])
@@ -1993,6 +2011,8 @@ class MainWindow(QMainWindow):
         self.image_viewer.key_requested.connect(self._open_key_panel)
         self.image_viewer.source_tool_requested.connect(self._on_source_tool_toggled)
         self.image_viewer.source_selection_changed.connect(self._on_source_selection_changed)
+        self.image_viewer.source_move_started.connect(self._on_source_move_started)
+        self.image_viewer.source_move_finished.connect(self._on_source_move_finished)
 
         # 左列：原图区 + 下方「动画设置」横条（整段动画参数）
         left_column = QWidget()
@@ -2419,8 +2439,8 @@ class MainWindow(QMainWindow):
     def _on_source_tool_toggled(self, on: bool) -> None:
         """左侧竖条「原图选择」：先校验再真正开模式（不做点了没反应的按钮）。
 
-        校验放在主窗口：只有一张原图时"选哪张/框选"都没有意义，直接说清楚原因并把
-        按钮弹回去，而不是让用户进去以后发现点什么都没反应。
+        只要有图就能用 —— **不需要先建动作，也不要求有多张原图**：单张时"选哪张"没意义，
+        但"拖动移位"照样有意义。没图时说清原因并把按钮弹回去。
         """
         viewer = self.image_viewer
         button = viewer._v_toolbar.btn_source
@@ -2432,13 +2452,49 @@ class MainWindow(QMainWindow):
             button.setChecked(False)
             self.lbl_status.setText("先添加图片，再选原图")
             return
-        if len(viewer.source_rects()) <= 1:
-            button.setChecked(False)
-            self.lbl_status.setText("只有一张原图，不需要选择（再添加图片才会有多张）")
-            return
         viewer.set_source_tool(True)
         self.lbl_status.setText(
-            "原图选择：点一下选中某张原图，按住拖一个框可以一次选多张（Esc 取消选择）"
+            "原图选择：点一下选中某张原图；在棋盘格上拖一个框可以多选；"
+            "拖已选中的原图可以移动它（帧会跟着走）"
+        )
+
+    def _on_source_move_started(self) -> None:
+        """拖动原图开始：先抓 before 快照。
+
+        没真的动成（比如被画布边界夹住了）时 ``_push_snapshot_done`` 会自己判等跳过，
+        不会白记一条撤销 —— 所以这里不用提前判断，拖动结束统一收尾就行。
+        """
+        self._push_snapshot("移动原图", current_only=False)
+
+    def _on_source_move_finished(self, changed: bool = True) -> None:
+        """拖动结束：重裁各动作的帧、刷新预览、记一条全局撤销、标脏。
+
+        拖动过程中只改几何（位置与帧矩形），每个动作缓存的帧图/变换统一在这里重算 ——
+        帧一多的话，跟着每次鼠标移动重裁会明显卡顿。
+        changed=False 表示这一把被画布边界夹住、一点没动：那就什么都不用做，
+        尤其别说"已移动"（用户拖到边上没动，状态栏不该撒谎）。
+        """
+        if not changed:
+            return
+        viewer = self.image_viewer
+        if self.actions:
+            for action in self.actions:
+                action.invalidate_transforms()
+            for action in self.actions:
+                viewer.crop_frames_for_action(action)
+            self._on_frames_updated()
+        viewer.canvas.update()
+        viewer._update_rulers()
+        self.preview.set_source_pixmap(viewer._pixmap)
+        self._push_snapshot_done()
+        self._mark_project_dirty()
+        picked = viewer.selected_sources()
+        rects = viewer.source_rects()
+        places = "、".join(f"第 {i + 1} 张 → ({rects[i][0]}, {rects[i][1]})"
+                           for i in picked[:3] if i < len(rects))
+        self.lbl_status.setText(
+            "已移动原图：" + places + ("…" if len(picked) > 3 else "")
+            + ("（帧跟着一起走；Ctrl+Z 可撤销）" if self.actions else "")
         )
 
     def _on_source_selection_changed(self) -> None:

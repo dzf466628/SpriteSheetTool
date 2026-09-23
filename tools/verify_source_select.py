@@ -102,14 +102,20 @@ def main() -> int:
     print("---- 准备：三张底色各异的原图 ----")
     sources = [make_source(i) for i in range(3)]
     win._on_image_loaded(pil_to_pixmap(sources[0]))
-    wait(200)
+    wait(400)
     button.setChecked(True)
     wait(150)
-    check("只有一张原图时按钮弹起（选哪张没意义）", not button.isChecked())
-    check("并说明原因", "只有一张原图" in win.lbl_status.text(), f"状态栏={win.lbl_status.text()!r}")
+    check("只有一张原图也能开工具（用户要求：不依赖动作、也不依赖张数）",
+          button.isChecked() and viewer._source_tool is True)
+    check("只有一张时也显示边框（拖它有意义）", viewer.source_borders_visible)
+    check("此时确实还没有任何动作（所以这条限制真的撤掉了）", win.actions == [])
+    check("单张时它自动成为选中项", viewer.selected_sources() == [0],
+          f"选中={viewer.selected_sources()}")
+    button.setChecked(False)
+    viewer.set_selected_sources([])     # 后面要测"初始没有选中项"，这里清干净
     for pm_src in sources[1:]:
         win._on_image_loaded(pil_to_pixmap(pm_src))
-    wait(400)
+    wait(900)               # 等元素检测跑完：它会刷状态栏，别和后面的提示断言打架
     baked = viewer._pixmap
     rects = viewer.source_rects()
     check("三块位置是拼装算法里那三块",
@@ -123,7 +129,7 @@ def main() -> int:
 
     print("---- 1. 开工具：边框出现、状态栏有提示 ----")
     button.setChecked(True)
-    wait(200)
+    wait(150)
     check("工具模式已开", viewer._source_tool is True)
     check("分块边框可见", viewer.source_borders_visible)
     check("状态栏给了用法", "原图选择" in win.lbl_status.text(), f"状态栏={win.lbl_status.text()!r}")
@@ -175,26 +181,57 @@ def main() -> int:
     check("点间隙 -> 选中清空", viewer.selected_sources() == [], f"选中={viewer.selected_sources()}")
     check("状态栏说明已取消", "取消选择" in win.lbl_status.text(), f"状态栏={win.lbl_status.text()!r}")
 
-    print("---- 5. 框选 ----")
-    band((30, 5), (30, rects[1][1] + 25))
+    print("---- 5. 框选（必须从棋盘格起手）----")
+    # 起手点必须落在棋盘格上：图右侧(x>W)或两块之间的 16px 间隙里
+    band((30, H + 8), (30, rects[1][1] + 45))          # 起点在间隙里，零宽
     wait(150)
-    check("纵向拖一条（零宽矩形）也选得中前两块 -> [0, 1]",
-          viewer.selected_sources() == [0, 1], f"选中={viewer.selected_sources()}")
-    band((5, rects[1][1] + 25), (60, rects[1][1] + 25))
-    wait(150)
-    check("横向拖一条（零高矩形）也选得中第 2 块 -> [1]",
+    check("从棋盘格纵向拖一条（零宽矩形）选得中第 2 块 -> [1]",
           viewer.selected_sources() == [1], f"选中={viewer.selected_sources()}")
-    band((30, rects[0][1] + 25), (30, rects[2][1] + 45))
+    band((W + 10, rects[2][1] + 25), (10, rects[2][1] + 25))   # 起点在图右侧，零高
+    wait(150)
+    check("从棋盘格横向拖一条（零高矩形）选得中第 3 块 -> [2]",
+          viewer.selected_sources() == [2], f"选中={viewer.selected_sources()}")
+    band((W + 10, 5), (10, rects[2][1] + 45))
     wait(150)
     check("框住全部 -> 三块都选中", viewer.selected_sources() == [0, 1, 2],
           f"选中={viewer.selected_sources()}")
-    band((30, rects[2][1] + 5), (30, rects[2][1] + 45), Qt.KeyboardModifier.ControlModifier)
+    mouse("click", canvas_point(30, rects[2][1] + 25))
+    check("先只选第 3 块", viewer.selected_sources() == [2],
+          f"选中={viewer.selected_sources()}")
+    band((W + 10, 5), (10, rects[1][1] + 45), Qt.KeyboardModifier.ControlModifier)
     wait(150)
-    check("框选 + Ctrl 只加在图里选中项上（原样保留 1、2 后再加）",
+    check("Ctrl 框选 = 在原选中项上追加",
           viewer.selected_sources() == [0, 1, 2], f"选中={viewer.selected_sources()}")
 
+    print("---- 5b. 从图上起手不是框选（用户定的：棋盘格才框选）----")
+    mouse("click", canvas_point(30, rects[0][1] + 25))
+    check("先只选第 1 块", viewer.selected_sources() == [0],
+          f"选中={viewer.selected_sources()}")
+    before_offsets = list(viewer._source_offsets)
+    canvas.mousePressEvent(QMouseEvent(
+        QEvent.Type.MouseButtonPress, canvas_point(30, 5), canvas_point(30, 5),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+    canvas.mouseMoveEvent(QMouseEvent(
+        QEvent.Type.MouseMove, canvas_point(30, rects[2][1] + 45),
+        canvas_point(30, rects[2][1] + 45), Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+    canvas.mouseReleaseEvent(QMouseEvent(
+        QEvent.Type.MouseButtonRelease, canvas_point(30, rects[2][1] + 45),
+        canvas_point(30, rects[2][1] + 45), Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+    wait(300)
+    check("图上起手拖开不会框选别的图", viewer.selected_sources() == [0],
+          f"选中={viewer.selected_sources()}")
+    check("但会把按下时已选中的那张拖走（这是移动，不是框选）",
+          viewer._source_offsets != before_offsets,
+          f"偏移={viewer._source_offsets}")
+    win._do_undo()          # 撤销这次移动，别把后面的几何带歪
+    wait(400)
+    check("撤销后位置回到原样", viewer._source_offsets == before_offsets,
+          f"偏移={viewer._source_offsets}")
+
     print("---- 6. 拖动中框选框确实画出来了 ----")
-    start, end = canvas_point(5, rects[0][1] + 5), canvas_point(50, rects[1][1] + 40)
+    start, end = canvas_point(W + 10, 5), canvas_point(30, rects[1][1] + 40)
     canvas.mousePressEvent(QMouseEvent(
         QEvent.Type.MouseButtonPress, start, start, Qt.MouseButton.LeftButton,
         Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
@@ -252,7 +289,7 @@ def main() -> int:
     check("取样色就是第 2 张的底色", panel._bg_color == BG[1], f"实际 {panel._bg_color}")
 
     print("---- 10. 面板开着时框选多张 -> 每张各自猜色 ----")
-    band((5, rects[0][1] + 5), (60, rects[2][1] + 45))
+    band((W + 10, 5), (10, rects[2][1] + 45))
     wait(1200)
     check("目标变成三块", panel._target_indices() == [0, 1, 2], f"目标={panel._target_indices()}")
     check("多块时取色控件被禁用（不留点了没反应的按钮）",

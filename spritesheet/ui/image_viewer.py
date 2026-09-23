@@ -189,6 +189,9 @@ class _Canvas(QWidget):
     json_selected = pyqtSignal(str)
     selection_changed = pyqtSignal()
 
+    # 判定"点击"还是"拖动"的阈值（画布像素）：小于它算点击（只选中），大于它才算拖动
+    SRC_DRAG_MIN = 4
+
     def __init__(self, viewer, parent=None) -> None:
         super().__init__(parent)
         self._viewer = viewer
@@ -201,6 +204,12 @@ class _Canvas(QWidget):
         self._panning = False
         self._pan_start = None
         self._selection_rect = None
+        # 原图选择/拖动的手势状态：起点、是否已超过阈值、是否正在拖动移位、上一次拖动点
+        self._src_press = None
+        self._src_moved = False
+        self._src_moving = False
+        self._src_applied = False      # 这一把拖动里有没有真的挪动过（夹住时为 False）
+        self._src_last = None
         # 无动作时的提示气泡（"先添加动作"），画在画布底部
         self._toast = HintToast(self)
 
@@ -505,6 +514,105 @@ class _Canvas(QWidget):
             return
         super().keyReleaseEvent(event)
 
+    # ------------------------------------------------------------ 原图选择 / 拖动
+    def _src_cursor(self, over_block: bool = False, band: bool = False, moving: bool = False):
+        """PS「移动工具 + 自动选择」那套光标手感。
+
+        图上 = 可移动（四向箭头），棋盘格 = 普通箭头，拖框时 = 十字。
+        """
+        if moving or over_block:
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+        elif band:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def _src_begin(self, event) -> None:
+        """按下：从图上起手 = 选择/拖动，从棋盘格（图外）起手 = 框选。"""
+        viewer = self._viewer
+        pos = event.position()
+        index = viewer.source_index_at(pos)
+        additive = bool(event.modifiers() & (
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
+        selected = index >= 0 and index in viewer.selected_sources()
+        if index >= 0 and len(viewer.source_rects()) == 1:
+            # 只有一张原图时它天然就是"选中项"：没有别的可拖，不必先点一下再拖
+            selected = True
+        self._src_press = (pos, index, selected, additive)
+        self._src_moved = False
+        self._src_moving = False
+        self._src_applied = False
+        self._src_last = pos if index >= 0 else None
+        if index < 0:
+            viewer._band_start = pos
+            viewer._band_rect = QRectF(pos, pos)
+            viewer._band_add = additive
+        self.update()
+
+    def _src_drag(self, event) -> None:
+        """拖动中：越过阈值后，按下时已选中的那一组整体移位；棋盘格起手的走框选。"""
+        viewer = self._viewer
+        pos = event.position()
+        start, index, selected, _additive = self._src_press
+        if not self._src_moved:
+            if (pos - start).manhattanLength() < self.SRC_DRAG_MIN:
+                return
+            self._src_moved = True
+            # 看的是**按下那一刻**的选中态：没被选中的图拖动=不移动（用户定的"先选中再说"），
+            # 所以不能在按下之后才把它选上来再拖
+            if index >= 0 and selected and viewer._source_tool:
+                self._src_moving = True
+                viewer.source_move_started.emit()
+        if self._src_moving:
+            last = self._src_last or pos
+            zoom = viewer._zoom or 1.0
+            if viewer.move_sources(viewer.selected_sources(),
+                                   round((pos.x() - last.x()) / zoom),
+                                   round((pos.y() - last.y()) / zoom)):
+                # 真动了才推进基准点：被夹住时基准点不动，往回拖立刻就能接着走
+                self._src_last = pos
+                self._src_applied = True
+            self._src_cursor(moving=True)
+        elif viewer._band_start is not None:
+            viewer._band_rect = QRectF(viewer._band_start, pos).normalized()
+            self._src_cursor(band=True)
+        self.update()
+
+    def _src_end(self, event) -> None:
+        """松开：没拖开 = 点击选择；拖开了 = 拖动移位 / 框选。"""
+        viewer = self._viewer
+        press = self._src_press
+        self._src_press = None
+        moved, moving = self._src_moved, self._src_moving
+        applied = self._src_applied
+        self._src_moved = False
+        self._src_moving = False
+        self._src_applied = False
+        self._src_last = None
+        if press is None:
+            return
+        start, index, _selected, additive = press
+        if index < 0:
+            # 棋盘格起手：拖开了 = 框选那几张，没拖开 = 取消选择
+            rect = QRectF(viewer._band_start or start, event.position()).normalized()
+            viewer._band_start = None
+            viewer._band_rect = None
+            viewer._band_add = False
+            if moved:
+                hits = viewer.source_indices_in_rect(rect)
+                viewer.set_selected_sources(
+                    set(viewer.selected_sources()) | set(hits) if additive else hits)
+            elif not additive:
+                viewer.set_selected_sources([])
+        elif moving:
+            viewer.source_move_finished.emit(applied)
+        elif additive:
+            viewer.toggle_source_selection(index, True)
+        else:
+            viewer.set_selected_sources([index])
+        self._src_cursor(viewer._source_tool and viewer.source_index_at(event.position()) >= 0)
+        self.update()
+
     def mousePressEvent(self, event):
         self.setFocus(Qt.FocusReason.MouseFocusReason)
         # 吸管模式（抠图面板开着时）：这一下只用来取色，绝不能走进框选/加图逻辑。
@@ -517,15 +625,11 @@ class _Canvas(QWidget):
                            int((pos.y() - self._viewer._offset.y()) / zoom))
             event.accept()
             return
-        # 原图分块选择（「原图选择」工具或抠图面板开着时）：按下先记框选起点，
-        # 松开时再判定 —— 位移很小算"点选某一张"，拖开了算"框选碰到的那几张"。
-        # 这样"点选"和"框选"共用一套手势，不会出现点了没反应的情况。
+        # 原图选择 / 拖动（「原图选择」工具或抠图面板开着时）：
+        # 从图上起手 = 选择/拖动，从棋盘格（图外）起手 = 框选。
+        # 判定的关键是"松手前有没有真的拖开"：没拖开=点击选择，拖开了才按拖动/框选算。
         if self._viewer.source_borders_visible and event.button() == Qt.MouseButton.LeftButton:
-            self._viewer._band_start = event.position()
-            self._viewer._band_rect = QRectF(event.position(), event.position())
-            self._viewer._band_add = bool(event.modifiers() & (
-                Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
-            self.update()
+            self._src_begin(event)
             event.accept()
             return
         # 在原图上按下（含空白、含空格平移）：通知主窗口收起右侧变换手柄
@@ -549,44 +653,27 @@ class _Canvas(QWidget):
             self._open_file_dialog()
 
     def mouseMoveEvent(self, event):
+        if self._src_press is not None:
+            self._src_drag(event)
+            return
+        if self._viewer._source_tool:
+            # 悬停反馈：图上是"可移动"光标、棋盘格上回到普通箭头（PS 移动工具那套手感）
+            self._src_cursor(self._viewer.source_index_at(event.position()) >= 0)
         if self._panning and self._pan_start is not None:
             self._viewer._offset = event.position() - self._pan_start
             self._viewer._update_rulers()
             self.update()
             return
-        if self._viewer._band_start is not None:
-            self._viewer._band_rect = QRectF(self._viewer._band_start,
-                                             event.position()).normalized()
-            self.update()
+        if self._src_press is not None:
+            self._src_drag(event)
             return
         if self._drag_start is not None:
             self._selection_rect = QRectF(self._drag_start, event.position()).normalized()
             self.update()
 
     def mouseReleaseEvent(self, event):
-        if self._viewer._band_start is not None:
-            start = self._viewer._band_start
-            rect = QRectF(start, event.position()).normalized()
-            additive = self._viewer._band_add
-            self._viewer._band_start = None
-            self._viewer._band_rect = None
-            self._viewer._band_add = False
-            if rect.width() < 5 and rect.height() < 5:
-                # 位移很小 = 点选：点中哪张选哪张，点空 = 取消选择
-                index = self._viewer.source_index_at(event.position())
-                if index >= 0:
-                    self._viewer.toggle_source_selection(index, additive)
-                elif not additive:
-                    self._viewer.set_selected_sources([])
-            else:
-                # 拖开了 = 框选：选中框碰到的那几张（Ctrl/Shift 时追加）
-                hits = self._viewer.source_indices_in_rect(rect)
-                if additive:
-                    merged = set(self._viewer.selected_sources()) | set(hits)
-                    self._viewer.set_selected_sources(merged)
-                else:
-                    self._viewer.set_selected_sources(hits)
-            self.update()
+        if self._src_press is not None:
+            self._src_end(event)
             event.accept()
             return
         if self._panning:
@@ -1040,7 +1127,8 @@ class VerticalToolBar(QWidget):
 
         # 「原图选择」：点选/框选要处理哪张原图，选中持续高亮（拖动改位置是下一步）。
         # 放在抠图按钮**上面**：先选图再抠图，顺序跟实际操作一致。
-        self.btn_source = self._make_button("select_source", "原图选择（点选 / 框选）",
+        self.btn_source = self._make_button("select_source",
+                                            "原图选择 / 移动（点选 · 框选 · 拖动）",
                                             checkable=True)
         self.btn_source.toggled.connect(self.source_tool_requested)
         layout.addWidget(self.btn_source)
@@ -1233,6 +1321,11 @@ class ImageViewer(QWidget):
     key_requested = pyqtSignal()          # 「抠除背景」：主窗口据此打开参数浮层
     source_tool_requested = pyqtSignal(bool)   # 「原图选择」开关；主窗口先校验再真正开
     source_selection_changed = pyqtSignal()    # 选中项变了（主窗口刷新状态栏提示）
+    # 拖动原图：开始（主窗口抓 before 快照）/ 结束（主窗口收尾：重裁帧、记撤销）。
+    # 结束时带一个 bool：这一把到底有没有真的动过（被画布边界夹住时没动，
+    # 主窗口据此不要说"已移动"，也别白做一次重裁）
+    source_move_started = pyqtSignal()
+    source_move_finished = pyqtSignal(bool)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1254,6 +1347,10 @@ class ImageViewer(QWidget):
         self._band_rect = None           # 框选矩形
         self._band_add = False           # 框选时是否按住 Ctrl/Shift（追加）
         self._source_images: list[QPixmap] = []
+        # 每张原图在合成大图里的左上角位置 —— 拖动移位改的就是这个。
+        # 位置**必须存下来**：允许拖动之后，"重放拼装算法现算"就无从表达了
+        # （老工程/异常状态没有这个字段时，才回退到 _replay_source_offsets）。
+        self._source_offsets: list[tuple[int, int]] = []
         self._zoom = 1.0
         self._offset = QPointF(0, 0)
         self._bg_mode = "checker"
@@ -1365,6 +1462,7 @@ class ImageViewer(QWidget):
             return
         self._pixmap = pm
         self._source_images = [pm]
+        self._source_offsets = [(0, 0)]
         self._frames = []
         # 换了原图，原来的选中索引可能指向另一张图了 —— 直接清空，别留脏状态
         self._selected_sources.clear()
@@ -1398,6 +1496,7 @@ class ImageViewer(QWidget):
 
         self._pixmap = combined
         self._source_images.append(pm)
+        self._source_offsets.append((0, y_offset))
         # 旧元素可立即继续显示；新增图片的元素由后台线程补充。
         self._frames = old_frames
         self._start_frame_detection(pm.toImage(), base_frames=old_frames, y_offset=y_offset)
@@ -2126,25 +2225,96 @@ class ImageViewer(QWidget):
     def source_rects(self) -> list[tuple[int, int, int, int]]:
         """每张原图在合成大图里的矩形 (x, y, w, h)。
 
-        位置是**现算**的，不额外存一份状态：完全重放 append_pixmap 的拼装算法
-        （第 i 张原图在 y = 前面所有高度之和 + i×16），所以不可能跟实际拼装结果脱节。
-        万一算出来跟当前原图尺寸对不上（比如工程导入给的是"合成图 + 源图"这种组合），
-        就退化成"整张算一块"—— 宁可不给选，也不能给出错的块。
+        位置取自 ``_source_offsets``（**存下来的状态**，拖动移位会改它）。只有状态对不上
+        （老工程没存偏移、或合成图与源图不一致）时才回退到重放拼装算法
+        （``_replay_source_offsets``）—— 宁可不给选，也不能给出错的块。
         """
         if not self._source_images:
             return []
-        rects = []
+        if len(self._source_offsets) != len(self._source_images):
+            self._source_offsets = self._replay_source_offsets()
+        return [(x, y, pm.width(), pm.height())
+                for (x, y), pm in zip(self._source_offsets, self._source_images)]
+
+    def _replay_source_offsets(self) -> list[tuple[int, int]]:
+        """重放 append_pixmap 的拼装算法：第 i 张在 y = 前面高度和 + i×gap。
+
+        这是**兼容用**的兜底路径（老工程里没有偏移字段）。算出来跟当前合成图尺寸对不上，
+        就退化成"整张算一块"（返回单个 (0,0)，``source_rects`` 按 zip 截断后正好如此）。
+        """
+        offsets = []
         y = 0
         for index, pm in enumerate(self._source_images):
             if index:
                 y += self.SOURCE_GAP
-            rects.append((0, y, pm.width(), pm.height()))
+            offsets.append((0, y))
             y += pm.height()
-        if self._pixmap is None or self._pixmap.isNull():
-            return rects
-        if y != self._pixmap.height() or any(w > self._pixmap.width() for _, _, w, _ in rects):
-            return [(0, 0, self._pixmap.width(), self._pixmap.height())]
-        return rects
+        if self._pixmap is not None and not self._pixmap.isNull():
+            if y != self._pixmap.height() or any(pm.width() > self._pixmap.width()
+                                                 for pm in self._source_images):
+                return [(0, 0)]
+        return offsets
+
+    def move_sources(self, indices, dx: int, dy: int) -> bool:
+        """把选中的原图整体移动 (dx, dy) 像素：夹在画布内，里面的帧跟着一起走。
+
+        画布尺寸**固定不变**（用户定的）：拖到边缘就停住，所以帧坐标基准、导出尺寸、
+        工程格式都不受影响。返回是否真的动了 —— 被夹住导致一点没动时返回 False，
+        调用方据此不收尾（快照自己会判等，不会白记一条撤销）。
+        """
+        rects = self.source_rects()
+        moved = [int(i) for i in indices if 0 <= int(i) < len(rects)]
+        if not moved or self._pixmap is None or self._pixmap.isNull():
+            return False
+        width, height = self._pixmap.width(), self._pixmap.height()
+        # 夹取按**整组**算：组里最靠边的块也得留在画布内，所以取各块允许范围的交集
+        low_x = max(-rects[i][0] for i in moved)
+        high_x = min(width - (rects[i][0] + rects[i][2]) for i in moved)
+        low_y = max(-rects[i][1] for i in moved)
+        high_y = min(height - (rects[i][1] + rects[i][3]) for i in moved)
+        dx = max(low_x, min(high_x, int(dx)))
+        dy = max(low_y, min(high_y, int(dy)))
+        if dx == 0 and dy == 0:
+            return False
+        old_rects = [(i, rects[i]) for i in moved]
+        for index in moved:
+            x, y = self._source_offsets[index]
+            self._source_offsets[index] = (x + dx, y + dy)
+        self._shift_frames_with(old_rects, dx, dy)
+        self._recompose_sources()
+        self.canvas.update()
+        self._update_rulers()
+        return True
+
+    def _shift_frames_with(self, old_rects: list, dx: int, dy: int) -> None:
+        """把落在被移动块里的帧按同一位移搬走（内容与框始终粘在一起）。
+
+        判定用帧的**中心点**：跨越两块（几乎不会发生）时，跟着中心所在的那块走。
+        这里只改几何；每个动作缓存的帧图/变换由主窗口在**拖动结束**时统一重算 ——
+        拖动过程中每次鼠标移动都重裁一遍所有动作的帧，帧一多就会卡。
+        """
+        if not self._frames or (dx == 0 and dy == 0):
+            return
+        for pos, frame in enumerate(self._frames):
+            cx = frame[0] + frame[2] / 2.0
+            cy = frame[1] + frame[3] / 2.0
+            for _index, (bx, by, bw, bh) in old_rects:
+                if bx <= cx < bx + bw and by <= cy < by + bh:
+                    self._frames[pos] = type(frame)(
+                        (frame[0] + dx, frame[1] + dy, frame[2], frame[3]))
+                    break
+
+    def _recompose_sources(self) -> None:
+        """按当前偏移把各张原图重新拼成合成大图（尺寸不动，只换内容）。"""
+        if self._pixmap is None or self._pixmap.isNull() or not self._source_images:
+            return
+        combined = QPixmap(self._pixmap.size())
+        combined.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(combined)
+        for (x, y), pm in zip(self._source_offsets, self._source_images):
+            painter.drawPixmap(int(x), int(y), pm)
+        painter.end()
+        self._pixmap = combined
 
     def source_index_at(self, pos: QPointF) -> int:
         """画布坐标点落在第几张原图上；不在任何一块里返回 -1。"""
@@ -2178,8 +2348,16 @@ class ImageViewer(QWidget):
 
     @property
     def source_borders_visible(self) -> bool:
-        """是否显示原图分块边框：工具开着或抠图面板开着，且确实不止一张原图。"""
-        return bool(self._source_tool or self._source_panel) and len(self.source_rects()) > 1
+        """是否显示原图分块边框、并进入原图选择/拖动的手势模式。
+
+        工具开着就显示（**只有一张也显示** —— 单张时"选哪张"没意义，但"拖动移位"有意义，
+        用户明确要求这个按钮不依赖有没有动作、也不依赖几张图）；抠图面板开着时只在多张时
+        显示（一张没什么可挑的，别多画一圈框）。
+        """
+        rects = self.source_rects()
+        if not rects:
+            return False
+        return bool(self._source_tool) or (bool(self._source_panel) and len(rects) > 1)
 
     def selected_sources(self) -> list[int]:
         """当前选中的原图索引（升序）。"""
@@ -2219,11 +2397,14 @@ class ImageViewer(QWidget):
         if not on:
             self._band_start = None
             self._band_rect = None
-        if on:
+            self.canvas.unsetCursor()
+        else:
             self.canvas.setCursor(Qt.CursorShape.CrossCursor)
             self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
-        else:
-            self.canvas.unsetCursor()
+            if not self._selected_sources and len(self.source_rects()) == 1:
+                # 只有一张原图：它天然就是选中项。不补这一下的话，"拖动移位"会因为
+                # 选中集合为空而拖不动（用户明确要求单张也能拖）
+                self.set_selected_sources([0])
         self.canvas.update()
 
     def _frame_at_point(self, pos: QPointF) -> int:
