@@ -1,10 +1,12 @@
 """软件设置回归检查。
 
-覆盖四件事：
+覆盖五件事：
   1. 「工程文件显示缩略图」默认是**勾选**的；
   2. 关掉之后保存的工程里**没有** thumbnail 区段（资源管理器回退到文件类型图标）；
   3. 打开之后又有了缩略图，且是 256×256、描边三层更粗、红色是品牌粉 #FB5582；
-  4. 设置弹窗确实拿着一个可用的「检查更新」入口。
+  4. 设置弹窗确实拿着一个可用的「检查更新」入口；
+  5. 辅助线颜色（普通标线 / 选中标线 / 像素网格）与像素网格显示门槛：
+     默认值 + 读写往返 + 颜色无效值回退默认 + 「恢复默认颜色」+ 弹窗控件即时写设置。
 
 用法: .venv\\Scripts\\python.exe tools\\verify_settings.py
 """
@@ -33,7 +35,10 @@ def check(label: str, condition: bool, detail: str = "") -> None:
 
 
 def main() -> int:
+    # 必须留住引用：写成 QApplication(sys.argv) 不赋值的话，对象会被 GC 掉，
+    # 后面的 Qt 调用直接崩（这个脚本上真的踩过，表现为只打印两行就退出）。
     app = QApplication(sys.argv)
+    app.setApplicationName("SpriteSheetTool verify_settings")
 
     from spritesheet import settings as settings_mod
     from spritesheet.project_file import read_project, write_project
@@ -128,6 +133,92 @@ def main() -> int:
     dialog.cb_thumbnail.setChecked(True)
     check("弹窗重新勾选即时写设置", settings_mod.show_project_thumbnail() is True)
     dialog.close()
+
+    print()
+    print("=== 5. 辅助线颜色 / 像素网格门槛 ===")
+    from PyQt6.QtGui import QColor
+
+    store = QSettings(settings_mod.ORG_NAME, settings_mod.APP_NAME)
+    # 先把这几项清掉，确认"没设置过"时的出厂值
+    for key in (settings_mod.KEY_GUIDE_COLOR, settings_mod.KEY_GUIDE_SELECTED_COLOR,
+                settings_mod.KEY_PIXEL_GRID_COLOR, settings_mod.KEY_PIXEL_GRID_ZOOM):
+        store.remove(key)
+    check("普通标线默认青色", settings_mod.guide_color().name().upper() == "#00FFFF",
+          f"实际 {settings_mod.guide_color().name()}")
+    check("选中标线默认主题色",
+          settings_mod.guide_selected_color().name().upper() == "#E91E63",
+          f"实际 {settings_mod.guide_selected_color().name()}")
+    check("像素网格默认半透灰（alpha 128，不是全不透明）",
+          settings_mod.pixel_grid_color().name().upper() == "#808080"
+          and settings_mod.pixel_grid_color().alpha() == 128,
+          f"实际 {settings_mod.pixel_grid_color().name(QColor.NameFormat.HexArgb)}")
+    check("网格门槛默认 400%", settings_mod.pixel_grid_zoom() == 400,
+          f"实际 {settings_mod.pixel_grid_zoom()}")
+
+    settings_mod.set_guide_color(QColor("#123456"))
+    settings_mod.set_guide_selected_color(QColor("#ABCDEF"))
+    settings_mod.set_pixel_grid_color(QColor(10, 20, 30, 40))
+    settings_mod.set_pixel_grid_zoom(650)
+    check("普通标线颜色写得进读得出",
+          settings_mod.guide_color().name().upper() == "#123456",
+          f"实际 {settings_mod.guide_color().name()}")
+    check("选中标线颜色写得进读得出",
+          settings_mod.guide_selected_color().name().upper() == "#ABCDEF")
+    check("网格颜色连透明度一起存下来（alpha 40）",
+          settings_mod.pixel_grid_color().alpha() == 40
+          and settings_mod.pixel_grid_color().name().upper() == "#0A141E",
+          f"实际 {settings_mod.pixel_grid_color().name(QColor.NameFormat.HexArgb)}")
+    check("网格门槛写得进读得出", settings_mod.pixel_grid_zoom() == 650)
+    store.setValue(settings_mod.KEY_PIXEL_GRID_ZOOM, 99999)
+    check("门槛超范围会被夹住（100..3200）", settings_mod.pixel_grid_zoom() == 3200,
+          f"实际 {settings_mod.pixel_grid_zoom()}")
+    store.setValue(settings_mod.KEY_GUIDE_COLOR, "不是个颜色")
+    check("颜色值是垃圾时回退默认色（绝不让绘制崩）",
+          settings_mod.guide_color().name().upper() == "#00FFFF",
+          f"实际 {settings_mod.guide_color().name()}")
+
+    settings_mod.reset_view_colors()
+    check("恢复默认颜色：三个色一起回出厂",
+          settings_mod.guide_color().name().upper() == "#00FFFF"
+          and settings_mod.guide_selected_color().name().upper() == "#E91E63"
+          and settings_mod.pixel_grid_color().name(QColor.NameFormat.HexArgb).upper()
+          == "#80808080",
+          f"实际 {settings_mod.guide_color().name()}/"
+          f"{settings_mod.pixel_grid_color().name(QColor.NameFormat.HexArgb)}")
+
+    # 弹窗里的控件：改了要即时写设置，并且要通知主窗口重绘
+    signals = []
+    dialog2 = SettingsDialog(win, check_update=lambda: None)
+    dialog2.view_colors_changed.connect(lambda: signals.append(1))
+    check("弹窗摸得到三个颜色按钮 + 门槛输入框",
+          hasattr(dialog2, "btn_guide_color") and hasattr(dialog2, "btn_guide_selected_color")
+          and hasattr(dialog2, "btn_grid_color") and hasattr(dialog2, "spin_grid_zoom"))
+    check("颜色按钮显示的是当前设置色",
+          dialog2.btn_guide_color.color().name().upper() == "#00FFFF",
+          f"实际 {dialog2.btn_guide_color.color().name()}")
+    dialog2.spin_grid_zoom.setValue(250)
+    check("门槛框改动即时写设置", settings_mod.pixel_grid_zoom() == 250,
+          f"实际 {settings_mod.pixel_grid_zoom()}")
+    check("门槛框改动会通知主窗口（不然画布不重绘）", signals == [1], f"实际 {signals}")
+    # 模拟取色盘选了一个颜色（offscreen 下弹不出真的 QColorDialog，
+    # 直接发按钮的"选好了"信号，验的是信号接线本身）
+    from PyQt6.QtGui import QColor as _QC
+
+    dialog2.btn_grid_color.set_color(_QC("#FF00FF"))
+    dialog2.btn_grid_color.color_changed.emit(_QC("#FF00FF"))
+    check("颜色按钮选色后即时写设置（信号接线没接错）",
+          settings_mod.pixel_grid_color().name().upper() == "#FF00FF")
+    check("选色也会通知主窗口", len(signals) == 2, f"实际 {signals}")
+    dialog2.btn_reset_colors.click()
+    check("弹窗里的「恢复默认颜色」按钮生效（含按钮上的色块）",
+          settings_mod.pixel_grid_color().name(QColor.NameFormat.HexArgb).upper()
+          == "#80808080"
+          and dialog2.btn_grid_color.color().name(QColor.NameFormat.HexArgb).upper()
+          == "#80808080")
+    dialog2.close()
+    # 收尾：把这几项恢复成出厂（测试不该留下"用户改过"的设置）
+    settings_mod.reset_view_colors()
+    settings_mod.set_pixel_grid_zoom(settings_mod.DEFAULT_PIXEL_GRID_ZOOM)
 
     # 收尾：MainWindow 关掉才会走 closeEvent → ImageViewer.shutdown()。
     # 不关就走，元素检测线程会在解释器退出时与窗口析构撞车（0xC0000005）。

@@ -218,7 +218,7 @@ class KeyPanel(QWidget):
 
         # ---- 参数（由 PARAM_SPEC 生成）----
         for spec in keying.PARAM_SPEC:
-            if spec["kind"] == "int":
+            if spec["kind"] in ("int", "float"):
                 layout.addLayout(self._make_int_row(spec))
             else:
                 box = QCheckBox(spec["label"])
@@ -305,27 +305,56 @@ class KeyPanel(QWidget):
         return line
 
     def _make_int_row(self, spec: dict) -> QHBoxLayout:
+        """一行参数：标签 + 滑块 + 当前值。
+
+        ``kind == "float"`` 的参数（例如「收边」0.5 一档）滑块本身只能走整数，
+        所以滑块值当**档位序号**用，真实值 = min + 序号 × step；
+        这样 13 档就是滑块上的 0..12，拖动一格正好半像素。
+        """
         row = QHBoxLayout()
         row.setSpacing(4)
         name = self._hint_label(spec["label"])
         name.setFixedWidth(76)
         name.setToolTip(spec.get("tip", ""))
         row.addWidget(name)
+        is_float = spec["kind"] == "float"
+        step = float(spec.get("step", 1)) if is_float else int(spec.get("step", 1))
+        lmin = float(spec["min"]) if is_float else int(spec["min"])
+        lmax = float(spec["max"]) if is_float else int(spec["max"])
+        ticks = max(1, int(round((lmax - lmin) / step))) if is_float else 1
         slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(int(spec["min"]), int(spec["max"]))
-        slider.setSingleStep(int(spec.get("step", 1)))
-        slider.setPageStep(int(spec.get("step", 1)) * 5)
-        slider.setValue(int(self._params[spec["key"]]))
+        if is_float:
+            slider.setRange(0, ticks)
+            slider.setSingleStep(1)
+            slider.setPageStep(max(1, ticks // 6))
+            slider.setValue(int(round((float(self._params[spec["key"]]) - lmin) / step)))
+        else:
+            slider.setRange(lmin, lmax)
+            slider.setSingleStep(step)
+            slider.setPageStep(step * 5)
+            slider.setValue(int(self._params[spec["key"]]))
         slider.setToolTip(spec.get("tip", ""))
-        slider.valueChanged.connect(lambda value, k=spec["key"]: self._on_param_changed(k, value))
+        if is_float:
+            slider.valueChanged.connect(
+                lambda tick, k=spec["key"], lo=lmin, st=step, d=int(spec.get("decimals", 1)):
+                self._on_param_changed(k, round(lo + tick * st, d)))
+        else:
+            slider.valueChanged.connect(lambda value, k=spec["key"]: self._on_param_changed(k, value))
         self._sliders[spec["key"]] = slider
         row.addWidget(slider, 1)
-        value_label = self._hint_label(str(slider.value()))
-        value_label.setFixedWidth(28)
+        value_label = self._hint_label(self._format_param(spec, self._params[spec["key"]]))
+        value_label.setFixedWidth(34 if is_float else 28)
         value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self._values[spec["key"]] = value_label
         row.addWidget(value_label)
         return row
+
+    @staticmethod
+    def _format_param(spec: dict, value) -> str:
+        """滑块右边那个数字：小数档位显示 1 位小数（0.5 不能被四舍五入成 1）。"""
+        if spec["kind"] == "float":
+            return f"{float(value):.{int(spec.get('decimals', 1))}f}"
+        return str(int(value))
 
     # ------------------------------------------------------------ 生命周期
     def start(self) -> None:
@@ -436,7 +465,8 @@ class KeyPanel(QWidget):
         self._params[key] = value
         label = self._values.get(key)
         if label is not None:
-            label.setText(str(value))
+            spec = next((s for s in keying.PARAM_SPEC if s["key"] == key), None)
+            label.setText(self._format_param(spec, value) if spec else str(value))
         self._fast_timer.start(self.FAST_DELAY)
         self._full_timer.start(self.FULL_DELAY)
 

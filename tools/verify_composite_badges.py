@@ -73,6 +73,11 @@ def run_case(app, n_actions):
     """断言 n 个动作的色块依次占第 1..n 格且互不重叠。"""
     viewer = build_scene(n_actions)
     viewer.canvas.resize(400, 300)
+    # 采样前收起两条**浮动**工具条：半透明覆盖层压在色块上会把颜色染淡
+    # （工具条加了「完美像素」按钮变宽之后，这个 400 宽的小画布上就压住了后面的色块）。
+    for _bar in (viewer._toolbar, viewer._v_toolbar):
+        if _bar is not None:
+            _bar.hide()
     img = viewer.canvas.grab().toImage().convertToFormat(QImage.Format.Format_RGB32)
     box = (ELEMS[0][0], ELEMS[0][1])   # 第 1 格锚点（当前动作无 2px 偏移）
 

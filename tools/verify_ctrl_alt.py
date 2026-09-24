@@ -445,6 +445,12 @@ def case_round_badges_side_by_side():
     check("三轮 = 3 帧", got_frames == [{0, 1}, {0, 1, 2}, {0, 1, 2, 3}], f"frames={got_frames}")
 
     viewer.canvas.resize(400, 300)
+    # 采样前把两条**浮动**工具条收起来：它们是半透明覆盖层，还可以被用户拖着走，
+    # 正好压在帧号色块上就会把颜色染淡（工具条多一个「完美像素」按钮变宽之后，
+    # 这个 400 宽的小画布上就压住了第 2、3 个色块）。浮层不影响元素怎么画。
+    _bars = [b for b in (viewer._toolbar, viewer._v_toolbar) if b is not None]
+    for _bar in _bars:
+        _bar.hide()
     viewer.canvas.grab()                       # 先渲染一次：resize 之后的居中/缩放调整要落定
     zoom = viewer._zoom
     off = viewer._offset
@@ -462,6 +468,8 @@ def case_round_badges_side_by_side():
         check(f"第 {k + 1} 个帧号色块在元素1 左上角 +{k} 格", got == want, f"got={got}")
     gap = dominant_color(img, ax + BADGE_SQ + 1, ay + 6, 1, 2 * BADGE_SQ + 4)
     check("三块之间留缝（不是叠成一整块）", gap != want, f"gap={gap} anchors={anchors}")
+    for _bar in _bars:                         # 采样完了把浮层放回去
+        _bar.show()
     return all(dominant_color(img, ax + k * BADGE_STEP, ay, BADGE_SQ, BADGE_SQ) == want
                for k in range(3))
 

@@ -81,6 +81,12 @@ def main() -> int:
     app = QApplication(sys.argv)
     viewer = build_scene(app)
     viewer.canvas.resize(400, 300)
+    # 采样前把两条**浮动**工具条收起来：它们是半透明覆盖层、还能被用户拖走，
+    # 正好压在帧号色块上就会把颜色染淡（工具条加了「完美像素」按钮变宽之后，
+    # 这个 400 宽的小画布上就压住了第 2、3 格）。浮层不影响元素怎么画。
+    bars = [b for b in (viewer._toolbar, viewer._v_toolbar) if b is not None]
+    for bar in bars:
+        bar.hide()
     img = viewer.canvas.grab().toImage().convertToFormat(QImage.Format.Format_RGB32)
 
     left, top = ELEM[0], ELEM[1]

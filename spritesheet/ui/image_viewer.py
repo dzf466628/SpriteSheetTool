@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import math
 import struct
 import sys
 import threading
@@ -31,7 +32,10 @@ from PyQt6.QtWidgets import (
     QPushButton, QVBoxLayout, QWidget,
 )
 
-from spritesheet.settings import last_directory, set_last_directory
+from spritesheet.settings import (
+    guide_color, guide_selected_color, last_directory, pixel_grid_color, pixel_grid_zoom,
+    set_last_directory,
+)
 from .models import Action
 from .widgets import (
     RULER_SIZE, ColorSwatchButton, CompactSpinBox, HintToast, _Ruler, make_tool_icon,
@@ -49,6 +53,66 @@ BADGE_STEP = BADGE_SQ + 2
 
 # 无动作时点画布/控件的统一提示（与预览面板同一句，避免文案漂移）
 NO_ACTION_HINT = "请先添加动作：点左侧「+ 添加动作」"
+
+# 被忽略元素被点到/框到时，在区域正中间显示的提示小字（用户要求）
+IGNORED_HINT_TEXT = "已忽略"
+
+
+def _subtract_rects(box: QRect, holes: list[QRect]) -> list[QRect]:
+    """box 减去若干 holes 之后剩下的矩形（可能被切成好几块）。
+
+    为什么要自己写：PyQt6 的 `QRegion` 既不支持 `rects()` 也不能迭代，拿不到拆分结果；
+    这个"一刀切四块"的算法够用（每次减法最多把一块切成 4 块），结果也是互不重叠的。
+    用途见 `menu_clear_selected_regions`：擦选中元素时，要把**没选中但落在它框里的
+    其它元素**挖掉，不能连坐擦掉别人的像素。
+    """
+    pieces = [box]
+    for hole in holes:
+        if hole.isEmpty():
+            continue
+        next_pieces = []
+        for piece in pieces:
+            overlap = piece.intersected(hole)
+            if overlap.isEmpty():
+                next_pieces.append(piece)
+                continue
+            top = overlap.top() - piece.top()
+            if top > 0:
+                next_pieces.append(QRect(piece.left(), piece.top(), piece.width(), top))
+            bottom = piece.bottom() - overlap.bottom()
+            if bottom > 0:
+                next_pieces.append(QRect(piece.left(), overlap.bottom() + 1,
+                                         piece.width(), bottom))
+            side_h = overlap.height()
+            left = overlap.left() - piece.left()
+            if left > 0:
+                next_pieces.append(QRect(piece.left(), overlap.top(), left, side_h))
+            right = piece.right() - overlap.right()
+            if right > 0:
+                next_pieces.append(QRect(overlap.right() + 1, overlap.top(), right, side_h))
+        pieces = next_pieces
+    return [piece for piece in pieces if not piece.isEmpty()]
+
+
+def _rects_touch(a, b) -> bool:
+    """两个矩形有没有重叠？（边界相接也算"碰到"）
+
+    退出完美像素重贴紧外框时用它判断"这个连通域属于哪个老元素"：共用一条边的两块
+    算同一块（像素是挨着的），所以用严格不等号写半开区间，而不是"重叠面积 > 0"。
+    """
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+
+
+def _is_text_input(widget) -> bool:
+    """这个控件是不是"正在打字"的地方？（app 级过滤器据此放行空格等按键）
+
+    重命名标签页的输入框、动作名、导出文件名……用户在打字的时候，空格是**空格**，
+    不能被我们抢去当平移手势。写成一个函数是因为过滤器里要问好几处。
+    """
+    from PyQt6.QtWidgets import QAbstractSpinBox, QLineEdit, QPlainTextEdit, QTextEdit
+    return isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox))
 
 
 def _detect_frames_image(img: QImage, alpha_threshold: int = 10,
@@ -229,6 +293,14 @@ class _Canvas(QWidget):
     def hint_no_action(self) -> None:
         self._toast.show(NO_ACTION_HINT)
 
+    def hint_add_image(self) -> None:
+        """没图时点某个"看图"按钮的统一说法（完美像素/实际像素这类）。"""
+        self._toast.show("先添加一张图片：双击棋盘格，或用工具栏「添加图片」")
+
+    def show_toast(self, text: str) -> None:
+        """画布底部那行小字提示（外部想给用户一句反馈时调它，别去碰 _toast）。"""
+        self._toast.show(text)
+
     def resizeEvent(self, event):
         toolbar = getattr(self._viewer, "_toolbar", None)
         if toolbar is not None:
@@ -256,7 +328,9 @@ class _Canvas(QWidget):
 
     def paintEvent(self, event):
         p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        # 完美像素模式关掉平滑缩放：平滑会把像素边缘糊成渐变，像素画就没法看了
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform,
+                        not self._viewer.pixel_perfect)
         # 背景
         if self._viewer._bg_mode == "checker":
             # 一次平铺（原逐格 fillRect 在大画布上每次重绘要数千次调用）
@@ -322,8 +396,42 @@ class _Canvas(QWidget):
                     p.drawRect(self._viewer._band_rect)
                 p.restore()
 
+            # 每像素网格（完美像素模式）：1 像素一条线，放大到设置里的门槛以上才画。
+            # 门槛是**必须**的：网格线间距 = 缩放倍数，100% 时线宽 1px、间距也是 1px，
+            # 整张图会被线盖满（等于给图蒙一层纱）。颜色/门槛都来自「软件设置」。
+            if self._viewer.pixel_perfect and self._viewer._grid_color.alpha() > 0 \
+                    and zoom >= self._viewer._grid_zoom:
+                _doc = QRectF(offset.x(), offset.y(),
+                              self._viewer._pixmap.width() * zoom,
+                              self._viewer._pixmap.height() * zoom)
+                p.save()
+                p.setClipRect(_doc.intersected(QRectF(self.rect())))
+                # 1px 线必须关反锯齿 + 取整，否则会糊成 2px 灰线（元素框那边踩过）
+                p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+                p.setPen(QPen(self._viewer._grid_color, 1))
+                _x0, _x1 = max(0, int(_doc.left())), min(self.width(), int(_doc.right()) + 1)
+                _y0, _y1 = max(0, int(_doc.top())), min(self.height(), int(_doc.bottom()) + 1)
+                _step = zoom
+                _i = 0
+                _x = _doc.left()
+                while _x <= _doc.right() and _i < 20000:
+                    _xp = round(_x)
+                    if _x0 <= _xp <= _x1:
+                        p.drawLine(_xp, _y0, _xp, _y1)
+                    _x += _step
+                    _i += 1
+                _j = 0
+                _y = _doc.top()
+                while _y <= _doc.bottom() and _j < 20000:
+                    _yp = round(_y)
+                    if _y0 <= _yp <= _y1:
+                        p.drawLine(_x0, _yp, _x1, _yp)
+                    _y += _step
+                    _j += 1
+                p.restore()
+
             # 绘制元素辅助线（普通灰色虚线，当前动作选中变当前色，多动作色块依次排）
-            if self._viewer._frames:
+            if self._viewer._frames and not self._viewer.pixel_perfect:
                 current_action = self._viewer.current_action
                 # 为每个动作预计算 frame_numbers / composite_representatives /
                 # 复用计数（元素出现的所有帧号）。显式帧布局（复用 / Alt+Ctrl 轮 / 导入）
@@ -332,6 +440,11 @@ class _Canvas(QWidget):
                 for _act in self._viewer.actions:
                     _act_info[_act] = self._viewer._action_frame_badges(_act)
                 _empty_info = ({}, {}, [], False)
+                # 内容已被擦空 / 被「清空选中区域」擦过的元素：**一个框都不画**
+                # （灰色虚线不画，多动作的彩色虚线也不画）—— 用户要求"区域被清空或被橡皮
+                # 擦掉之后就不要再出现虚线框"。但当前动作的**实线**框和帧号色块照旧：
+                # 那是"这个元素还在我的帧列表里"的标记，刻意留着，免得用户以为帧也一起没了。
+                _box_hidden = self._viewer.frame_box_hidden
                 for i, (fx, fy, fw, fh) in enumerate(self._viewer._frames):
                     rect = QRectF(offset.x() + fx * zoom, offset.y() + fy * zoom,
                                   fw * zoom, fh * zoom)
@@ -341,17 +454,20 @@ class _Canvas(QWidget):
                         if i in act.selected_indices:
                             selected_actions.append(act)
                     if not selected_actions:
-                        # 无任何动作选中：灰色虚线
-                        pen = QPen(QColor("#808080"), 1.0)
-                        pen.setStyle(Qt.PenStyle.DashLine)
-                        p.setPen(pen)
-                        p.drawRect(rect)
+                        # 无任何动作选中：灰色虚线（清空过/内容已空的不画）
+                        if not _box_hidden(i):
+                            pen = QPen(QColor("#808080"), 1.0)
+                            pen.setStyle(Qt.PenStyle.DashLine)
+                            p.setPen(pen)
+                            p.drawRect(rect)
                     else:
                         # 非当前动作的边框先画（轻微偏移避免完全重叠）
                         for idx, act in enumerate(selected_actions):
                             if act is not current_action:
                                 # 属于多元素合成组的元素不画单独框，由合成粗框统一绘制
                                 if i in (_act_info.get(act) or _empty_info)[0]:
+                                    continue
+                                if _box_hidden(i):
                                     continue
                                 off = idx * 2
                                 pen = QPen(QColor(act.color), 1.0)
@@ -468,14 +584,53 @@ class _Canvas(QWidget):
 
             # 画笔/橡皮的笔刷圈（PS 那种跟着鼠标的圆）：看得出当前多粗、落点在哪。
             # 画黑白双圈：单色圈在浅色图上会看不见。
-            if self._viewer.painting and self._viewer._brush_pos is not None:
-                radius = max(1.0, self._viewer.brush_size * self._viewer._zoom / 2.0)
+            # 完美像素模式下改成**方框**：方头笔落的就是这个方块，框在哪就画在哪
+            # （方框按图片像素对齐，所以"框住的正好是要涂的那几个像素"）。
+            # 让位期间（按住空格/Ctrl/Alt）**不画笔刷圈**：圈还在就等于告诉用户"这一下会画"，
+            # 而实际上这一下是平移/合成/复用。圈收掉 = 最直接的"画笔暂时让位了"的反馈。
+            if (self._viewer.painting and self._viewer._brush_pos is not None
+                    and not self._viewer.paint_yielded()):
                 center = self._viewer._brush_pos
                 p.setBrush(Qt.BrushStyle.NoBrush)
-                p.setPen(QPen(QColor(0, 0, 0, 160), 1))
-                p.drawEllipse(center, radius + 1, radius + 1)
-                p.setPen(QPen(QColor(255, 255, 255, 220), 1))
-                p.drawEllipse(center, radius, radius)
+                if self._viewer.pixel_perfect:
+                    square = self._viewer.brush_square_canvas(center)
+                    p.setPen(QPen(QColor(0, 0, 0, 160), 1))
+                    p.drawRect(square.adjusted(-1, -1, 1, 1))
+                    p.setPen(QPen(QColor(255, 255, 255, 220), 1))
+                    p.drawRect(square)
+                else:
+                    radius = max(1.0, self._viewer.brush_size * self._viewer._zoom / 2.0)
+                    p.setPen(QPen(QColor(0, 0, 0, 160), 1))
+                    p.drawEllipse(center, radius + 1, radius + 1)
+                    p.setPen(QPen(QColor(255, 255, 255, 220), 1))
+                    p.drawEllipse(center, radius, radius)
+
+            # 「已忽略」小字提示：被点到 / 框到的那些已忽略元素，在**区域正中间**显示一行小字，
+            # 提示"这里不是空的，是被忽略掉了"（用户要求）。画在元素框之上、标线之下。
+            # 用深色小药丸 + 浅色字：浅图深图上都看得清（帧号色块是彩色 + 白字，两套区分得开）。
+            if self._viewer._ignored_hint and not self._viewer.pixel_perfect:
+                zoom = self._viewer._zoom
+                offset = self._viewer._offset
+                p.setFont(QFont("Microsoft YaHei UI", 8))
+                metrics = p.fontMetrics()
+                text_w = metrics.horizontalAdvance(IGNORED_HINT_TEXT)
+                chip_w = float(text_w + 12)
+                chip_h = float(metrics.height() + 4)
+                for index in self._viewer._ignored_hint:
+                    if not 0 <= index < len(self._viewer._frames):
+                        continue
+                    fx, fy, fw, fh = self._viewer._frames[index]
+                    center = QPointF(offset.x() + (fx + fw / 2) * zoom,
+                                     offset.y() + (fy + fh / 2) * zoom)
+                    chip = QRectF(center.x() - chip_w / 2, center.y() - chip_h / 2,
+                                  chip_w, chip_h)
+                    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                    p.setPen(QPen(QColor(120, 120, 120, 220), 1))
+                    p.setBrush(QColor(24, 24, 24, 190))
+                    p.drawRoundedRect(chip, 3, 3)
+                    p.setPen(QColor("#D8D8D8"))
+                    p.drawText(chip, Qt.AlignmentFlag.AlignCenter, IGNORED_HINT_TEXT)
+                    p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
             # 绘制框选矩形
             if self._selection_rect is not None:
@@ -485,9 +640,10 @@ class _Canvas(QWidget):
                 p.drawRect(self._selection_rect)
 
             # 标线（从标尺拖出来的参考线）：画在**图片范围**上（PS 也是铺满文档）。
-            # 选中的那条用主题色，其余青色 —— 一眼能看出现在选中的是哪一条。
+            # 选中的那条用主题色，其余用设置里的普通标线色 —— 一眼能看出现在选中的是哪一条。
             # 画在最后 = 压在所有元素框之上（参考线本来就是为了对齐看的，不能被挡住）。
-            if self._viewer._guides:
+            # 完美像素模式下不画（用户要求）：网格 + 标线叠一起分不清哪条是参考线。
+            if self._viewer._guides and not self._viewer.pixel_perfect:
                 selected = self._viewer.selected_guide()
                 zoom = self._viewer._zoom
                 offset = self._viewer._offset
@@ -496,8 +652,8 @@ class _Canvas(QWidget):
                 # 1px 的线必须关反锯齿 + 取整，否则会糊成 2px 的灰线（分块框踩过这个坑）
                 p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
                 for guide in self._viewer._guides:
-                    p.setPen(QPen(QColor("#E91E63") if guide is selected
-                                  else QColor("#00FFFF"), 1))
+                    p.setPen(QPen(self._viewer._guide_sel_color if guide is selected
+                                  else self._viewer._guide_pen_color, 1))
                     if guide[0] == "h":
                         line_y = round(offset.y() + guide[1] * zoom)
                         p.drawLine(round(offset.x()), line_y,
@@ -529,6 +685,7 @@ class _Canvas(QWidget):
             mouse_pos.y() - (mouse_pos.y() - self._viewer._offset.y()) * (new_zoom / old_zoom),
         )
         self._viewer._zoom = new_zoom
+        self._viewer.snap_offset()
         self._viewer._update_rulers()
         self.update()
 
@@ -539,10 +696,24 @@ class _Canvas(QWidget):
             self.update()
         super().leaveEvent(event)
 
+    def set_pan_mode(self, on: bool) -> None:
+        """空格平移的开关（画布自己的键盘事件 + app 级过滤器都会调它，幂等）。
+
+        为什么要在 app 级过滤器里也接一遍：**空格会被"当前聚焦的那个按钮"当成点击吃掉**
+        （QPushButton 的默认行为就是空格=按下）。用户按了空格想挪画布，结果按钮被按了一下，
+        平移一点反应都没有。app 级过滤器抢先把空格变成平移状态，焦点在哪个按钮上都不影响。
+        顺带一提，让位时笔刷圈要立刻消失，所以这里要 update()。
+        """
+        on = bool(on)
+        if self._panning == on:
+            return
+        self._panning = on
+        self.setCursor(Qt.CursorShape.ClosedHandCursor if on else Qt.CursorShape.ArrowCursor)
+        self.update()
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Space:
-            self._panning = True
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.set_pan_mode(True)
         elif event.key() == Qt.Key.Key_Escape and self._viewer.source_interaction:
             # 原图选择状态下的 Esc = 取消选择（工具本身还开着，跟画图软件一致）
             self._viewer.set_selected_sources([])
@@ -556,10 +727,23 @@ class _Canvas(QWidget):
             self._viewer.select_guide(None)
             event.accept()
             return
+        elif event.key() == Qt.Key.Key_Escape and self._viewer.ignored_hint_frames():
+            # Esc 也顺手收掉「已忽略」小字提示
+            self._viewer.clear_ignored_hint()
+            event.accept()
+            return
         elif event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) \
                 and self._viewer.selected_guide() is not None:
             # 选中标线 + Del = 删掉它（用户要的两种删法之一；另一种是拖回标尺上）
             self._viewer.remove_guide(self._viewer.selected_guide())
+            event.accept()
+            return
+        elif event.key() == Qt.Key.Key_Escape:
+            # Esc 的最后一档 = 把当前工具收起来（画笔/橡皮/吸管/原图选择/抠除背景）。
+            # 刻意**排在所有 Esc 分支之后**：先取消"选中的东西"（框选/标线/已忽略提示），
+            # 都取消完了再收工具 —— 一按 Esc 就把工具关掉的话，用户想取消个选中都做不到。
+            # 手上没工具时主窗口什么也不会做，所以这里不必先判断"有没有工具"。
+            self._viewer.tool_dismiss_requested.emit()
             event.accept()
             return
         elif event.key() == Qt.Key.Key_Control:
@@ -570,8 +754,7 @@ class _Canvas(QWidget):
 
     def keyReleaseEvent(self, event):
         if event.key() == Qt.Key.Key_Space:
-            self._panning = False
-            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.set_pan_mode(False)
         elif event.key() == Qt.Key.Key_Control:
             self._viewer.end_ctrl_composition()
             event.accept()
@@ -727,7 +910,9 @@ class _Canvas(QWidget):
             return
         # 吸管工具（左侧竖条，与抠图面板那个吸管是两回事：那个只给抠图取背景色）：
         # 取色写进前景色，取完**保持吸管模式**（PS 也是这样，方便连着取几个色）
-        if self._viewer.paint_tool == "pick" and event.button() == Qt.MouseButton.LeftButton:
+        # 同样只接"没有 Ctrl / Alt / 空格"的那一下 —— 见下面画笔那段注释。
+        if (self._viewer.paint_tool == "pick" and event.button() == Qt.MouseButton.LeftButton
+                and not self._viewer.paint_yielded(event.modifiers())):
             self._viewer.canvas_pressed.emit()   # 点了原图 → 收起变换手柄（与点别处一致）
             self._viewer.pick_color_at(event.position())
             event.accept()
@@ -735,9 +920,10 @@ class _Canvas(QWidget):
         # 画笔 / 橡皮：按住左键涂抹。
         # 只接"没有 Ctrl / Alt"的那一下 —— Ctrl+点击=合成帧、Alt+点击=复用帧是既有的
         # 全局手势，绘画工具开着也不该把它们抢掉（用户刚验收过那套逻辑）。
+        # 判定统一走 paint_yielded()：用户口径是「按住空格/Ctrl/Alt 期间画笔**临时让位**、
+        # 松开就回来」，所以这里只看按键状态，绝不改动工具本身。
         if (self._viewer.painting and event.button() == Qt.MouseButton.LeftButton
-                and not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier
-                                              | Qt.KeyboardModifier.AltModifier))):
+                and not self._viewer.paint_yielded(event.modifiers())):
             if self._viewer.begin_paint_stroke(event.position()):
                 self._viewer.canvas_pressed.emit()
                 event.accept()
@@ -753,6 +939,11 @@ class _Canvas(QWidget):
         if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton,
                               Qt.MouseButton.MiddleButton):
             self._viewer.canvas_pressed.emit()
+        # 「已忽略」小字提示：这一下点在哪个已忽略元素上，就在它正中间显示提示；
+        # 点在别处就收掉。放在所有分支之前 —— 它是**纯视觉反馈**，不该被"有没有动作/
+        # 有没有图"拦住（用户要的就是"点这里能知道这块是被忽略掉的"）。
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._viewer.hint_ignored_at(event.position())
         if event.button() == Qt.MouseButton.LeftButton and self._viewer._pixmap:
             if not self._viewer.current_action:
                 # 有图但还没有动作：框选出来的帧没有地方存（selected_indices 属于动作），
@@ -770,6 +961,8 @@ class _Canvas(QWidget):
         # 空格平移优先（与按下时的判定一致），否则"空格拖着拖着变成拖图/框选"了
         if self._panning and self._pan_start is not None:
             self._viewer._offset = event.position() - self._pan_start
+            # 完美像素模式下平移也跟着取整：半个像素的偏移会让像素宽窄不匀
+            self._viewer.snap_offset()
             self._viewer._update_rulers()
             self.update()
             return
@@ -793,6 +986,8 @@ class _Canvas(QWidget):
             self._src_cursor(self._viewer.source_index_at(event.position()) >= 0)
         if self._drag_start is not None:
             self._selection_rect = QRectF(self._drag_start, event.position()).normalized()
+            # 框选过程中：框到哪个已忽略元素，就在它中间实时显示「已忽略」
+            self._viewer.hint_ignored_in_rect(self._selection_rect.toRect())
             self.update()
             return
         # 悬停反馈：光标移到标线上时换成"可以上下/左右拖"的光标（PS 手感）。
@@ -834,6 +1029,8 @@ class _Canvas(QWidget):
             rect = self._selection_rect
             self._drag_start = None
             self._selection_rect = None
+            # 松手后按**最终那个框**再算一次：拖动途中最后几像素没刷到的也补上
+            self._viewer.hint_ignored_in_rect(rect.toRect())
             if rect.width() < 5 and rect.height() < 5:
                 # 单击按修饰键分三种（**顺序不能反**：Alt 一旦排在合成模式后面，
                 # 手动点亮「Ctrl+合成」按钮时 Alt+点击就会被合成抢走，见下）：
@@ -1129,14 +1326,16 @@ class FloatingToolBar(QWidget):
     bg_changed = pyqtSignal(str)
     compose_toggled = pyqtSignal(bool)
     reuse_toggled = pyqtSignal(bool)
+    pixel_perfect_toggled = pyqtSignal(bool)
     history_requested = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        # 宽度要容纳：合成(80) + 复用(80) + 放大/缩小(24×2) + 三种背景(24×3) + 历史(24) + 边距/间距
+        # 宽度要容纳：合成(80) + 复用(80) + 放大/缩小(24×2) + 三种背景(24×3)
+        # + 完美像素(24) + 历史(24) + 边距/间距
         # 右侧留一条"3 根细短竖线"的拖动把手（证明这里可以拖）
         self.GRIP_W = 12
-        self.setFixedSize(335, 32)
+        self.setFixedSize(363, 32)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._bg_mode = "checker"
         # 工具条可以自己拖（空白处按下拖动）：用户要求"原图的悬浮工具也能拖动，
@@ -1213,6 +1412,13 @@ class FloatingToolBar(QWidget):
         layout.addWidget(self.btn_bg_checker)
         layout.addWidget(self.btn_bg_black)
         layout.addWidget(self.btn_bg_white)
+
+        # 完美像素（像素画视图）：紧挨「白色背景」右边（用户指定位置）。
+        # 点开 = 100% 实际像素 + 每像素网格 + 最近邻 + 方头笔，视图上不再画元素框/帧号/标线。
+        self.btn_pixel_perfect = self._make_button(
+            "perfect_pixel", "完美像素（像素画视图）：100% 实际像素 + 每像素网格 + 方块笔", True)
+        self.btn_pixel_perfect.clicked.connect(self.pixel_perfect_toggled)
+        layout.addWidget(self.btn_pixel_perfect)
 
         # 历史记录面板开关（显示/隐藏右侧浮动历史窗口）
         self.btn_history = self._make_button("history", "历史记录")
@@ -1653,6 +1859,13 @@ class ImageViewer(QWidget):
     json_selected = pyqtSignal(str)
     selection_changed = pyqtSignal()
     frames_updated = pyqtSignal()
+    # 退出完美像素后按当前像素重贴紧了元素外框（只改外框、不重排帧）：
+    # 主窗口据此记一条撤销 + 刷新（没有当前动作时也要能撤销，所以不走 action_performed_full）
+    frames_refit = pyqtSignal(str)
+    # 「把当前工具收起来」：Esc、或者点画布外那一堆面板时发出（画笔/橡皮/吸管/原图选择/
+    # 抠除背景）。画布和查看器都知道"该不该收"，但**按钮的勾选状态在主窗口**，
+    # 所以统一发出去让主窗口收 —— 一处收工具，不会出现按钮还亮着、工具已经关了的分裂。
+    tool_dismiss_requested = pyqtSignal()
     # 在原图上按下鼠标（选元素 / 框选 / 点空白 / 空格平移都算）：主窗口据此收起
     # 右侧「帧编辑」的变换手柄 —— 点了别处，变换按钮就该弹起。
     canvas_pressed = pyqtSignal()
@@ -1731,6 +1944,29 @@ class ImageViewer(QWidget):
         self._guides: list[list] = []
         self._sel_guide: list | None = None
         self._guide_drag_active = False
+        # 完美像素（像素画视图）：100% 实际像素 + 每像素网格 + 最近邻 + 方头笔，
+        # 并且**不画**元素虚线框/帧号/标线（100% 下那些辅助线会糊住画面）。
+        # 这是"每个标签页各一份"的视图状态（跟标线一样，不进工程文件）。
+        self.pixel_perfect = False
+        self._pp_prev: tuple[float, QPointF] | None = None   # 进模式前的 (zoom, offset)
+        # 辅助线颜色/门槛从软件设置读一次缓存在这（绘制里不做 QSettings 读取）
+        self._guide_pen_color = QColor("#00FFFF")
+        self._guide_sel_color = QColor("#E91E63")
+        self._grid_color = QColor(128, 128, 128, 128)
+        self._grid_zoom = 4.0
+        self.reload_view_colors()
+        # 「内容已经被擦空」的元素集合：画布不再给它们画灰色虚线框（用户要求：
+        # 区域被清空或被橡皮擦掉之后就别再出现虚线框）。带缓存，见 empty_frames()。
+        self._empty_frames: set[int] = set()
+        self._empty_cache_key = None
+        # 被「清空选中区域」擦过的元素：即使它框里还留着**别的元素**的像素
+        # （挖洞保下来的），也不再给它画虚线框 —— 用户要的是"这个区域被清空了就别挂框"，
+        # 不能因为洞里还有邻居的像素就又把框露出来。这个记录会进快照和工程（撤销/切页/重开
+        # 都要一致），所以不能只靠"扫像素看空不空"来推断。
+        self._cleared_frames: set[int] = set()
+        # 被忽略的元素里，**刚被点到或框到**的那些 —— 只在画布正中间画一行小字「已忽略」，
+        # 提示"这里不是没东西，是被忽略掉了"（用户要求）。
+        self._ignored_hint: set[int] = set()
         self._selected_sources: set[int] = set()
         self._band_start = None          # 框选起点（画布坐标）
         self._band_rect = None           # 框选矩形
@@ -1773,6 +2009,9 @@ class ImageViewer(QWidget):
         # 正在被检测的那张原图的下标（-1 = 整张画布重检）：检测期间拖动时，只有拖的是
         # 这张图才需要给结果补位移
         self._detect_owner_index = -1
+        # 「退出完美像素后按当前像素重贴紧元素外框」的世代号：只重裁外框、不重排帧，
+        # 和 _detect_generation 分开数（两件事并发时互不作废）
+        self._refit_generation = 0
         # 拖动开始时定下的"搬哪些帧"（见 begin_source_move）
         self._move_frame_owner: set | None = None
         self._build_ui()
@@ -1809,6 +2048,7 @@ class ImageViewer(QWidget):
         self._toolbar.zoom_in_requested.connect(self.zoom_in)
         self._toolbar.zoom_out_requested.connect(self.zoom_out)
         self._toolbar.bg_changed.connect(self._on_bg_changed)
+        self._toolbar.pixel_perfect_toggled.connect(self.set_pixel_perfect)
         self._toolbar.compose_toggled.connect(self.set_compose_mode)
         self._toolbar.reuse_toggled.connect(self.set_reuse_mode)
 
@@ -1961,9 +2201,73 @@ class ImageViewer(QWidget):
         thread.finished.connect(thread.deleteLater)
         thread.start()
 
+    def refit_frames(self) -> None:
+        """按当前像素**只重贴紧元素外框**（不重排帧、不认新元素）。
+
+        用户口径（退出完美像素时触发）：在像素画视图里涂完/擦完，方块该跟着像素走。
+        但**绝不能重排帧** —— 帧号、选中集、合成组、复用关系、忽略标记全都挂在元素下标上，
+        重检一遍（`_start_frame_detection`）会把这些全毁掉，所以主窗口里才写着
+        「已经排过帧了，绝不重检」。这里走的是第三种办法：后台跑一次连通域（复用同一个
+        检测线程，结果只是矩形），把每个老外框**碰到**的连通域并起来当新外框。
+
+        于是：画胖了一圈的外框会跟上；擦掉内容的元素外框原样留着（它已经"空"了，
+        本来就不再画虚线框）；**新画出来的一块独立像素不会变成新元素**（这正是"只重裁、
+        不重排"的代价，用户选的）；两块元素被涂得连在一起时，两边都拿到并集框
+        （与处理顺序无关）。
+        """
+        if not self._frames or self._pixmap is None or self._pixmap.isNull():
+            return
+        self._refit_generation += 1
+        generation = self._refit_generation
+        # min_area=0：这次不是"识别元素"，是"把已有外框贴紧"，小碎块也要算进去
+        thread = _FrameDetectThread(self._pixmap.toImage(), min_area=0, parent=self)
+        self._detect_threads.add(thread)
+
+        def apply_result(components: list[tuple[int, int, int, int]]) -> None:
+            if generation != self._refit_generation:
+                return          # 期间又退出过一次 / 已经关了窗口
+            self._apply_refit(components)
+
+        thread.detected.connect(apply_result)
+        thread.finished.connect(lambda t=thread: self._detect_threads.discard(t))
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _apply_refit(self, components: list[tuple[int, int, int, int]]) -> None:
+        """把连通域并到"碰到它的那些老外框"上（只改外框，顺序与数量都不变）。"""
+        new_frames: list[tuple[int, int, int, int]] = []
+        moved = 0
+        for fx, fy, fw, fh in self._frames:
+            hits = [c for c in components if _rects_touch(c, (fx, fy, fw, fh))]
+            if not hits:
+                # 这一块像素全被擦掉了：外框原样留着 —— 元素不能被"删掉"，
+                # 否则下标会整体前移，用户排好的帧全错位（这正是本次要避免的事）
+                new_frames.append((fx, fy, fw, fh))
+                continue
+            x0 = min(c[0] for c in hits)
+            y0 = min(c[1] for c in hits)
+            x1 = max(c[0] + c[2] for c in hits)
+            y1 = max(c[1] + c[3] for c in hits)
+            box = (x0, y0, x1 - x0, y1 - y0)
+            if box != (fx, fy, fw, fh):
+                moved += 1
+            new_frames.append(box)
+        if not moved:
+            # 一个框都没变（涂的是元素内部）：不留脏数据、不占一条撤销
+            self.canvas.show_toast("元素外框本来就贴紧着，没有要改的")
+            return
+        self._frames = new_frames
+        self.canvas.update()
+        self._update_rulers()
+        self.frames_refit.emit(f"已按当前像素重贴紧 {moved} 个元素外框")
+
     def fit_view(self):
-        """居中并自适应画布窗口（0.9 比例）。"""
+        """居中并自适应画布窗口（0.9 比例）。完美像素模式下保持 100% 不"自适应"。"""
         if not self._pixmap or self._pixmap.isNull():
+            return
+        if self.pixel_perfect:
+            # 换图/重新加载后仍要维持"实际像素"这个视图，不能被自适应拉回 47% 那种
+            self.zoom_actual_pixel()
             return
         cw, ch = max(1, self.canvas.width()), max(1, self.canvas.height())
         zw = cw / self._pixmap.width()
@@ -2042,15 +2346,79 @@ class ImageViewer(QWidget):
             self.begin_alt_reuse()
         elif event.type() == QEvent.Type.KeyRelease and event.key() == Qt.Key.Key_Alt:
             self.end_alt_reuse()
+        elif event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) \
+                and event.key() == Qt.Key.Key_Space:
+            # 空格平移：在这里接一遍的理由见 _Canvas.set_pan_mode 的注释
+            # （聚焦的按钮会把空格当成"点击自己"吃掉）。焦点在能打字的地方就完全不插手，
+            # 空格要留给用户打字。
+            if watched is not self.canvas and not _is_text_input(watched):
+                self.set_pan_mode(event.type() == QEvent.Type.KeyPress)
+                return True          # 吞掉：别让聚焦的按钮把这一下空格当成点击
+        elif event.type() == QEvent.Type.MouseButtonPress and self.paint_tool is not None:
+            # 点画布以外的界面（动作列表、右侧预览、动画横条、菜单栏、左侧竖条的空白处…）
+            # 就把画笔收起来：用户去干别的事了，画笔不该还亮着 —— 不然回到画布一拖就画上去，
+            # 而他以为早就退出画笔了。画笔这条工作流里的控件（画布/标尺/浮动条/选项条）不算"外面"。
+            if not self._keeps_paint_tool(watched):
+                self.tool_dismiss_requested.emit()
         elif event.type() in (
             QEvent.Type.ApplicationDeactivate,
             QEvent.Type.WindowDeactivate,
         ):
-            # 窗口切走时系统可能不会再发 Ctrl/Alt 的 KeyRelease，避免状态和
-            # 工具按钮一直卡在按下状态。
+            # 窗口切走时系统可能不会再发 Ctrl/Alt/空格 的 KeyRelease，避免状态和
+            # 工具按钮一直卡在按下状态（空格卡住会让画布一直处于"平移中"）。
             self.end_ctrl_composition()
             self.end_alt_reuse()
+            self.set_pan_mode(False)
         return super().eventFilter(watched, event)
+
+    def paint_yielded(self, modifiers=None) -> bool:
+        """画笔/橡皮/吸管现在该不该**让位**（用户口径：按住期间临时让位、松开就回来）。
+
+        让位条件：
+          - 空格按着：那是平移手势（平移动过的地方绝不该留下笔迹）；
+          - Ctrl / Alt 按着：那是合成帧 / 复用帧手势，本来就优先于绘画；
+          - Meta（Win 键）按着：同理，按住时不当画笔用。
+
+        ``modifiers`` 传鼠标事件自带的修饰键（以事件为准，测试构造的事件也认）；
+        不传就现场问 ``QApplication.keyboardModifiers()``（绘笔刷圈时没有事件可传）。
+        **只看按键，不改工具状态** —— 松开就是画笔。
+        """
+        if self._panning:
+            return True
+        if modifiers is None:
+            modifiers = QApplication.keyboardModifiers()
+        return bool(modifiers & (Qt.KeyboardModifier.ControlModifier
+                                 | Qt.KeyboardModifier.AltModifier
+                                 | Qt.KeyboardModifier.MetaModifier))
+
+    def set_pan_mode(self, on: bool) -> None:
+        """空格平移的转发口（app 级过滤器 → 画布），见 ``_Canvas.set_pan_mode``。"""
+        self.canvas.set_pan_mode(on)
+
+    def _keeps_paint_tool(self, watched) -> bool:
+        """这一下点击落在"画笔这条工作流"里吗？（是的话不收画笔）
+
+        留在工作流里的：画布本身、两条标尺、右上角浮动工具条、画笔工具选项条（粗细/颜色）
+        —— 调完粗细画笔还在，否则每改一次笔宽都要重新点一次画笔。
+
+        其余一律算"点画布外"：动作列表、右侧预览、动画横条、标签栏、菜单栏、状态栏、
+        左侧竖条的**空白处**（竖条上的工具按钮不算：按下去本来就是切工具）。
+        别的顶层窗口（取色盘、弹窗）完全不插手。
+        """
+        node = watched
+        first = watched
+        while node is not None:
+            if node is self._v_toolbar:
+                # 竖条：点在它的**按钮**上 = 正常切工具（放行）；点在它的**空白处**
+                # = 用户想退出画笔（收掉）
+                return first is not self._v_toolbar
+            if node is self.canvas or node is self._toolbar or node is self._paint_bar \
+                    or node is self.h_ruler or node is self.v_ruler:
+                return True
+            if node is self:
+                return False
+            node = node.parentWidget()
+        return False          # 不在本查看器里（属于别的窗口）：不插手
 
     def add_to_composite(self, idx: int) -> None:
         if not self.current_action or idx < 0 or idx >= len(self._frames):
@@ -2347,6 +2715,10 @@ class ImageViewer(QWidget):
 
         与「忽略选中区域」的区别：那个只标记、像素一个不动；这个真把内容抹掉。
         走全量快照（像素也变，快照里带着 pixmap / source_images），Ctrl+Z 一次全回来。
+
+        **擦的范围只算"选中的那些元素"**（与「忽略选中区域」口径一致）：选中元素的方框
+        还要先把**没被选中的其它元素**的方框挖掉 —— 一个大元素框里套着几个小元素时，
+        小元素没被选中就不该被连坐擦掉（用户明确要求："没选择但是在灰色虚线框内的元素"）。
         """
         action = self.current_action
         if action is None or not action.selected_indices or self._pixmap is None:
@@ -2355,9 +2727,22 @@ class ImageViewer(QWidget):
                           if 0 <= int(i) < len(self._frames)})
         if not indices:
             return
+        selected = set(indices)
+        holes = [QRect(int(x), int(y), int(w), int(h))
+                 for index, (x, y, w, h) in enumerate(self._frames)
+                 if index not in selected]
+        boxes = []
+        for index in indices:
+            x, y, w, h = self._frames[index]
+            boxes.extend(_subtract_rects(QRect(int(x), int(y), int(w), int(h)), holes))
+        if not boxes:
+            return
         # 先抓 before（含旧 pixmap / source_images 的引用），再换图 —— 顺序反了撤销回不去
         self.about_to_perform_full.emit()
-        self.erase_regions([self._frames[i] for i in indices])
+        self.erase_regions(boxes)
+        # 记进"已清空"（必须在 about_to_perform_full 之后：那个 before 快照里不能带它，
+        # 否则撤销回来框还是不画）
+        self._cleared_frames.update(indices)
         self._detach_elements(set(indices), mark_ignored=True)
         self.frames_updated.emit()
         self.action_performed_full.emit("清空选中区域")
@@ -2371,9 +2756,15 @@ class ImageViewer(QWidget):
         """
         if self._pixmap is None or self._pixmap.isNull():
             return
-        boxes = [QRect(int(x), int(y), max(0, int(w)), max(0, int(h)))
-                 for (x, y, w, h) in rects]
-        boxes = [box for box in boxes if not box.isEmpty()]
+        # 既收 QRect 也收 (x, y, w, h) 四元组：清空选中区域拆出来的碎块是 QRect，
+        # 早期调用方传的是元组，两种都认免得调用点各自转换
+        boxes = []
+        for item in rects:
+            box = item if isinstance(item, QRect) else QRect(int(item[0]), int(item[1]),
+                                                            int(item[2]), int(item[3]))
+            box = QRect(box.x(), box.y(), max(0, box.width()), max(0, box.height()))
+            if not box.isEmpty():
+                boxes.append(box)
         if not boxes:
             return
         self._pixmap = QPixmap.fromImage(self._erased_image(self._pixmap, boxes))
@@ -2394,6 +2785,96 @@ class ImageViewer(QWidget):
                 self._source_images[index] = QPixmap.fromImage(
                     self._erased_image(self._source_images[index], local))
         self.canvas.update()
+
+    def empty_frames(self) -> set[int]:
+        """内容已经被擦空的元素索引集合（合成图上这一块没有任何不透明像素）。
+
+        画布用它来决定**不给这些元素画灰色虚线框**（用户要求：区域被「清空选中区域」
+        或被橡皮擦掉之后，就别再挂着一个空框）。判定必须逐像素看 alpha：
+        只看"有没有像素"不行 —— 擦掉一大块只留几个像素时，用"缩成 1×1 看平均值"
+        那种取巧写法会把它误判成空（实测 3×3 残留在 200×200 里平均后就是 0）。
+
+        带缓存：键是（合成图 cacheKey, 元素列表）。图或元素一变就重算，
+        所以撤销、抠图应用、换图、重裁帧全都自动跟上，不用在每个改像素的地方手动刷。
+        缓存命中时只是比对键，画布每帧重绘都调用也没有开销。
+        """
+        frames_key = tuple(self._frames or [])
+        if self._pixmap is None or self._pixmap.isNull():
+            key = ("none", frames_key)
+        else:
+            key = (self._pixmap.cacheKey(), frames_key)
+        if key == self._empty_cache_key:
+            return self._empty_frames
+        self._empty_cache_key = key
+        empty: set[int] = set()
+        if self._pixmap is not None and not self._pixmap.isNull():
+            image = self._pixmap.toImage()
+            for index, (x, y, w, h) in enumerate(self._frames or []):
+                rect = QRect(int(x), int(y), int(w), int(h)).intersected(image.rect())
+                if rect.isEmpty() or not self._has_content(image, rect):
+                    empty.add(index)
+        self._empty_frames = empty
+        return empty
+
+    def frame_box_hidden(self, index: int) -> bool:
+        """这个元素的框还要不要画：被清空过、或者内容已经被擦空的都不画。"""
+        return index in self._cleared_frames or index in self.empty_frames()
+
+    @staticmethod
+    def _has_content(image: QImage, rect: QRect) -> bool:
+        """这一块里还有没有任何不透明像素。
+
+        `constBits()` 拿到的原始字节里每个像素 4 字节（ARGB32 小端 = B,G,R,A），
+        所以 `raw[3::4]` 一次切片就把整块 alpha 取出来了，`max` 也在 C 层跑 ——
+        比在 Python 里逐像素遍历快几个数量级（400×300 一块约 2ms）。
+        """
+        region = image.copy(rect).convertToFormat(QImage.Format.Format_ARGB32)
+        data = region.constBits().asstring(region.sizeInBytes())
+        return max(data[3::4], default=0) > 0
+
+    # ---- 「已忽略」小字提示（被点到 / 框到时显示在区域正中间）----
+
+    def ignored_hint_frames(self) -> set[int]:
+        """当前该显示「已忽略」小字的元素（被点到或框到的那些）。"""
+        return set(self._ignored_hint)
+
+    def clear_ignored_hint(self) -> None:
+        if self._ignored_hint:
+            self._ignored_hint = set()
+            self.canvas.update()
+
+    def _set_ignored_hint(self, indices: set[int]) -> None:
+        if indices != self._ignored_hint:
+            self._ignored_hint = indices
+            self.canvas.update()
+
+    def hint_ignored_at(self, canvas_pos: QPointF) -> None:
+        """点画布：落在哪个「已忽略」元素的框里，就在它正中间显示「已忽略」。
+
+        点在没有被忽略的地方就把提示收掉 —— 提示跟着"当前这一下点击"走，不常驻，
+        否则画布上会慢慢堆满小字。
+        """
+        point = self._image_pos(canvas_pos)
+        hit = {index for index in self._ignored_frames
+               if 0 <= index < len(self._frames)
+               and QRect(*[int(v) for v in self._frames[index]]).contains(point.toPoint())}
+        self._set_ignored_hint(hit)
+
+    def hint_ignored_in_rect(self, canvas_rect: QRect) -> None:
+        """框选过程中：框到的「已忽略」元素显示提示（拖动时实时刷新）。"""
+        if canvas_rect.isEmpty() or not self._ignored_frames:
+            self._set_ignored_hint(set())
+            return
+        zoom = self._zoom or 1.0
+        image_rect = QRectF((canvas_rect.x() - self._offset.x()) / zoom,
+                            (canvas_rect.y() - self._offset.y()) / zoom,
+                            canvas_rect.width() / zoom,
+                            canvas_rect.height() / zoom).toRect()
+        self._set_ignored_hint({
+            index for index in self._ignored_frames
+            if 0 <= index < len(self._frames)
+            and QRect(*[int(v) for v in self._frames[index]]).intersects(image_rect)
+        })
 
     @staticmethod
     def _erased_image(pixmap: QPixmap, boxes: list[QRect]) -> QImage:
@@ -2419,6 +2900,8 @@ class ImageViewer(QWidget):
         """
         if mark_ignored:
             self._ignored_frames.update(indices)
+        # 「已忽略」小字提示是按索引记的，忽略集一变就可能指错人：直接收掉
+        self.clear_ignored_hint()
         for act in self._all_actions():
             act.selected_indices = [i for i in act.selected_indices if i not in indices]
             act.composite_groups = [
@@ -3478,6 +3961,32 @@ class ImageViewer(QWidget):
         self.canvas.update()
         self.paint_stroke_finished.emit(tool)
 
+    def brush_square_canvas(self, canvas_pos: QPointF) -> QRectF:
+        """完美像素模式下"这一笔会落到哪几个像素"的方框（画布坐标）。
+
+        画布上的方框和真正落笔的方块用的是**同一个**换算，所见即所得。
+        """
+        rect = self.brush_square_image(self._image_pos(canvas_pos))
+        zoom = self._zoom or 1.0
+        return QRectF(self._offset.x() + rect.x() * zoom, self._offset.y() + rect.y() * zoom,
+                      rect.width() * zoom, rect.height() * zoom)
+
+    def brush_square_image(self, image_pos: QPointF) -> QRectF:
+        """鼠标点（图片坐标）对应的方块笔覆盖的**图片像素范围**。
+
+        小技巧都在"对齐"上：坐标先落到鼠标所在那个像素的格子上（floor），
+        再把 w×w 的方块摆上去 —— 奇数宽度正好以该像素为中心，偶数宽度
+        （居中做不到）让光标落在中间 2×2 的右下那一格（Aseprite 也是这个偏置）。
+        这样 1px 笔点一下就是**恰好一个像素**，不会像"按连续坐标画方块"那样
+        因为落在 0.5 边界上而蹭到隔壁像素。
+        """
+        size = max(1, int(self.brush_size))
+        px = math.floor(image_pos.x())
+        py = math.floor(image_pos.y())
+        left = px - size // 2
+        top = py - size // 2
+        return QRectF(left, top, size, size)
+
     def _stroke_segment(self, start: QPointF, end: QPointF) -> None:
         """把一段直线同时画进"这一笔的合成工作图"和"碰到的每张原图工作图"。
 
@@ -3487,6 +3996,12 @@ class ImageViewer(QWidget):
         tool = self._paint_tool_now
         radius = max(1.0, self.brush_size / 2.0)
         rects = self.source_rects()
+        # 完美像素模式：坐标先吸到"像素中心"（整数 + 0.5）。
+        # 不吸的话，一条 3px 宽的线画在整数坐标上，跨过的行数是 2 而不是 3
+        # （半开区间把正好落在边界上的那行排除了），像素画就会出现"粗细不均匀"。
+        if self.pixel_perfect:
+            start = QPointF(math.floor(start.x()) + 0.5, math.floor(start.y()) + 0.5)
+            end = QPointF(math.floor(end.x()) + 0.5, math.floor(end.y()) + 0.5)
         hits = [i for i, (sx, sy, sw, sh) in enumerate(rects)
                 if self._segment_hits(start, end, sx, sy, sw, sh, radius)]
         if not hits:
@@ -3499,7 +4014,7 @@ class ImageViewer(QWidget):
                     sx, sy, sw, sh = rects[i]
                     painter.save()
                     painter.setClipRect(QRectF(sx, sy, sw, sh))  # 别溢到原图外的空格子里
-                    painter.drawLine(start, end)
+                    self._draw_stamp(painter, start, end)
                     painter.restore()
                 painter.end()
         for i in hits:
@@ -3511,10 +4026,40 @@ class ImageViewer(QWidget):
             if p2 is None:
                 continue
             self._set_paint_pen(p2, tool)
-            p2.drawLine(QPointF(start.x() - sx, start.y() - sy),
-                        QPointF(end.x() - sx, end.y() - sy))
+            self._draw_stamp(p2, QPointF(start.x() - sx, start.y() - sy),
+                             QPointF(end.x() - sx, end.y() - sy))
             p2.end()
         self.canvas.update()
+
+    def _draw_stamp(self, painter, start: QPointF, end: QPointF) -> None:
+        """画一段笔迹：正常模式是圆头线，完美像素模式是对齐像素的方块。
+
+        **单击（起点 = 终点）必须单独处理**：Qt 的 ``drawLine`` 遇到零长度线段时，
+        圆头和方头都是什么都不画（实测 0 个像素）—— 也就是"点一下画笔/橡皮毫无反应"，
+        必须拖动才落笔。这个坑以前一直在，做"1 像素方块笔"时正好撞上：
+        像素画最基本的操作就是点一下点一个像素，所以两种模式都在这里自己填一块。
+        """
+        if start == end:
+            size = max(1.0, float(self.brush_size))
+            if self.pixel_perfect:
+                # 完美像素：填一个**对齐到图片像素**的方块 → 点哪就是哪个像素
+                painter.fillRect(self.brush_square_image(start), self._stamp_color())
+                return
+            painter.save()
+            # 圆点笔：画一个填满的圆（和圆头线一致）。save/restore 是必须的 ——
+            # 同一支 painter 还要画别的原图，改了笔刷不能漏出去。
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(self._stamp_color())
+            painter.drawEllipse(QRectF(start.x() - size / 2, start.y() - size / 2, size, size))
+            painter.restore()
+            return
+        painter.drawLine(start, end)
+
+    def _stamp_color(self) -> QColor:
+        """单击落笔的颜色：橡皮擦走 Clear 合成（颜色本身无所谓，擦成透明）。"""
+        if self._paint_tool_now == "eraser":
+            return QColor(0, 0, 0, 0)
+        return QColor(self.paint_color)
 
     @staticmethod
     def _to_paint_image(pm: QPixmap) -> QImage:
@@ -3550,15 +4095,22 @@ class ImageViewer(QWidget):
         return painter
 
     def _set_paint_pen(self, painter: QPainter, tool: str) -> None:
-        """笔刷：圆头圆角（PS 默认的硬边圆刷），橡皮擦走 Clear 擦成透明。"""
+        """笔刷：默认圆头圆角（PS 的硬边圆刷）；完美像素模式改**方头**（像素画笔）。
+
+        橡皮擦走 Clear 擦成透明（两种模式都一样）。
+        """
         if tool == "eraser":
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
             color = QColor(0, 0, 0, 0)
         else:
             color = QColor(self.paint_color)
         pen = QPen(color, float(self.brush_size))
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        if self.pixel_perfect:
+            pen.setCapStyle(Qt.PenCapStyle.SquareCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+        else:
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
@@ -3616,20 +4168,99 @@ class ImageViewer(QWidget):
         return self._sort_reading_order(result)
 
     def zoom_in(self):
-        self._zoom = min(MAX_ZOOM, self._zoom * 1.2)
+        if self.pixel_perfect:
+            # 像素画只走整数倍：非整数倍即使最近邻也会出现"有的像素宽、有的窄"
+            self._zoom = float(min(int(MAX_ZOOM), max(1, int(self._zoom) + 1)))
+        else:
+            self._zoom = min(MAX_ZOOM, self._zoom * 1.2)
+        self.snap_offset()
         self.canvas.update()
         self._update_rulers()
 
     def zoom_out(self):
-        self._zoom = max(MIN_ZOOM, self._zoom / 1.2)
+        if self.pixel_perfect:
+            # 完美像素模式下最小就是 1×（100%）：再小就不是"实际像素"了
+            self._zoom = float(max(1, min(int(MAX_ZOOM), int(self._zoom) - 1)))
+        else:
+            self._zoom = max(MIN_ZOOM, self._zoom / 1.2)
+        self.snap_offset()
         self.canvas.update()
         self._update_rulers()
 
     def zoom_actual_pixel(self):
-        """实际像素 100%。"""
+        """实际像素：100%，并把图片摆到画布正中、偏移取整。
+
+        偏移取整是**必须**的：0.4 像素的偏移会让每行像素落在半个屏幕像素上，
+        最近邻渲染下就会出现"有的像素 1px 宽、有的 2px 宽"。
+        """
+        if not self._pixmap or self._pixmap.isNull():
+            return
         self._zoom = 1.0
+        cw, ch = max(1, self.canvas.width()), max(1, self.canvas.height())
+        self._offset = QPointF(round((cw - self._pixmap.width()) / 2),
+                               round((ch - self._pixmap.height()) / 2))
         self.canvas.update()
         self._update_rulers()
+
+    def snap_offset(self) -> None:
+        """完美像素模式下把画布偏移取整（看/画像素画时不能用半个像素的偏移）。"""
+        if self.pixel_perfect:
+            self._offset = QPointF(round(self._offset.x()), round(self._offset.y()))
+
+    def reload_view_colors(self) -> None:
+        """从软件设置读辅助线颜色与网格门槛（改了设置主窗口会再调一次）。"""
+        self._guide_pen_color = guide_color()
+        self._guide_sel_color = guide_selected_color()
+        self._grid_color = pixel_grid_color()
+        self._grid_zoom = max(1.0, pixel_grid_zoom() / 100.0)
+
+    def _sync_pixel_perfect_button(self) -> None:
+        """把「完美像素」按钮的按下态同步成当前状态（切标签页/还原文档时用）。
+
+        屏蔽信号：这里是"显示状态"，不是用户点了按钮，不能反过来再触发一次切换。
+        """
+        if self._toolbar is None:
+            return
+        button = self._toolbar.btn_pixel_perfect
+        if button.isChecked() != self.pixel_perfect:
+            button.blockSignals(True)
+            button.setChecked(self.pixel_perfect)
+            button.blockSignals(False)
+
+    def set_pixel_perfect(self, enabled: bool) -> None:
+        """完美像素（像素画视图）开关。
+
+        进：100% 实际像素 + 居中 + 偏移取整；视图上不再画元素虚线框/帧号/标线，
+            画笔变方头。出：回到进模式之前那份缩放与位置（不会把人"扔"在 100%），
+            并且**按当前像素把元素外框重贴紧一遍**（用户口径：像素画视图里涂完退出，
+            框要跟着像素走；只重裁外框、绝不重排帧 —— 见 refit_frames）。
+        """
+        enabled = bool(enabled)
+        if enabled == self.pixel_perfect:
+            return
+        if enabled:
+            if not self._pixmap or self._pixmap.isNull():
+                # 没图没什么可看的：按钮弹回 + 说明（与其它"没图"的按钮同一套口径）
+                self.canvas.hint_add_image()
+                if self._toolbar is not None and self._toolbar.btn_pixel_perfect.isChecked():
+                    self._toolbar.btn_pixel_perfect.setChecked(False)
+                return
+            self._pp_prev = (self._zoom, QPointF(self._offset))
+            self.pixel_perfect = True
+            self.zoom_actual_pixel()
+        else:
+            self.pixel_perfect = False
+            if self._pp_prev is not None:
+                self._zoom, prev_offset = self._pp_prev
+                self._offset = QPointF(prev_offset)
+                self._pp_prev = None
+        self._sync_pixel_perfect_button()
+        self.canvas.update()
+        self._update_rulers()
+        if not enabled:
+            # 只在**用户自己点按钮退出**时重贴紧：程序化置位（切标签页、打开工程、
+            # 空白文档）不调这里，所以不会在那些路径上白白跑一次连通域。
+            self.refit_frames()
 
     def _on_bg_changed(self, mode: str):
         self._bg_mode = mode
@@ -3662,6 +4293,7 @@ class ImageViewer(QWidget):
         幂等：重复调用无副作用。
         """
         self._detect_generation += 1            # 已有结果一律作废
+        self._refit_generation += 1             # 外框重贴紧的结果同样作废
         threads = list(self._detect_threads)
         for thread in threads:
             try:

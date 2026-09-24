@@ -29,7 +29,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PIL import Image, ImageDraw
-from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
+from PyQt6.QtCore import QEvent, QPoint, QPointF, QRect, Qt
 from PyQt6.QtGui import QColor, QKeyEvent, QMouseEvent
 from PyQt6.QtWidgets import QApplication
 
@@ -73,6 +73,79 @@ def sheet() -> Image.Image:
     for x in (20, 90, 160):
         draw.rectangle((x, 30, x + 20, 60), fill=(200, 40, 40, 255))
     return img
+
+
+def ring_sheet() -> Image.Image:
+    """一个空心大框（元素 1，它的外接框**套住**里面），框里再放一个小方块（元素 2）。
+
+    专门用来验"清空选中区域只能擦选中的那个"：大框被选中要擦时，
+    框里那块没被选中的小元素必须一个像素都不动（挖洞保下来）。
+    """
+    img = Image.new("RGBA", (120, 120), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    band = 8
+    draw.rectangle((10, 10, 100, 100), outline=(60, 160, 220, 255), width=band)
+    draw.rectangle((45, 45, 65, 65), fill=(220, 60, 60, 255))
+    return img
+
+
+def block_sheet() -> Image.Image:
+    """只有一个实心方块的图：用来验"擦空之后虚线框消失"。"""
+    img = Image.new("RGBA", (160, 160), (0, 0, 0, 0))
+    ImageDraw.Draw(img).rectangle((50, 50, 110, 110), fill=(200, 40, 40, 255))
+    return img
+
+
+def gray_box_pixels(viewer, canvas, index: int) -> int:
+    """数一数这个元素的框线上有多少个"中灰"像素（#808080 那圈虚线）。
+
+    棋盘格底是 #2a2a2a / #1e1e1e、界面底 #262626，离中灰都很远，
+    所以"贴近 (128,128,128)"基本只可能是元素框本身（含多动作的彩色框不在这个范围）。
+    """
+    fx, fy, fw, fh = viewer._frames[index]
+    zoom = viewer._zoom or 1.0
+    image = canvas.grab().toImage()
+    left = int(viewer._offset.x() + fx * zoom)
+    top = int(viewer._offset.y() + fy * zoom)
+    right = int(viewer._offset.x() + (fx + fw) * zoom)
+    bottom = int(viewer._offset.y() + (fy + fh) * zoom)
+    count = 0
+    for x in range(max(0, left + 1), min(image.width() - 1, right)):
+        for y in (top, bottom):
+            if 0 <= y < image.height():
+                count += _is_mid_gray(QColor(image.pixelColor(x, y)))
+    for y in range(max(0, top + 1), min(image.height() - 1, bottom)):
+        for x in (left, right):
+            if 0 <= x < image.width():
+                count += _is_mid_gray(QColor(image.pixelColor(x, y)))
+    return count
+
+
+def _is_mid_gray(color: QColor) -> bool:
+    return (abs(color.red() - 128) <= 20 and abs(color.green() - 128) <= 20
+            and abs(color.blue() - 128) <= 20)
+
+
+def _around(grab, center: QPointF, size: int = 26) -> list[QColor]:
+    image = grab.toImage()
+    cx, cy = int(center.x()), int(center.y())
+    colors = []
+    for x in range(max(0, cx - size), min(image.width(), cx + size)):
+        for y in range(max(0, cy - size), min(image.height(), cy + size)):
+            colors.append(QColor(image.pixelColor(x, y)))
+    return colors
+
+
+def dark_pixels_around(grab, center: QPointF) -> int:
+    """提示小药丸的深色底（#181818 一带）。"""
+    return sum(1 for c in _around(grab, center)
+               if c.red() < 90 and c.green() < 90 and c.blue() < 90)
+
+
+def light_pixels_around(grab, center: QPointF) -> int:
+    """提示里那行浅色小字（#D8D8D8 一带）。"""
+    return sum(1 for c in _around(grab, center)
+               if c.red() > 170 and c.green() > 170 and c.blue() > 170)
 
 
 def mouse(kind, point: QPointF, button=Qt.MouseButton.LeftButton,
@@ -303,7 +376,149 @@ def main() -> int:
     wait(120)
     check("没图时拖不出标线", viewer.guides() == [], f"guides={viewer.guides()}")
 
-    print("--- 10. 收尾 ---")
+    print("--- 10. 清空只擦「选中的」：框里没被选中的小元素不能被连坐 ---")
+    win._new_tab(switch=True)
+    wait(300)
+    win._on_image_loaded(pil_to_pixmap(ring_sheet()))
+    wait(600)
+    check("(准备) 认出 2 个元素：外框 + 框里的小块", len(viewer._frames) == 2,
+          f"frames={viewer._frames}")
+    if len(viewer._frames) != 2:
+        return 1
+    # 按面积分清谁套谁（不依赖检测顺序）
+    outer_index = max(range(2), key=lambda i: viewer._frames[i][2] * viewer._frames[i][3])
+    inner_index = 1 - outer_index
+    outer = QRect(*[int(v) for v in viewer._frames[outer_index]])
+    inner = QRect(*[int(v) for v in viewer._frames[inner_index]])
+    check("(准备) 外框那个元素的框真的套住了里面那个", outer.contains(inner),
+          f"outer={outer} inner={inner}")
+    win._on_add_action_clicked()
+    wait(250)
+    action = win.actions[0]
+    action.selected_indices = [outer_index]
+    stroke = (outer.left() + 3, outer.top() + 3)          # 外框笔画上
+    inside = (inner.center().x(), inner.center().y())     # 框里那个小元素身上
+    check("(准备) 外框笔画是不透明的",
+          pixel(viewer._pixmap, *stroke).alpha() == 255)
+    check("(准备) 框里那块小元素也是不透明的",
+          pixel(viewer._pixmap, *inside).alpha() == 255)
+    viewer.menu_clear_selected_regions()
+    wait(250)
+    check("选中的外框被擦掉了", pixel(viewer._pixmap, *stroke).alpha() == 0,
+          f"got=a{pixel(viewer._pixmap, *stroke).alpha()}")
+    check("**没选中**、只是正好落在它框里的小元素一个像素没动",
+          pixel(viewer._pixmap, *inside).alpha() == 255,
+          f"got=a{pixel(viewer._pixmap, *inside).alpha()}")
+    check("小元素也没被算成已忽略", inner_index not in viewer._ignored_frames,
+          f"ignored={sorted(viewer._ignored_frames)}")
+    check("原图上小元素同样没被动",
+          pixel(viewer._source_images[0], *inside).alpha() == 255,
+          f"got=a{pixel(viewer._source_images[0], *inside).alpha()}")
+    check("被清空的那个元素：框不再画（哪怕框里还留着邻居的像素）",
+          viewer.frame_box_hidden(outer_index))
+    win._undo_stack.undo()
+    wait(350)
+    check("撤销后外框笔画回来了", pixel(viewer._pixmap, *stroke).alpha() == 255,
+          f"got=a{pixel(viewer._pixmap, *stroke).alpha()}")
+    check("撤销后那个元素又开始画框了", not viewer.frame_box_hidden(outer_index))
+
+    print("--- 11. 内容被擦空就不画虚线框（橡皮擦路径）---")
+    win._new_tab(switch=True)
+    wait(300)
+    win._on_image_loaded(pil_to_pixmap(block_sheet()))
+    wait(600)
+    check("(准备) 只认出 1 个元素", len(viewer._frames) == 1,
+          f"frames={viewer._frames}")
+    fx, fy, fw, fh = viewer._frames[0]
+    check("(准备) 擦之前是画着框的", gray_box_pixels(viewer, canvas, 0) > 4,
+          f"gray={gray_box_pixels(viewer, canvas, 0)}")
+    win._set_active_tool("eraser")
+    viewer.set_brush_size(160)                     # 一笔盖住整个方块
+    wait(80)
+    start = canvas_point(viewer, fx + 2, fy + 2)
+    canvas.mousePressEvent(mouse(QEvent.Type.MouseButtonPress, start))
+    canvas.mouseMoveEvent(mouse(QEvent.Type.MouseMove,
+                                canvas_point(viewer, fx + fw - 2, fy + fh - 2),
+                                buttons=Qt.MouseButton.LeftButton))
+    canvas.mouseReleaseEvent(mouse(QEvent.Type.MouseButtonRelease,
+                                   canvas_point(viewer, fx + fw - 2, fy + fh - 2)))
+    wait(250)
+    win._set_active_tool(None)
+    wait(120)
+    check("橡皮擦把这块擦空了", 0 in viewer.empty_frames(),
+          f"empty={sorted(viewer.empty_frames())}")
+    check("擦空之后虚线框不再出现", viewer.frame_box_hidden(0))
+    check("画布上真的没有那个灰框了（逐像素扫框线）",
+          gray_box_pixels(viewer, canvas, 0) == 0,
+          f"gray={gray_box_pixels(viewer, canvas, 0)}")
+    check("擦出来的地方是透明的（不是涂白）",
+          pixel(viewer._pixmap, fx + fw // 2, fy + fh // 2).alpha() == 0,
+          f"got={pixel(viewer._pixmap, fx + fw // 2, fy + fh // 2).name()}")
+    win._undo_stack.undo()                          # 撤销这一笔：内容回来，框也得回来
+    wait(350)
+    check("撤销那一笔之后虚线框又回来了（证明是「看内容」而不是一律不画）",
+          gray_box_pixels(viewer, canvas, 0) > 4,
+          f"gray={gray_box_pixels(viewer, canvas, 0)}")
+
+    print("--- 12. 「已忽略」小字提示（点到 / 框到时出现在区域正中间）---")
+    win._new_tab(switch=True)
+    wait(300)
+    win._on_image_loaded(pil_to_pixmap(sheet()))
+    wait(600)
+    win._on_add_action_clicked()
+    wait(250)
+    action = win.actions[0]
+    action.selected_indices = [0]
+    viewer.menu_ignore_selected_regions()
+    wait(250)
+    check("(准备) 0 号元素已被忽略", 0 in viewer._ignored_frames,
+          f"ignored={sorted(viewer._ignored_frames)}")
+    check("(准备) 一开始没有小字提示", viewer.ignored_hint_frames() == set())
+    gx, gy, gw, gh = viewer._frames[0]
+    center = canvas_point(viewer, gx + gw / 2, gy + gh / 2)
+    before_center = pixel(viewer.canvas.grab(), center.x(), center.y())
+    check("(准备) 忽略不动像素：中间还是原来那块颜色", before_center.alpha() == 255,
+          f"got={before_center.name()}")
+    canvas.mousePressEvent(mouse(QEvent.Type.MouseButtonPress, center))
+    wait(150)
+    check("点一下被忽略的这块：它出现「已忽略」提示",
+          viewer.ignored_hint_frames() == {0}, f"hint={viewer.ignored_hint_frames()}")
+    dark = dark_pixels_around(viewer.canvas.grab(), center)
+    check("画布正中间真的画出了深色提示底", dark > 20, f"dark={dark}")
+    light = light_pixels_around(viewer.canvas.grab(), center)
+    check("提示里有浅色小字（字真的画出来了）", light > 8, f"light={light}")
+    # 点别的地方（没被忽略的元素）→ 提示收掉
+    ox, oy, ow, oh = viewer._frames[1]
+    other = canvas_point(viewer, ox + ow / 2, oy + oh / 2)
+    canvas.mouseReleaseEvent(mouse(QEvent.Type.MouseButtonRelease, center))
+    canvas.mousePressEvent(mouse(QEvent.Type.MouseButtonPress, other))
+    wait(150)
+    check("点到没被忽略的元素：提示收掉", viewer.ignored_hint_frames() == set(),
+          f"hint={viewer.ignored_hint_frames()}")
+    check("提示收掉后那块又露出原图内容",
+          pixel(viewer.canvas.grab(), center.x(), center.y()) == before_center)
+    # 框选：从图外起手，框过被忽略的那块 → 也显示提示
+    # 终点要真的**框进去**（落到元素中间），不能正好停在元素角上：
+    # 选框换算成图坐标会四舍五入，停在角上可能只差 1px 就判成"没框到"
+    canvas.mouseReleaseEvent(mouse(QEvent.Type.MouseButtonRelease, other))
+    board = QPointF(viewer.canvas.width() - 8, viewer.canvas.height() - 8)
+    canvas.mousePressEvent(mouse(QEvent.Type.MouseButtonPress, board))
+    canvas.mouseMoveEvent(mouse(QEvent.Type.MouseMove, center,
+                                buttons=Qt.MouseButton.LeftButton))
+    wait(150)
+    check("框选过程中框到它就显示提示",
+          viewer.ignored_hint_frames() == {0}, f"hint={viewer.ignored_hint_frames()}")
+    canvas.mouseReleaseEvent(mouse(QEvent.Type.MouseButtonRelease, center))
+    wait(150)
+    check("松手后提示还在（这一框的结果看得见）",
+          viewer.ignored_hint_frames() == {0}, f"hint={viewer.ignored_hint_frames()}")
+    canvas.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape,
+                                   Qt.KeyboardModifier.NoModifier))
+    wait(120)
+    check("Esc 收掉提示", viewer.ignored_hint_frames() == set(),
+          f"hint={viewer.ignored_hint_frames()}")
+
+    print("--- 13. 收尾 ---")
     win.close()
     wait(400)
     print()

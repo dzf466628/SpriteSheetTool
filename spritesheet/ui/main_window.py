@@ -1038,6 +1038,7 @@ class MainWindow(QMainWindow):
                 "frames": [list(r) for r in viewer._frames],
                 "frame_logical": {str(k): list(v) for k, v in viewer._frame_logical.items()},
                 "ignored_frames": sorted(viewer._ignored_frames),
+                "cleared_frames": sorted(viewer._cleared_frames),
             },
         }
         if not current_only:
@@ -1174,6 +1175,9 @@ class MainWindow(QMainWindow):
                     viewer._frame_logical = {int(k): tuple(map(int, v)) for k, v in vstate["frame_logical"].items()}
                 if "ignored_frames" in vstate:
                     viewer._ignored_frames = set(vstate["ignored_frames"])
+                # 「被清空过」也跟着快照走：撤销要把框恢复回来，重做要再收起来
+                if "cleared_frames" in vstate:
+                    viewer._cleared_frames = set(vstate["cleared_frames"])
                 for action in self.actions:
                     viewer.crop_frames_for_action(action)
                 ai = snap.get("current_index", -1)
@@ -1369,6 +1373,7 @@ class MainWindow(QMainWindow):
                 "frames": [list(x) for x in viewer._frames],
                 "frame_logical": {str(k): list(v) for k, v in viewer._frame_logical.items()},
                 "ignored_frames": sorted(viewer._ignored_frames),
+                "cleared_frames": sorted(viewer._cleared_frames),
                 "zoom": viewer._zoom, "offset": [viewer._offset.x(), viewer._offset.y()],
                 "bg_mode": viewer._bg_mode, "compose_mode": viewer.compose_mode,
                 "manual_compose": viewer._manual_compose,
@@ -1434,9 +1439,13 @@ class MainWindow(QMainWindow):
             "frames": list(v._frames),
             "frame_logical": dict(v._frame_logical),
             "ignored_frames": set(v._ignored_frames),
+            "cleared_frames": set(v._cleared_frames),
             # 标线跟着标签页走（每条 ["h"|"v", 图片坐标]，**拷贝一份**：
             # 存引用的话在另一个标签页里拖标线会改到这份文档的状态）
             "guides": [list(g) for g in v._guides],
+            # 完美像素（像素画视图）也跟标签页走：只切视图，不进工程文件
+            # （和标线同一口径 —— 它决定的是"怎么看"，不是"图上有什么"）
+            "pixel_perfect": v.pixel_perfect,
             "zoom": v._zoom,
             "offset": QPointF(v._offset),
             "bg_mode": v._bg_mode,
@@ -1468,7 +1477,9 @@ class MainWindow(QMainWindow):
             "frames": [],
             "frame_logical": {},
             "ignored_frames": set(),
+            "cleared_frames": set(),
             "guides": [],
+            "pixel_perfect": False,
             "zoom": 1.0,
             "offset": QPointF(0, 0),
             "bg_mode": "checker",
@@ -1507,8 +1518,18 @@ class MainWindow(QMainWindow):
         viewer._frames = list(doc["frames"])
         viewer._frame_logical = dict(doc["frame_logical"])
         viewer._ignored_frames = set(doc.get("ignored_frames") or [])
+        viewer._cleared_frames = set(doc.get("cleared_frames") or [])
         # 标线是"每个标签页各一份"的视图状态（只当参考线，不进导出/识别）
         viewer.set_guides(doc.get("guides") or [])
+        # 「已忽略」小字提示同理：它是按索引记的临时视图状态，切页必须清掉，
+        # 否则会拿上一个文档的索引在一张完全不同的图上找元素
+        viewer.clear_ignored_hint()
+        # 完美像素也跟标签页走。这里**直接置位**、不调 set_pixel_perfect：
+        # 那个入口会把视图打回"100% 居中"，而这份文档存的可能是用户在模式里
+        # 又放大到 3× 之后的缩放，直接还原缩放/偏移才是他要回到的视图。
+        viewer.pixel_perfect = bool(doc.get("pixel_perfect"))
+        viewer._pp_prev = None
+        viewer._sync_pixel_perfect_button()
         viewer._zoom = float(doc["zoom"])
         viewer._offset = QPointF(doc["offset"])
         viewer._bg_mode = doc["bg_mode"]
@@ -1845,6 +1866,13 @@ class MainWindow(QMainWindow):
         viewer._frames = [tuple(map(int, x)) for x in viewer_state.get("frames", [])]
         viewer._frame_logical = {int(k): tuple(map(int, v)) for k, v in (viewer_state.get("frame_logical") or {}).items()}
         viewer._ignored_frames = set(viewer_state.get("ignored_frames") or [])
+        viewer._cleared_frames = set(viewer_state.get("cleared_frames") or [])
+        # 完美像素是纯视图状态、**不进工程文件**：打开工程时一律回到普通视图，
+        # 否则"上一份文档开着的像素模式"会跟到新打开的文件上（标线同理，只是标线
+        # 本来就没进过工程清单）。
+        viewer.pixel_perfect = False
+        viewer._pp_prev = None
+        viewer._sync_pixel_perfect_button()
         viewer._zoom = float(viewer_state.get("zoom", 1.0))
         viewer._offset = QPointF(*self._tuple2(viewer_state.get("offset"), (0, 0)))
         viewer._bg_mode = str(viewer_state.get("bg_mode", "checker"))
@@ -2033,6 +2061,10 @@ class MainWindow(QMainWindow):
         self.image_viewer.color_picked.connect(self._on_color_picked)
         self.image_viewer.paint_stroke_started.connect(self._on_paint_stroke_started)
         self.image_viewer.paint_stroke_finished.connect(self._on_paint_stroke_finished)
+        # 「把当前工具收起来」：Esc、点画布外（查看器里的 app 级过滤器判断该不该收）
+        self.image_viewer.tool_dismiss_requested.connect(self._dismiss_current_tool)
+        # 退出完美像素后按当前像素重贴紧元素外框（只重裁、不重排帧）
+        self.image_viewer.frames_refit.connect(self._on_frames_refit)
         # 双击棋盘格加图片：与工具栏"添加图片"按钮同一个入口
         self.image_viewer.add_image_requested.connect(self._open_image)
         # PS 同款工具快捷键（B/E/I、[ ]、D/X）：建在画布建好之后
@@ -2437,9 +2469,22 @@ class MainWindow(QMainWindow):
         self._start_update_check(notify_no_update=True)
 
     def _open_settings(self) -> None:
-        """编辑 → 软件设置…：工程缩略图开关 + 检查更新。"""
+        """编辑 → 软件设置…：工程缩略图开关 + 辅助线颜色/网格门槛 + 检查更新。"""
         dialog = SettingsDialog(self, check_update=self._check_update_manual)
+        # 辅助线颜色/网格门槛是"看着调"的东西：改完立刻重画，不用关弹窗再刷新
+        dialog.view_colors_changed.connect(self._on_view_colors_changed)
         dialog.exec()
+
+    def _on_view_colors_changed(self) -> None:
+        """设置里改了标线/网格的颜色或门槛：查看器重新读一遍设置并重绘。
+
+        查看器全软件只有一个（标签页靠快照换数据），所以重绘一处就全生效。
+        """
+        viewer = getattr(self, "image_viewer", None)
+        if viewer is None:
+            return
+        viewer.reload_view_colors()
+        viewer.canvas.update()
 
     def _history_shown(self) -> bool:
         """历史记录现在是"显示着"的吗（始终是独立悬浮卡片）。"""

@@ -37,7 +37,7 @@ DEFAULTS: dict = {
     "tolerance": 28,
     "soft": 40,
     "edge_only": True,
-    "shrink": 0,
+    "shrink": 0.0,
     "despill": 30,
 }
 
@@ -51,9 +51,12 @@ PARAM_SPEC: tuple = (
     {"key": "edge_only", "label": "只清边缘连通", "kind": "bool",
      "tip": "只清从图片边缘能连过去的背景，角色内部的同色像素（白衣服、眼白）不动。\n"
             "如果背景被角色围成一圈清不掉，把这个关掉。"},
-    {"key": "shrink", "label": "收边", "kind": "int", "min": -2, "max": 4, "step": 1,
+    {"key": "shrink", "label": "收边", "kind": "float", "min": -2.0, "max": 4.0, "step": 0.5,
+     "decimals": 1,
      "tip": "alpha 收缩 / 扩张几像素。正数收缩：去掉边缘那圈残留底色（最常见的一步）；\n"
-            "负数扩张：边缘被啃掉一点时补回来。"},
+            "负数扩张：边缘被啃掉一点时补回来。\n"
+            "0.5 一档（共 13 档）：整数档就是「收缩 1/2/3/4 像素」，和以前逐像素一致；\n"
+            "半档是整数档之间的过渡（边缘变成半透明，用完可以再微调）。"},
     {"key": "despill", "label": "去色溢", "kind": "int", "min": 0, "max": 100, "step": 5,
      "tip": "半透明边缘里混着背景色（白底就发白、绿幕就发绿），把它减掉。\n"
             "0 = 不动颜色。"},
@@ -252,11 +255,9 @@ def key_image(img: Image.Image, bg_colors, **params):
     # 只减不增：原来就透明的像素不会因为"它的颜色像背景"被写回不透明
     final = ImageChops.darker(base, alpha0)
 
-    shrink = int(cfg["shrink"])
+    shrink = float(cfg["shrink"])
     if shrink:
-        size = min(9, abs(shrink) * 2 + 1)
-        final = final.filter(ImageFilter.MinFilter(size) if shrink > 0
-                             else ImageFilter.MaxFilter(size))
+        final = _apply_shrink(final, shrink)
 
     if cfg["despill"] > 0:
         out = _apply_despill(rgba, final, colors[0], cfg["despill"])
@@ -278,6 +279,31 @@ def key_image(img: Image.Image, bg_colors, **params):
         "opaque_after_pct": (after[255] * 100.0 / total) if total else 0.0,
     }
     return out, stats
+
+
+def _apply_shrink(alpha: Image.Image, shrink: float) -> Image.Image:
+    """收边（``shrink`` 可为小数，0.5 一档）：正数收缩 alpha，负数扩张。
+
+    整数档就是老的 ``MinFilter/MaxFilter``（滤波器尺寸必须是奇数，所以整数粒度只能是
+    1 像素），**逐像素结果与以前一致**；半档用"相邻两个整数档之间做 alpha 线性插值"
+    来实现 —— 于是半档表现为边缘半透明（不是真的收掉半个像素，alpha 蒙版做不到那种事，
+    但档位确实更细了，配合去色溢看着就是"收得更狠一点"）。
+    """
+    whole = int(abs(shrink))
+    frac = abs(shrink) - whole
+    filt = ImageFilter.MinFilter if shrink > 0 else ImageFilter.MaxFilter
+    if whole >= 1:
+        level_a = alpha.filter(filt(min(9, whole * 2 + 1)))
+    else:
+        # |shrink| < 1（也就是 0.5 那一档）：整数部分是 0，"A 档"就是原图。
+        # 千万别写成 MinFilter(1) —— PIL 的 rank filter 尺寸 1 会直接
+        # 整数除零崩掉（0xC0000094），实测踩过。
+        level_a = alpha
+    next_size = min(9, whole * 2 + 3)
+    if frac < 0.001 or next_size == min(9, max(1, whole * 2 + 1)):
+        return level_a
+    level_b = alpha.filter(filt(next_size))
+    return ImageChops.blend(level_a, level_b, frac)
 
 
 def _apply_despill(rgba: Image.Image, alpha: Image.Image, bg_color, strength: int) -> Image.Image:

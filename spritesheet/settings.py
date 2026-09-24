@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QSettings
+from PyQt6.QtGui import QColor
 
 ORG_NAME = "SpriteSheetTool"
 APP_NAME = "SpriteSheetTool"
@@ -23,6 +24,20 @@ KEY_SHOW_THUMBNAIL = "project/show_thumbnail"
 KEY_LAST_DIR = "files/last_directory"
 KEY_DETECT_MIN_AREA = "detect/min_area"
 KEY_UNDO_LIMIT = "history/undo_limit"
+
+# ---- 视图辅助线（标线 / 每像素网格）的颜色与显示门槛 ----
+# 这些线是**看图和量尺寸**用的，颜色按人眼习惯（和素材底色）来定，所以放到设置里能改。
+KEY_GUIDE_COLOR = "view/guide_color"
+KEY_GUIDE_SELECTED_COLOR = "view/guide_selected_color"
+KEY_PIXEL_GRID_COLOR = "view/pixel_grid_color"
+KEY_PIXEL_GRID_ZOOM = "view/pixel_grid_zoom"
+
+# 默认值：普通标线青色、选中标线主题色、像素网格半透明灰（#AARRGGBB，
+# 半透明是为了 400% 下不至于把画面糊住）
+DEFAULT_GUIDE_COLOR = "#00ffff"
+DEFAULT_GUIDE_SELECTED_COLOR = "#e91e63"
+DEFAULT_PIXEL_GRID_COLOR = "#80808080"
+DEFAULT_PIXEL_GRID_ZOOM = 400
 
 
 def _settings() -> QSettings:
@@ -114,3 +129,81 @@ def set_undo_limit(value: int) -> None:
         _settings().setValue(KEY_UNDO_LIMIT, max(0, min(500, int(value))))
     except Exception as e:  # noqa: BLE001
         print(f"[settings] 写入 {KEY_UNDO_LIMIT} 失败: {e}", file=sys.stderr)
+
+
+def _color(key: str, default: str) -> QColor:
+    """读一个颜色设置。#AARRGGBB / #RRGGBB / 颜色名都能认，认不出来就用默认色。"""
+    raw = default
+    try:
+        raw = str(_settings().value(key, default) or default)
+    except Exception as e:  # noqa: BLE001 - 读不到就按默认色走，绝不因为设置崩绘制
+        print(f"[settings] 读取 {key} 失败: {e}", file=sys.stderr)
+    color = QColor(raw)
+    if not color.isValid():
+        color = QColor(default)
+    return color
+
+
+def _set_color(key: str, color) -> None:
+    try:
+        if isinstance(color, QColor):
+            _settings().setValue(key, color.name(QColor.NameFormat.HexArgb))
+        else:
+            _settings().setValue(key, str(color))
+    except Exception as e:  # noqa: BLE001
+        print(f"[settings] 写入 {key} 失败: {e}", file=sys.stderr)
+
+
+def guide_color() -> QColor:
+    """普通标线（从标尺拖出来的参考线）的颜色。默认青色。"""
+    return _color(KEY_GUIDE_COLOR, DEFAULT_GUIDE_COLOR)
+
+
+def set_guide_color(color) -> None:
+    _set_color(KEY_GUIDE_COLOR, color)
+
+
+def guide_selected_color() -> QColor:
+    """选中的那条标线的颜色。默认主题色（一眼看出选中了哪条）。"""
+    return _color(KEY_GUIDE_SELECTED_COLOR, DEFAULT_GUIDE_SELECTED_COLOR)
+
+
+def set_guide_selected_color(color) -> None:
+    _set_color(KEY_GUIDE_SELECTED_COLOR, color)
+
+
+def pixel_grid_color() -> QColor:
+    """完美像素模式下每像素网格线的颜色（可带透明度）。默认半透明灰。"""
+    return _color(KEY_PIXEL_GRID_COLOR, DEFAULT_PIXEL_GRID_COLOR)
+
+
+def set_pixel_grid_color(color) -> None:
+    _set_color(KEY_PIXEL_GRID_COLOR, color)
+
+
+def pixel_grid_zoom() -> int:
+    """放大到多少倍才显示每像素网格（100 = 100%）。默认 400。
+
+    为什么不一直显示：网格线间距 = 放大倍数，100% 时线宽 1px、间距 1px，
+    整张图会被线盖满（等于给图蒙一层纱）。PS 也是放大到一定倍数才显示像素网格。
+    """
+    try:
+        value = int(_settings().value(KEY_PIXEL_GRID_ZOOM, DEFAULT_PIXEL_GRID_ZOOM))
+    except Exception as e:  # noqa: BLE001
+        print(f"[settings] 读取 {KEY_PIXEL_GRID_ZOOM} 失败: {e}", file=sys.stderr)
+        return DEFAULT_PIXEL_GRID_ZOOM
+    return max(100, min(3200, value))
+
+
+def set_pixel_grid_zoom(percent: int) -> None:
+    try:
+        _settings().setValue(KEY_PIXEL_GRID_ZOOM, max(100, min(3200, int(percent))))
+    except Exception as e:  # noqa: BLE001
+        print(f"[settings] 写入 {KEY_PIXEL_GRID_ZOOM} 失败: {e}", file=sys.stderr)
+
+
+def reset_view_colors() -> None:
+    """把三个辅助线颜色恢复默认（设置弹窗里的「恢复默认」）。"""
+    set_guide_color(DEFAULT_GUIDE_COLOR)
+    set_guide_selected_color(DEFAULT_GUIDE_SELECTED_COLOR)
+    set_pixel_grid_color(DEFAULT_PIXEL_GRID_COLOR)

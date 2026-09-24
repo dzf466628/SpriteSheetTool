@@ -12,20 +12,76 @@
 """
 from __future__ import annotations
 
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import (
-    QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout,
+    QCheckBox, QColorDialog, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton,
+    QVBoxLayout,
 )
 
 from spritesheet.settings import (
-    detect_min_area, set_detect_min_area,
+    DEFAULT_PIXEL_GRID_ZOOM, DEFAULT_GUIDE_COLOR, DEFAULT_GUIDE_SELECTED_COLOR,
+    DEFAULT_PIXEL_GRID_COLOR,
+    detect_min_area, guide_color, guide_selected_color, pixel_grid_color,
+    pixel_grid_zoom, reset_view_colors, set_detect_min_area, set_guide_color,
+    set_guide_selected_color, set_pixel_grid_color, set_pixel_grid_zoom,
     set_show_project_thumbnail, show_project_thumbnail,
     set_undo_limit, undo_limit,
 )
 from spritesheet.ui.widgets import CompactSpinBox
 
 
+class _ColorButton(QPushButton):
+    """一个显示当前颜色的小方块按钮，点开取色盘（支持透明度）。
+
+    为什么不用现成的 ColorSwatchButton：那是 PS 那种"前景/背景双色块"，
+    这里是"每个设置项一个色块"，语义不同，硬套会让控件里多出一堆用不到的交互。
+    """
+
+    color_changed = pyqtSignal(QColor)
+
+    def __init__(self, color: QColor, label: str, parent=None) -> None:
+        super().__init__(parent)
+        self._color = QColor(color)
+        self._label = label
+        self.setFixedSize(58, 24)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clicked.connect(self._pick)
+
+    def color(self) -> QColor:
+        return QColor(self._color)
+
+    def set_color(self, color: QColor) -> None:
+        self._color = QColor(color)
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        # 棋盘格打底：半透明颜色才看得出透了多少
+        p.fillRect(self.rect(), QColor("#2b2b2b"))
+        for y in range(0, self.height(), 6):
+            for x in range(0, self.width(), 6):
+                if (x // 6 + y // 6) % 2:
+                    p.fillRect(x, y, 6, 6, QColor("#3a3a3a"))
+        p.fillRect(self.rect().adjusted(1, 1, -1, -1), self._color)
+        p.setPen(QColor("#666"))
+        p.drawRect(self.rect().adjusted(0, 0, -1, -1))
+        p.end()
+
+    def _pick(self) -> None:
+        picked = QColorDialog.getColor(
+            self._color, self, f"选择{self._label}颜色",
+            QColorDialog.ColorDialogOption.ShowAlphaChannel)
+        if picked.isValid():
+            self.set_color(picked)
+            self.color_changed.emit(picked)
+
+
 class SettingsDialog(QDialog):
     """软件设置：开关即时保存；检查更新转发给主窗口。"""
+
+    # 辅助线颜色 / 网格门槛改了 → 主窗口收到就重绘画布（不用重启）
+    view_colors_changed = pyqtSignal()
 
     def __init__(self, parent=None, check_update=None, note: str = "") -> None:
         super().__init__(parent)
@@ -124,6 +180,70 @@ class SettingsDialog(QDialog):
         hint_hist.setContentsMargins(22, 0, 0, 0)
         layout.addWidget(hint_hist)
 
+        line3 = QFrame()
+        line3.setFrameShape(QFrame.Shape.HLine)
+        line3.setStyleSheet("color: #3d3d3d;")
+        layout.addWidget(line3)
+
+        title_view = QLabel("视图辅助线（标线 / 像素网格）")
+        title_view.setStyleSheet("color: #F06292; font-weight: bold; font-size: 13px;")
+        layout.addWidget(title_view)
+
+        self.btn_guide_color = _ColorButton(guide_color(), "普通标线")
+        self.btn_guide_selected_color = _ColorButton(guide_selected_color(), "选中标线")
+        self.btn_grid_color = _ColorButton(pixel_grid_color(), "像素网格")
+        self.btn_guide_color.color_changed.connect(
+            lambda c: (set_guide_color(c), self.view_colors_changed.emit()))
+        self.btn_guide_selected_color.color_changed.connect(
+            lambda c: (set_guide_selected_color(c), self.view_colors_changed.emit()))
+        self.btn_grid_color.color_changed.connect(
+            lambda c: (set_pixel_grid_color(c), self.view_colors_changed.emit()))
+
+        for label, btn in (("普通标线", self.btn_guide_color),
+                           ("选中的那条标线", self.btn_guide_selected_color),
+                           ("完美像素的每像素网格", self.btn_grid_color)):
+            row_color = QHBoxLayout()
+            row_color.addWidget(QLabel(label))
+            row_color.addWidget(btn)
+            row_color.addStretch()
+            layout.addLayout(row_color)
+
+        row_grid = QHBoxLayout()
+        row_grid.addWidget(QLabel("像素网格显示门槛：放大到"))
+        self.spin_grid_zoom = CompactSpinBox()
+        self.spin_grid_zoom.setRange(100, 3200)
+        self.spin_grid_zoom.setSingleStep(100)
+        self.spin_grid_zoom.setValue(pixel_grid_zoom())
+        self.spin_grid_zoom.setSuffix(" %")
+        self.spin_grid_zoom.setFixedWidth(96)
+        self.spin_grid_zoom.setFixedHeight(24)
+        self.spin_grid_zoom.valueChanged.connect(
+            lambda value: (set_pixel_grid_zoom(value), self.view_colors_changed.emit()))
+        row_grid.addWidget(self.spin_grid_zoom)
+        row_grid.addWidget(QLabel("以上才显示"))
+        row_grid.addStretch()
+        layout.addLayout(row_grid)
+
+        btn_row_reset = QHBoxLayout()
+        self.btn_reset_colors = QPushButton("恢复默认颜色")
+        self.btn_reset_colors.setFixedHeight(26)
+        self.btn_reset_colors.clicked.connect(self._on_reset_colors)
+        btn_row_reset.addWidget(self.btn_reset_colors)
+        btn_row_reset.addStretch()
+        layout.addLayout(btn_row_reset)
+
+        hint_view = QLabel(
+            "标线：从标尺拖出来的参考线（青色是普通、主题色是当前选中的那条）。\n"
+            f"每像素网格：默认半透灰 #{DEFAULT_PIXEL_GRID_COLOR[3:]}。"
+            f"为什么默认要 {DEFAULT_PIXEL_GRID_ZOOM}% 才显示 —— 网格线间距就是放大倍数，"
+            "100% 时线宽和间距都是 1 像素，整张图会被线盖住。\n"
+            "网格颜色可以带透明度（取色盘下面那根滑块）。改完立刻生效。"
+        )
+        hint_view.setWordWrap(True)
+        hint_view.setStyleSheet("color: #9a9a9a; font-size: 11px;")
+        hint_view.setContentsMargins(22, 0, 0, 0)
+        layout.addWidget(hint_view)
+
         line2 = QFrame()
         line2.setFrameShape(QFrame.Shape.HLine)
         line2.setStyleSheet("color: #3d3d3d;")
@@ -179,6 +299,13 @@ class SettingsDialog(QDialog):
 
     def _on_undo_limit_changed(self, value: int) -> None:
         set_undo_limit(value)
+
+    def _on_reset_colors(self) -> None:
+        reset_view_colors()
+        self.btn_guide_color.set_color(QColor(DEFAULT_GUIDE_COLOR))
+        self.btn_guide_selected_color.set_color(QColor(DEFAULT_GUIDE_SELECTED_COLOR))
+        self.btn_grid_color.set_color(QColor(DEFAULT_PIXEL_GRID_COLOR))
+        self.view_colors_changed.emit()
 
     def _on_check_update(self) -> None:
         if self._check_update is not None:
