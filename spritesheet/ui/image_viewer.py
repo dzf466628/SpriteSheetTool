@@ -33,8 +33,8 @@ from PyQt6.QtWidgets import (
 )
 
 from spritesheet.settings import (
-    guide_color, guide_selected_color, last_directory, pixel_grid_color, pixel_grid_zoom,
-    set_last_directory,
+    detect_min_area, guide_color, guide_selected_color, last_directory, pixel_grid_color,
+    pixel_grid_zoom, set_last_directory,
 )
 from .models import Action
 from .widgets import (
@@ -696,6 +696,15 @@ class _Canvas(QWidget):
             self.update()
         super().leaveEvent(event)
 
+    def is_panning(self) -> bool:
+        """空格平移状态是不是按着（让位判断要用；别处直接读 _panning 会读错对象）。
+
+        这个标志在**画布**上（空格手势归它管），查看器要问就调这个 —— 免得写成
+        ``viewer._panning``：查看器上没有这个属性（踩过一次：绘制时抛 AttributeError，
+        整个 paintEvent 被打断，画面就画花了）。
+        """
+        return bool(self._panning)
+
     def set_pan_mode(self, on: bool) -> None:
         """空格平移的开关（画布自己的键盘事件 + app 级过滤器都会调它，幂等）。
 
@@ -714,8 +723,11 @@ class _Canvas(QWidget):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Space:
             self.set_pan_mode(True)
-        elif event.key() == Qt.Key.Key_Escape and self._viewer.source_interaction:
-            # 原图选择状态下的 Esc = 取消选择（工具本身还开着，跟画图软件一致）
+        elif event.key() == Qt.Key.Key_Escape and self._viewer.source_interaction \
+                and self._viewer.selected_sources():
+            # 原图选择状态下的 Esc = 取消选择（工具本身还开着，跟画图软件一致）。
+            # **必须带上"真的有东西可取消"这个条件**：不然原图选择开着时 Esc 会被这一条
+            # 永远吞掉，用户按多少下都收不掉工具（用户要的是"取消选中 → 再按一次收工具"）。
             self._viewer.set_selected_sources([])
             self._viewer._band_start = None
             self._viewer._band_rect = None
@@ -1861,6 +1873,7 @@ class ImageViewer(QWidget):
     frames_updated = pyqtSignal()
     # 退出完美像素后按当前像素重贴紧了元素外框（只改外框、不重排帧）：
     # 主窗口据此记一条撤销 + 刷新（没有当前动作时也要能撤销，所以不走 action_performed_full）
+    about_to_refit_frames = pyqtSignal()   # 外框即将被改（主窗口在这时抓 before）
     frames_refit = pyqtSignal(str)
     # 「把当前工具收起来」：Esc、或者点画布外那一堆面板时发出（画笔/橡皮/吸管/原图选择/
     # 抠除背景）。画布和查看器都知道"该不该收"，但**按钮的勾选状态在主窗口**，
@@ -2171,6 +2184,10 @@ class ImageViewer(QWidget):
         """
         self._detect_generation += 1
         generation = self._detect_generation
+        # 新一轮检测作废"重贴紧"的在途结果：那是按**上一份**画面算出来的连通域，
+        # 落到换过图/换过标签页后的新画面上会凭空多出一堆"新元素"
+        # （同一份画面上"碰到老外框的并进去"没事，但"没碰到的当新元素追加"就会出事）
+        self._refit_generation += 1
         # 新一轮检测的基准就是**当前**的帧列表，所以之前攒下的位移补偿清空
         self._pending_detect_shifts = []
         self._detect_inflight = True
@@ -2202,17 +2219,17 @@ class ImageViewer(QWidget):
         thread.start()
 
     def refit_frames(self) -> None:
-        """按当前像素**只重贴紧元素外框**（不重排帧、不认新元素）。
+        """按当前像素**重贴紧元素外框 + 追加新画的元素**（老元素绝不重排）。
 
-        用户口径（退出完美像素时触发）：在像素画视图里涂完/擦完，方块该跟着像素走。
-        但**绝不能重排帧** —— 帧号、选中集、合成组、复用关系、忽略标记全都挂在元素下标上，
-        重检一遍（`_start_frame_detection`）会把这些全毁掉，所以主窗口里才写着
-        「已经排过帧了，绝不重检」。这里走的是第三种办法：后台跑一次连通域（复用同一个
-        检测线程，结果只是矩形），把每个老外框**碰到**的连通域并起来当新外框。
+        用户口径（退出完美像素时触发）：在像素画视图里涂完/擦完，方块该跟着像素走；
+        新画的元素也要有框。但**绝不能重排帧** —— 帧号、选中集、合成组、复用关系、
+        忽略标记全都挂在元素下标上，重检一遍（`_start_frame_detection`）会把这些全毁掉，
+        所以主窗口里才写着「已经排过帧了，绝不重检」。这里走的是第三种办法：后台跑一次
+        连通域（复用同一个检测线程，结果只是矩形），碰到老外框的并进去、没碰到的追加到最后。
 
         于是：画胖了一圈的外框会跟上；擦掉内容的元素外框原样留着（它已经"空"了，
-        本来就不再画虚线框）；**新画出来的一块独立像素不会变成新元素**（这正是"只重裁、
-        不重排"的代价，用户选的）；两块元素被涂得连在一起时，两边都拿到并集框
+        本来就不再画虚线框）；**新画的那块会作为新元素追加在末尾**（老元素下标一个不动，
+        所以已排好的帧不会错位）；两块元素被涂得连在一起时，两边都拿到并集框
         （与处理顺序无关）。
         """
         if not self._frames or self._pixmap is None or self._pixmap.isNull():
@@ -2234,7 +2251,26 @@ class ImageViewer(QWidget):
         thread.start()
 
     def _apply_refit(self, components: list[tuple[int, int, int, int]]) -> None:
-        """把连通域并到"碰到它的那些老外框"上（只改外框，顺序与数量都不变）。"""
+        """把连通域并到"碰到它的那些老外框"上，**并追加新元素**（老外框绝不重排）。
+
+        第一版这里是"只重裁、新画的独立像素不认"（当时问过用户，他选了这条）。真用起来
+        立刻被抓：在像素画视图里画了个新元素，退出后**它没有灰色框** —— 对用户来说
+        "画出来的东西就是元素"，不认它就是看着像丢了。所以改成：
+          - 老外框：只并"碰到它的连通域"，一个都没碰到就原样留着（元素不能被删，
+            否则下标整体前移，用户排好的帧全错位）；
+          - **没被任何老外框碰到的连通域 = 新元素，追加在最后**（顺序按从上到下、
+            从左到右），老元素的下标因此一个都不动；
+          - 新元素要过**软件设置里的"自动识别阈值"**（`detect_min_area`）：不然随手
+            点错的一个像素也会变成一个元素，每多一个元素所有动作的帧数都跟着变。
+            判定口径**必须和检测线程一模一样**（见 `_detect_frames_image`：`max(w, h) > min_area`，
+            比的是**长边**不是面积）—— 两处口径不一致的话，"阈值 20"在两个地方含义不同，
+            用户会发现"识别时不算元素、退出完美像素又算了"，这种不一致最难查。
+        """
+        min_area = detect_min_area()
+
+        def is_new_enough(component: tuple[int, int, int, int]) -> bool:
+            return max(component[2], component[3]) > min_area
+        used: set[int] = set()
         new_frames: list[tuple[int, int, int, int]] = []
         moved = 0
         for fx, fy, fw, fh in self._frames:
@@ -2244,6 +2280,9 @@ class ImageViewer(QWidget):
                 # 否则下标会整体前移，用户排好的帧全错位（这正是本次要避免的事）
                 new_frames.append((fx, fy, fw, fh))
                 continue
+            for index, component in enumerate(components):
+                if _rects_touch(component, (fx, fy, fw, fh)):
+                    used.add(index)
             x0 = min(c[0] for c in hits)
             y0 = min(c[1] for c in hits)
             x1 = max(c[0] + c[2] for c in hits)
@@ -2252,14 +2291,39 @@ class ImageViewer(QWidget):
             if box != (fx, fy, fw, fh):
                 moved += 1
             new_frames.append(box)
-        if not moved:
-            # 一个框都没变（涂的是元素内部）：不留脏数据、不占一条撤销
-            self.canvas.show_toast("元素外框本来就贴紧着，没有要改的")
+
+        fresh = [c for index, c in enumerate(components)
+                 if index not in used and is_new_enough(c)]
+        skipped = sum(1 for index, c in enumerate(components)
+                      if index not in used and not is_new_enough(c))
+        # 从上到下、从左到右追加：跟识别线程的顺序口径一致，谁先谁后是可预期的
+        fresh.sort(key=lambda c: (c[1], c[0]))
+        new_frames.extend(fresh)
+        added = len(fresh)
+
+        if not moved and not added:
+            # 一个框都没变（涂的是元素内部）：不留脏数据、不占一条撤销。
+            # 但"画了新东西却没框"必须说清楚为什么 —— 不然用户只会觉得功能没生效。
+            if skipped:
+                self.canvas.show_toast(
+                    f"{skipped} 块新画的像素太小，没算成元素（自动识别阈值：长边要超过 "
+                    f"{min_area} px，可在软件设置里调）")
+            else:
+                self.canvas.show_toast("元素外框本来就贴紧着，没有要改的")
             return
+        self.about_to_refit_frames.emit()      # 主窗口在这里抓 before（数据还没改）
         self._frames = new_frames
         self.canvas.update()
         self._update_rulers()
-        self.frames_refit.emit(f"已按当前像素重贴紧 {moved} 个元素外框")
+        parts = []
+        if moved:
+            parts.append(f"重贴紧 {moved} 个元素外框")
+        if added:
+            parts.append(f"新认出 {added} 个元素")
+        text = "已" + "，".join(parts)
+        if skipped:
+            text += f"（还有 {skipped} 块太小没算：阈值 {min_area} px）"
+        self.frames_refit.emit(text)
 
     def fit_view(self):
         """居中并自适应画布窗口（0.9 比例）。完美像素模式下保持 100% 不"自适应"。"""
@@ -2383,7 +2447,7 @@ class ImageViewer(QWidget):
         不传就现场问 ``QApplication.keyboardModifiers()``（绘笔刷圈时没有事件可传）。
         **只看按键，不改工具状态** —— 松开就是画笔。
         """
-        if self._panning:
+        if self.canvas.is_panning():
             return True
         if modifiers is None:
             modifiers = QApplication.keyboardModifiers()

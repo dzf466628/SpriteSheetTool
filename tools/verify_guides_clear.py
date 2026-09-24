@@ -33,6 +33,7 @@ from PyQt6.QtCore import QEvent, QPoint, QPointF, QRect, Qt
 from PyQt6.QtGui import QColor, QKeyEvent, QMouseEvent
 from PyQt6.QtWidgets import QApplication
 
+from spritesheet import settings
 from spritesheet.ui.key_panel import pil_to_pixmap
 from spritesheet.ui.main_window import MainWindow
 
@@ -334,12 +335,17 @@ def main() -> int:
                                    int(viewer._offset.x() + 200 * zoom_now)))]
 
     row = guide_row()
-    check("选中的标线画成主题色 #E91E63", "#E91E63" in row, f"row={sorted(set(row))}")
+    # 期望颜色**从设置里读**，不写死默认值：颜色现在可以在「软件设置」里自己调
+    # （绿标线、橙选中都是合法配置），写死默认色的断言会在用户改过颜色之后无故变红 ——
+    # 这里要验的是"选中的那条用了设置里的'选中色'、其余用了设置里的'普通色'"这条接线。
+    want_sel = settings.guide_selected_color().name().upper()
+    want_norm = settings.guide_color().name().upper()
+    check(f"选中的标线画成设置里的选中色 {want_sel}", want_sel in row, f"row={sorted(set(row))}")
     viewer.select_guide(None)
     wait(80)
     row2 = guide_row()
-    check("没选中时画成青色 #00FFFF（一眼看出选中的是哪条）",
-          "#00FFFF" in row2, f"row={sorted(set(row2))}")
+    check(f"没选中时画成设置里的普通色 {want_norm}（一眼看出选中的是哪条）",
+          want_norm in row2, f"row={sorted(set(row2))}")
 
     win._new_tab(switch=True)          # 新标签页：标线各是各的
     wait(250)

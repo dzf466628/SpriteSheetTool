@@ -14,7 +14,8 @@
   半档是相邻整数档之间的 alpha 插值（边缘半透明）。
 
 全程 offscreen；QApplication 必须挂模块级。
-跑之前会记住用户当前的辅助线设置，跑完原样写回（不能让测试改用户配置）。
+跑之前会把用户当前的辅助线/阈值设置**存档到磁盘**、跑完原样写回（见 settings_guard.py：
+中途崩了也能在下次启动时救回来，不能让测试把用户配置永久改成测试色）。
 
 Usage: .venv\\Scripts\\python.exe tools\\verify_pixel_perfect.py
 """
@@ -27,12 +28,14 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # 同目录的 settings_guard
 
 from PIL import Image, ImageDraw
 from PyQt6.QtCore import QEvent, QPointF, QRect, Qt
 from PyQt6.QtGui import QColor, QMouseEvent
 from PyQt6.QtWidgets import QApplication
 
+from settings_guard import protect_settings
 from spritesheet import keying, settings
 from spritesheet.ui.key_panel import pil_to_pixmap
 from spritesheet.ui.main_window import MainWindow
@@ -167,12 +170,12 @@ def shrink_alpha(img: Image.Image, value: float) -> bytes:
 
 
 def main() -> int:
-    # 用户当前的辅助线设置：跑完原样写回（测试不能改用户的软件设置）
-    keep = (settings.guide_color(), settings.guide_selected_color(),
-            settings.pixel_grid_color(), settings.pixel_grid_zoom())
-    keep_min_area = settings.detect_min_area()
+    # 用户当前的辅助线/阈值设置：存档 → 跑完原样写回（测试不能改用户的软件设置）。
+    # 用 settings_guard 落盘而不是记在内存里：跑到一半崩了（offscreen 收尾偶尔会崩）
+    # 内存那份就没了，用户设置会永久留成测试色 —— 这个坑真踩过。
+    restore_settings = protect_settings()
     # 识别阈值也先归零：这个值用户可能自己调大过（调大就会把测试用的小方块当噪点滤掉，
-    # 元素数量对不上，后面所有按元素算的断言全塌），跑完原样写回。
+    # 元素数量对不上，后面所有按元素算的断言全塌），跑完由 restore_settings 原样写回。
     settings.set_detect_min_area(0)
 
     win = MainWindow()
@@ -489,7 +492,189 @@ def main() -> int:
     toolbar.btn_pixel_perfect.click()
     wait(120)
 
-    print("--- 12. 设置里「恢复默认颜色」能一键回到出厂色 ---")
+    print("--- 13. 退出完美像素：重贴紧老外框 + 追加新画的元素（老元素绝不重排） ---")
+    # 用户口径："关闭完美像素按钮以后要重新检测场上的素材"、后来又补了一句
+    # "新加入的元素要有（灰色框）啊，以前的灰色框可以不动" —— 所以：
+    #   老外框只贴紧、下标一个不动；没碰到任何老外框的连通域**追加在末尾**；
+    #   新元素要过软件设置里的"自动识别阈值"，免得点错一个像素也变成一个元素。
+    # 阈值调成 4：注意检测器的口径是"**长边**要 > 阈值"（`_detect_frames_image` 里
+    # `max(w, h) > min_area`），不是面积 —— 5px 的那块（长边 5）过得了，
+    # 单个像素（长边 1）过不了。而且这个值必须**小于**夹具方块的边长 20，
+    # 不然 A（20×20）自己就会被"识别阈值"挡掉（第一版设成 20 就踩了这个）。
+    settings.set_detect_min_area(4)
+    # 开个**新标签页**再载一张干净的原图验这一节：前面第 8/9 节在空白处涂过像素，
+    # 现在那些也会被认成新元素（功能是对的），但"开头两个元素"这条前提就不成立了。
+    # 注意不能用 `_on_image_loaded` 直接重载 —— 已经有一张图时它是**追加**原图
+    # （会把两张图拼在一起，元素变成 4 个），必须从空白页开始。
+    win._new_tab()
+    wait(300)
+    win._on_image_loaded(pil_to_pixmap(sheet()))
+    wait(500)
+    toolbar.btn_pixel_perfect.click()          # 先确保在模式里
+    wait(200)
+    viewer.zoom_actual_pixel()
+    viewer._v_toolbar.btn_brush.setChecked(True)
+    viewer.set_paint_color(QColor("#00FF00"))
+    viewer.set_brush_size(1)
+    viewer.sync_paint_colors()
+    wait(120)
+    frames_before = list(viewer._frames)
+    check("(准备) 两个元素：A=(10,10,20,20) B=(60,40,30,20)",
+          frames_before == [(10, 10, 20, 20), (60, 40, 30, 20)], f"frames={frames_before}")
+
+    # 1) 贴着 A 的右边补一个像素（x=30 与 A 的 x=29 相邻，属于同一块像素）
+    click(win, image_to_canvas(viewer, 30, 10))
+    wait(200)
+    # 2) 在空白处画一个**太小**的孤立像素（谁也不挨着，而且过不了 20px 的阈值）
+    click(win, image_to_canvas(viewer, 45, 60))
+    wait(200)
+    # 3) 在空白处画一块**够大**的新元素：5px 笔 = 25 个像素，位置离 A / B 都远
+    viewer.set_brush_size(5)
+    wait(80)
+    click(win, image_to_canvas(viewer, 70, 5))
+    wait(200)
+    check("三处像素都涂上去了（否则下面是空断言）",
+          pixel(viewer._source_images[0], 30, 10).name().upper() == "#00FF00"
+          and pixel(viewer._source_images[0], 45, 60).name().upper() == "#00FF00"
+          and pixel(viewer._source_images[0], 70, 3).name().upper() == "#00FF00",
+          f"a={pixel(viewer._source_images[0], 30, 10).name()} "
+          f"b={pixel(viewer._source_images[0], 45, 60).name()} "
+          f"c={pixel(viewer._source_images[0], 70, 3).name()}")
+
+    undo_before = win._undo_stack.count()
+    toolbar.btn_pixel_perfect.click()          # ← 用户点按钮退出
+    wait(500)
+    frames_after = list(viewer._frames)
+    check("A 的外框跟着像素长大了（右边多了一个像素 → 宽 20→21）",
+          frames_after[0] == (10, 10, 21, 20), f"frames={frames_after}")
+    check("B 的外框原样不动", frames_after[1] == (60, 40, 30, 20), f"frames={frames_after}")
+    check("新画的那块**追加成了第 3 个元素**，框就是它自己 (68,3,5,5)",
+          len(frames_after) == 3 and frames_after[2] == (68, 3, 5, 5),
+          f"frames={frames_after}")
+    check("老元素的**下标一个没动**（前两个格子还是 A、B —— 帧号/合成组靠的就是这个）",
+          frames_after[0][:2] == (10, 10) and frames_after[1][:2] == (60, 40),
+          f"frames={frames_after}")
+    check("空白处那个**单个像素**太小，没算成元素（阈值：长边 > 4 px）",
+          not any(x <= 45 < x + w and y <= 60 < y + h for x, y, w, h in frames_after),
+          f"frames={frames_after}")
+    check("重贴紧只记了**一条**撤销", win._undo_stack.count() == undo_before + 1,
+          f"before={undo_before} after={win._undo_stack.count()}")
+    check("状态栏说了两件事：重贴紧 + 新认出，且说清了「太小没算」",
+          "重贴紧" in win.lbl_status.text() and "新认出 1 个元素" in win.lbl_status.text()
+          and "太小" in win.lbl_status.text(), f"status={win.lbl_status.text()}")
+
+    win._do_undo()
+    wait(400)
+    check("Ctrl+Z 能把外框退回重贴紧之前（新元素也一起退掉）",
+          list(viewer._frames) == frames_before, f"frames={list(viewer._frames)}")
+    win._do_redo()
+    wait(400)
+    check("重做又回到重贴紧之后", list(viewer._frames) == frames_after,
+          f"frames={list(viewer._frames)}")
+
+    print("--- 14. 擦掉像素 / 涂在内部：不删元素、不白占撤销 ---")
+    toolbar.btn_pixel_perfect.click()          # 再进模式，用橡皮擦掉第 13 步补的那个像素
+    wait(200)
+    viewer.zoom_actual_pixel()
+    viewer._v_toolbar.btn_eraser.setChecked(True)
+    viewer.set_brush_size(1)
+    wait(120)
+    check("(准备) 橡皮开着、1px", viewer.paint_tool == "eraser" and viewer.brush_size == 1,
+          f"tool={viewer.paint_tool} size={viewer.brush_size}")
+    # 擦之前 A 必须还是**长大过**的那个框：不先钉住这一条，下面"擦完又缩回去"就会在
+    # "框从头到尾没变过"的情况下也通过（假绿）
+    check("(准备) 擦之前 A 仍是长过的 (10,10,21,20)",
+          list(viewer._frames)[0] == (10, 10, 21, 20), f"frames={list(viewer._frames)}")
+    click(win, image_to_canvas(viewer, 30, 10))     # 正好擦掉让 A 变宽的那个像素
+    wait(200)
+    check("那个像素真的被擦成透明了",
+          pixel(viewer._source_images[0], 30, 10).alpha() == 0,
+          f"alpha={pixel(viewer._source_images[0], 30, 10).alpha()}")
+    toolbar.btn_pixel_perfect.click()               # 退出 → 外框应该收回去
+    wait(500)
+    shrunk = list(viewer._frames)
+    check("擦掉内容后外框收紧了（A 的宽 21→20，回到没涂之前）",
+          shrunk[0] == (10, 10, 20, 20), f"frames={shrunk}")
+    check("被擦的元素**还在**、第 13 步追加的新元素也还在（不删元素：删了后面所有下标都会错位）",
+          len(shrunk) == 3 and shrunk[1] == (60, 40, 30, 20) and shrunk[2] == (68, 3, 5, 5),
+          f"frames={shrunk}")
+
+    toolbar.btn_pixel_perfect.click()
+    wait(200)
+    viewer.zoom_actual_pixel()
+    viewer._v_toolbar.btn_brush.setChecked(True)
+    viewer.set_brush_size(1)
+    viewer.set_paint_color(QColor("#0000FF"))
+    viewer.sync_paint_colors()
+    wait(120)
+    click(win, image_to_canvas(viewer, 15, 20))     # 涂在 A 的**内部**：外框不该变
+    wait(200)
+    frames_now = list(viewer._frames)
+    undo_now = win._undo_stack.count()
+    toolbar.btn_pixel_perfect.click()
+    wait(500)
+    check("涂在元素内部：外框一个都没变",
+          list(viewer._frames) == frames_now, f"frames={list(viewer._frames)}")
+    check("没变化就不留一条空撤销（历史上不该多出「重贴紧」这个动作）",
+          win._undo_stack.count() == undo_now,
+          f"before={undo_now} after={win._undo_stack.count()}")
+    check("但会给一句提示（不能静悄悄什么都不做）", canvas._toast.active() is True,
+          f"toast={canvas._toast.text()!r}")
+
+    print("--- 15. 新元素的阈值口径，必须和「识别」那套一模一样 ---")
+    # 检测器（_detect_frames_image）的口径是 `max(w, h) > min_area` —— 比**长边**、而且是
+    # **严格大于**。重贴紧认新元素必须照抄这套，不然同一个"阈值 20"在两处含义不同：
+    # 识别时不算、退出完美像素又算了（我第一版这里写成了"面积 >= 阈值"，正好错在这）。
+    settings.set_detect_min_area(20)
+    toolbar.btn_pixel_perfect.click()
+    wait(200)
+    viewer.zoom_actual_pixel()
+    viewer._v_toolbar.btn_brush.setChecked(True)
+    viewer.set_paint_color(QColor("#FF00FF"))
+    viewer.set_brush_size(20)
+    viewer.sync_paint_colors()
+    wait(120)
+    click(win, image_to_canvas(viewer, 20, 60))     # 20×20：长边 == 阈值 → 不算
+    wait(200)
+    toolbar.btn_pixel_perfect.click()
+    wait(500)
+    check("20×20 那块（长边正好等于阈值 20）**不算**新元素",
+          not any(x <= 20 < x + w and y <= 60 < y + h for x, y, w, h in viewer._frames),
+          f"frames={list(viewer._frames)}")
+
+    toolbar.btn_pixel_perfect.click()
+    wait(200)
+    viewer.zoom_actual_pixel()
+    viewer._v_toolbar.btn_brush.setChecked(True)
+    viewer.set_brush_size(21)
+    viewer.sync_paint_colors()
+    wait(120)
+    click(win, image_to_canvas(viewer, 45, 30))     # 21×21：长边 > 阈值 → 算
+    wait(200)
+    toolbar.btn_pixel_perfect.click()
+    wait(500)
+    check("21×21 那块（长边比阈值大 1）**算**新元素，追加在最后",
+          list(viewer._frames)[-1] == (35, 20, 21, 21), f"frames={list(viewer._frames)}")
+
+    print("--- 16. 切标签页时「在途」的重贴紧，不许落到新文档上 ---")
+    # 重贴紧是后台线程算的，而它现在会**追加新元素**：如果上一份画面的连通域落到
+    # 换过图的新文档上，新文档就会凭空多出一堆"新元素"（切标签页正好会撞上）。
+    # 这条不需要真的抢到那个时间窗：即使线程先跑完了，断言也照样成立（老文档自己改自己）。
+    toolbar.btn_pixel_perfect.click()
+    wait(200)
+    viewer.zoom_actual_pixel()
+    viewer.refit_frames()                       # 起一次重贴紧（线程在飞）
+    win._new_tab()                              # 立刻切走
+    wait(150)
+    # 阈值调回 4：不然夹具里 20×20 的 A 会被"长边要 > 20"这条挡掉，只剩 B 一个元素
+    settings.set_detect_min_area(4)
+    win._on_image_loaded(pil_to_pixmap(sheet()))
+    wait(700)                                   # 等那趟在途的重贴紧跑完
+    check("新标签页只按自己的图识别元素（没被上一份画面的重贴紧塞进外来元素）",
+          list(viewer._frames) == [(10, 10, 20, 20), (60, 40, 30, 20)],
+          f"frames={list(viewer._frames)}")
+
+    print("--- 17. 设置里「恢复默认颜色」能一键回到出厂色 ---")
     settings.reset_view_colors()
     check("普通标线回到青色", settings.guide_color().name().upper() == "#00FFFF",
           f"got={settings.guide_color().name()}")
@@ -502,14 +687,9 @@ def main() -> int:
     check("门槛默认 400%", settings.pixel_grid_zoom() == 400,
           f"got={settings.pixel_grid_zoom()}")
 
-    print("--- 13. 收尾 ---")
+    print("--- 18. 收尾 ---")
     viewer.set_guides([])
-    # 原样写回用户原来的辅助线设置
-    settings.set_guide_color(keep[0])
-    settings.set_guide_selected_color(keep[1])
-    settings.set_pixel_grid_color(keep[2])
-    settings.set_pixel_grid_zoom(keep[3])
-    settings.set_detect_min_area(keep_min_area)
+    restore_settings()                 # 原样写回用户的设置（幂等，atexit 也会兜一次）
     viewer.reload_view_colors()
     win.close()
     wait(400)

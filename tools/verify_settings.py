@@ -22,6 +22,9 @@ from PyQt6.QtWidgets import QApplication
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # 同目录的 settings_guard
+
+from settings_guard import protect_settings   # noqa: E402  （要先把 ROOT 塞进 sys.path）
 
 FAILURES = []
 
@@ -41,6 +44,8 @@ def main() -> int:
     app.setApplicationName("SpriteSheetTool verify_settings")
 
     from spritesheet import settings as settings_mod
+    # 这套回归会把用户设置整段改掉（为了验默认值还会删键）：先存档，收尾原样写回
+    restore_settings = protect_settings()
     from spritesheet.project_file import read_project, write_project
     from spritesheet.ui.main_window import _THUMB_STROKE, MainWindow
     from spritesheet.ui.settings_dialog import SettingsDialog
@@ -216,9 +221,11 @@ def main() -> int:
           and dialog2.btn_grid_color.color().name(QColor.NameFormat.HexArgb).upper()
           == "#80808080")
     dialog2.close()
-    # 收尾：把这几项恢复成出厂（测试不该留下"用户改过"的设置）
-    settings_mod.reset_view_colors()
-    settings_mod.set_pixel_grid_zoom(settings_mod.DEFAULT_PIXEL_GRID_ZOOM)
+    # 收尾：把用户原来的设置**原样写回**（不是"恢复出厂"）。
+    # 原来这里写的是 reset_view_colors()：那等于"用户一旦自己调过标线色，跑一次回归就被抹掉"，
+    # 而这几个颜色恰恰是新加的、鼓励用户自己调的功能。用存档保证跑完就是用户跑之前的样子；
+    # 中途崩了也能靠存档在下次启动时救回来（见 tools/settings_guard.py）。
+    restore_settings()
 
     # 收尾：MainWindow 关掉才会走 closeEvent → ImageViewer.shutdown()。
     # 不关就走，元素检测线程会在解释器退出时与窗口析构撞车（0xC0000005）。

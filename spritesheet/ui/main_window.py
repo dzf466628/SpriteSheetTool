@@ -1510,6 +1510,9 @@ class MainWindow(QMainWindow):
         viewer = self.image_viewer
         # 切文档时先掐掉上一份文档还在跑的元素检测，否则结果会落到新文档上
         viewer._detect_generation += 1
+        # "退出完美像素后重贴紧"也一样要作废：现在它会**追加新元素**，
+        # 上一份画面的连通域落到新文档上就会凭空多出一堆元素（切标签页正好会撞上）
+        viewer._refit_generation += 1
 
         self.actions = list(doc["actions"])
         viewer._pixmap = doc["pixmap"]
@@ -2064,6 +2067,7 @@ class MainWindow(QMainWindow):
         # 「把当前工具收起来」：Esc、点画布外（查看器里的 app 级过滤器判断该不该收）
         self.image_viewer.tool_dismiss_requested.connect(self._dismiss_current_tool)
         # 退出完美像素后按当前像素重贴紧元素外框（只重裁、不重排帧）
+        self.image_viewer.about_to_refit_frames.connect(self._on_before_refit_frames)
         self.image_viewer.frames_refit.connect(self._on_frames_refit)
         # 双击棋盘格加图片：与工具栏"添加图片"按钮同一个入口
         self.image_viewer.add_image_requested.connect(self._open_image)
@@ -2620,6 +2624,55 @@ class MainWindow(QMainWindow):
         但"拖动移位"照样有意义。校验与状态栏文案统一在 ``_set_active_tool`` 里。
         """
         self._set_active_tool("source" if on else None)
+
+    def _dismiss_current_tool(self) -> None:
+        """把**当前工具**收起来（Esc、或者点画布外那片界面时走这里）。
+
+        只收竖条上那几个"手上拿着的工具"：画笔 / 橡皮 / 吸管 / 原图选择 / 抠除背景 ——
+        它们抢的都是"画布上按住左键"这一个手势，收掉是用户明确要的（"按住空格或者其他
+        按键要关闭画笔工具"）。**合成模式 / 复用模式 / 完美像素不收**：那三个是画布的
+        帧语义与显示开关，不是手里的工具，顺手关掉就是擅自改用户状态了。
+
+        手上本来就没有工具时什么也不做 —— Esc 在空画布上按一下必须没有任何副作用。
+        """
+        bar = self.image_viewer._v_toolbar
+        # tool_buttons() 给的是 [(名字, 按钮), …]（不是 dict）：这里只关心"有没有工具亮着"
+        if not any(button.isChecked() for _, button in bar.tool_buttons()):
+            return
+        self._set_active_tool(None)
+        # _set_active_tool(None) 会把状态栏清空，这里补一句"刚刚发生了什么"，
+        # 否则用户按了 Esc 只看到提示消失，不确定是收工具还是别的
+        self.lbl_status.setText("已收起当前工具（B 画笔 · E 橡皮 · I 吸管）")
+
+    def _on_before_refit_frames(self) -> None:
+        """退出完美像素、即将重贴紧元素外框：抓 before 快照。
+
+        记在**全局栈**（``current_only=False``）：帧列表不属于某个动作，而且"刚载图、
+        还没建动作就开始涂像素画"是正常用法，这种时候也必须能撤销。
+        """
+        self._push_snapshot("重新贴紧元素外框", current_only=False)
+
+    def _on_frames_refit(self, text: str) -> None:
+        """元素外框重贴紧完成：重裁帧、刷预览、落一条撤销、标脏。
+
+        和"检测完成"（``_on_frames_updated``）做的事基本一样，区别只有说法：
+        **这不是重新识别了一遍元素** —— 老元素一个没多、一个没少、下标一个没动，
+        只是外框跟着像素贴紧了；新画的那些只**追加在末尾**（位置由查看器算好）。
+        所以状态栏不能沿用"已完成元素检测：共 N 个元素"那句话。
+
+        追加出来的元素**不会自己变成帧**：帧来自 ``action.selected_indices``，
+        要用户点一下选中它才进帧 —— 所以老动作已经排好的帧一个都不会动。
+        """
+        viewer = self.image_viewer
+        for action in self.actions:
+            viewer.crop_frames_for_action(action)
+        if viewer.current_action:
+            self.preview.set_action(viewer.current_action)
+        self._transform_history_state = self._capture_transform_state()
+        viewer.canvas.update()
+        self._push_snapshot_done()
+        self._mark_project_dirty()
+        self.lbl_status.setText(text + "（Ctrl+Z 可撤销）")
 
     def _on_paint_stroke_started(self, tool: str) -> None:
         """一笔开始：先抓全量 before 快照（含原图引用）。
