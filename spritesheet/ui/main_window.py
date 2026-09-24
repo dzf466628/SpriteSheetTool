@@ -23,7 +23,7 @@ from PyQt6.QtGui import (
     QUndoCommand, QUndoStack,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel,
+    QApplication, QColorDialog, QDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar,
     QPushButton, QSplitter, QVBoxLayout, QWidget,
     QTreeWidget, QTreeWidgetItem,
@@ -1434,6 +1434,9 @@ class MainWindow(QMainWindow):
             "frames": list(v._frames),
             "frame_logical": dict(v._frame_logical),
             "ignored_frames": set(v._ignored_frames),
+            # 标线跟着标签页走（每条 ["h"|"v", 图片坐标]，**拷贝一份**：
+            # 存引用的话在另一个标签页里拖标线会改到这份文档的状态）
+            "guides": [list(g) for g in v._guides],
             "zoom": v._zoom,
             "offset": QPointF(v._offset),
             "bg_mode": v._bg_mode,
@@ -1465,6 +1468,7 @@ class MainWindow(QMainWindow):
             "frames": [],
             "frame_logical": {},
             "ignored_frames": set(),
+            "guides": [],
             "zoom": 1.0,
             "offset": QPointF(0, 0),
             "bg_mode": "checker",
@@ -1503,6 +1507,8 @@ class MainWindow(QMainWindow):
         viewer._frames = list(doc["frames"])
         viewer._frame_logical = dict(doc["frame_logical"])
         viewer._ignored_frames = set(doc.get("ignored_frames") or [])
+        # 标线是"每个标签页各一份"的视图状态（只当参考线，不进导出/识别）
+        viewer.set_guides(doc.get("guides") or [])
         viewer._zoom = float(doc["zoom"])
         viewer._offset = QPointF(doc["offset"])
         viewer._bg_mode = doc["bg_mode"]
@@ -1573,6 +1579,13 @@ class MainWindow(QMainWindow):
 
         viewer.canvas.update()
         viewer._update_rulers()
+        # 工具状态跟着文档走一遍校验：切到**空白**文档时画布上没图了，画笔/橡皮/吸管
+        # 必须弹回去 —— 否则工具还亮着、参数条还挂着，用户点画布会莫名弹出"添加图片"
+        # 的文件对话框（工具只认"画布上按住左键"这一个手势，没图时这一下会落到
+        # 「点击空白画布 = 添加图片」那条老分支上）。
+        # 有图的文档之间切换则保持工具不弹：和 PS 一样，切文档不换工具。
+        if viewer._pixmap is None or viewer._pixmap.isNull():
+            self._set_active_tool(None)
         self._refresh_tab_label()
         self._set_project_title()
 
@@ -1985,6 +1998,7 @@ class MainWindow(QMainWindow):
         self.splitter.setStyleSheet("QSplitter::handle { background: #333; } QSplitter::handle:hover { background: #E91E63; }")
 
         self.image_viewer = ImageViewer()
+        self._tool_shortcuts: list[QAction] = []   # 工具快捷键（挂在画布上，别让它们被回收）
         self.image_viewer.image_loaded.connect(self._on_image_loaded)
         self.image_viewer.json_selected.connect(self._import_project)
         self.image_viewer.json_dropped.connect(self._import_project)
@@ -2008,13 +2022,21 @@ class MainWindow(QMainWindow):
         self.image_viewer.undo_requested.connect(self._do_undo)
         self.image_viewer.redo_requested.connect(self._do_redo)
         # 左侧竖条「抠除背景」：打开参数浮层（点第二下等于关掉/取消）
-        self.image_viewer.key_requested.connect(self._open_key_panel)
+        self.image_viewer.key_requested.connect(lambda: self._on_tool_button_toggled("key"))
         self.image_viewer.source_tool_requested.connect(self._on_source_tool_toggled)
         self.image_viewer.source_selection_changed.connect(self._on_source_selection_changed)
         self.image_viewer.source_move_started.connect(self._on_source_move_started)
         self.image_viewer.source_move_finished.connect(self._on_source_move_finished)
+        # 画笔 / 橡皮 / 吸管（左侧竖条三件套 + 工具选项条）
+        self.image_viewer.paint_tool_requested.connect(self._on_tool_button_toggled)
+        self.image_viewer.color_requested.connect(self._pick_paint_color)
+        self.image_viewer.color_picked.connect(self._on_color_picked)
+        self.image_viewer.paint_stroke_started.connect(self._on_paint_stroke_started)
+        self.image_viewer.paint_stroke_finished.connect(self._on_paint_stroke_finished)
         # 双击棋盘格加图片：与工具栏"添加图片"按钮同一个入口
         self.image_viewer.add_image_requested.connect(self._open_image)
+        # PS 同款工具快捷键（B/E/I、[ ]、D/X）：建在画布建好之后
+        self._setup_tool_shortcuts()
 
         # 左列：原图区 + 下方「动画设置」横条（整段动画参数）
         left_column = QWidget()
@@ -2438,28 +2460,6 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- 抠除背景
 
-    def _on_source_tool_toggled(self, on: bool) -> None:
-        """左侧竖条「原图选择」：先校验再真正开模式（不做点了没反应的按钮）。
-
-        只要有图就能用 —— **不需要先建动作，也不要求有多张原图**：单张时"选哪张"没意义，
-        但"拖动移位"照样有意义。没图时说清原因并把按钮弹回去。
-        """
-        viewer = self.image_viewer
-        button = viewer._v_toolbar.btn_source
-        if not on:
-            viewer.set_source_tool(False)
-            self.lbl_status.setText("")
-            return
-        if viewer._pixmap is None or viewer._pixmap.isNull():
-            button.setChecked(False)
-            self.lbl_status.setText("先添加图片，再选原图")
-            return
-        viewer.set_source_tool(True)
-        self.lbl_status.setText(
-            "原图选择：点一下选中某张原图；在棋盘格上拖一个框可以多选；"
-            "拖已选中的原图可以移动它（帧会跟着走）"
-        )
-
     def _on_source_move_started(self) -> None:
         """拖动原图开始：先抓 before 快照。
 
@@ -2510,6 +2510,176 @@ class MainWindow(QMainWindow):
             numbers = "、".join(str(i + 1) for i in picked)
             self.lbl_status.setText(f"已选中 {len(picked)} 张原图（第 {numbers} 张）")
 
+    # ------------------------------------------------- 画笔 / 橡皮 / 吸管 / 颜色选择
+
+    # 状态栏提示：一个工具一句（PS 的口径：说清"怎么用 + 快捷键"）
+    _TOOL_HINTS = {
+        "brush": "画笔：按住左键涂抹（B 切工具 · [ ] 调粗细 · 颜色见左侧色块）",
+        "eraser": "橡皮擦：按住左键擦成透明（E 切工具 · [ ] 调粗细）",
+        "pick": "吸管：点一下取那一点的颜色当前景色（I 切工具）",
+        "source": "原图选择：点一下选中某张原图；在棋盘格上拖一个框可以多选；"
+                  "拖已选中的原图可以移动它（帧会跟着走）",
+    }
+    # 没图时每个工具各自的"为什么用不了"（沿用原图选择/抠图那两句的说法）
+    _TOOL_NEEDS_IMAGE = {
+        "source": "先添加图片，再选原图",
+        "key": "先添加图片，再抠背景",
+        "brush": "先添加图片，再用画笔",
+        "eraser": "先添加图片，再用橡皮擦",
+        "pick": "先添加图片，再用吸管",
+    }
+
+    def _set_active_tool(self, name: str | None) -> None:
+        """单工具模式（PS 那套）：同一时刻只有一个工具亮着。
+
+        为什么必须互斥：这几个工具都抢"画布上按住左键"这同一个手势 —— 画笔开着又留着
+        「原图选择」，用户想涂两笔却把原图拖走了。
+
+        这里是**唯一**改工具状态的地方：按钮勾选、查看器的三个模式开关、参数条显隐、
+        状态栏提示全在这一处按 name 重设（幂等 —— 重复调用或从任意旧状态切过来都对）。
+        按钮勾选走 blockSignals（见 VerticalToolBar.set_active_tool），
+        所以"先全关再开一个"不会引出一串 toggled 回调互相打架。
+        """
+        viewer = self.image_viewer
+        bar = viewer._v_toolbar
+        name = name if name in ("source", "key", "brush", "eraser", "pick") else None
+        if name is not None and (viewer._pixmap is None or viewer._pixmap.isNull()):
+            # 没图：所有工具都没意义 —— 弹回去并说清原因，不做"点了没反应"的按钮
+            bar.set_active_tool(None)
+            viewer.set_source_tool(False)
+            viewer.set_paint_tool(None)
+            self._close_key_panel()
+            self.lbl_status.setText(self._TOOL_NEEDS_IMAGE.get(name, "先添加图片，再用这个工具"))
+            return
+        bar.set_active_tool(name)
+        viewer.set_source_tool(name == "source")
+        viewer.set_paint_tool(name if name in ("brush", "eraser", "pick") else None)
+        if name == "key":
+            self._open_key_panel()
+        else:
+            self._close_key_panel()
+        self.lbl_status.setText(self._TOOL_HINTS.get(name, ""))
+
+    def _on_tool_button_toggled(self, name: str) -> None:
+        """竖条上某个工具按钮被点了：统一交给 _set_active_tool（按钮现在的勾选态为准）。"""
+        bar = self.image_viewer._v_toolbar
+        checked = {key: button.isChecked() for key, button in bar.tool_buttons()}
+        self._set_active_tool(name if checked.get(name) else None)
+
+    # ---------------------------------------------------------------- 工具（单工具模式）
+
+    def _on_source_tool_toggled(self, on: bool) -> None:
+        """左侧竖条「原图选择」：先校验再真正开模式（不做点了没反应的按钮）。
+
+        只要有图就能用 —— **不需要先建动作，也不要求有多张原图**：单张时"选哪张"没意义，
+        但"拖动移位"照样有意义。校验与状态栏文案统一在 ``_set_active_tool`` 里。
+        """
+        self._set_active_tool("source" if on else None)
+
+    def _on_paint_stroke_started(self, tool: str) -> None:
+        """一笔开始：先抓全量 before 快照（含原图引用）。
+
+        顺序不能反：快照必须在**改像素之前**抓。笔画落在原图的**深拷贝**上再替换回列表
+        （见 ImageViewer._paint_copy_of），所以快照里那份"涂之前"的引用不会被改坏。
+        """
+        self._push_snapshot("画笔" if tool == "brush" else "橡皮擦", current_only=False)
+
+    def _on_paint_stroke_finished(self, tool: str) -> None:
+        """一笔结束：重裁帧、刷预览、记一条全局撤销、标脏。
+
+        跟「抠除背景」应用后那套完全一样（原图换了就得重裁帧）—— 只重裁不重检，
+        所以用户排好的帧、合成组、复用都不会被破坏。
+        """
+        viewer = self.image_viewer
+        if self.actions:
+            for action in self.actions:
+                action.invalidate_transforms()
+            for action in self.actions:
+                viewer.crop_frames_for_action(action)
+            self._on_frames_updated()
+        viewer.canvas.update()
+        viewer._update_rulers()
+        self.preview.set_source_pixmap(viewer._pixmap)
+        self._push_snapshot_done()
+        self._mark_project_dirty()
+        self.lbl_status.setText(self._TOOL_HINTS.get(tool, "") + "（Ctrl+Z 可撤销这一笔）")
+
+    def _on_color_picked(self, color) -> None:
+        """吸管取到色：写进前景色（取完保持吸管模式，方便连着取几个色）。"""
+        viewer = self.image_viewer
+        viewer.set_paint_color(color)
+        viewer.sync_paint_colors()
+        self.lbl_status.setText(f"已取色 {color.name().upper()}（I 继续取色 · B 切画笔）")
+
+    def _pick_paint_color(self, which: str = "fg") -> None:
+        """色块被点了：开调色板。前景/背景分开（PS 那对色块）。"""
+        viewer = self.image_viewer
+        current = viewer.paint_bg_color if which == "bg" else viewer.paint_color
+        title = "选择背景色" if which == "bg" else "选择前景色"
+        color = QColorDialog.getColor(current, self, title)
+        if not color.isValid():
+            return                       # 用户取消：保持原色，什么都不动
+        viewer.set_paint_color(color, background=(which == "bg"))
+        viewer.sync_paint_colors()
+        self.lbl_status.setText(
+            f"{'背景' if which == 'bg' else '前景'}色 = {color.name().upper()}")
+
+    def _swap_paint_colors(self) -> None:
+        """X：前景/背景互换（PS 同款）。"""
+        viewer = self.image_viewer
+        fg, bg = viewer.paint_color, viewer.paint_bg_color
+        viewer.set_paint_color(bg)
+        viewer.set_paint_color(fg, background=True)
+        viewer.sync_paint_colors()
+
+    def _reset_paint_colors(self) -> None:
+        """D：恢复默认黑白（PS 同款：前景黑、背景白）。"""
+        viewer = self.image_viewer
+        viewer.set_paint_color(QColor("#000000"))
+        viewer.set_paint_color(QColor("#FFFFFF"), background=True)
+        viewer.sync_paint_colors()
+
+    def _nudge_brush_size(self, delta: int) -> None:
+        """[ / ]：调笔刷粗细（PS 同款按键）。细笔慢调、粗笔快调。"""
+        viewer = self.image_viewer
+        step = 1 if viewer.brush_size < 10 else (5 if viewer.brush_size < 50 else 10)
+        viewer.set_brush_size(viewer.brush_size + delta * step)
+        viewer._paint_bar.set_brush_size(viewer.brush_size)
+        self.lbl_status.setText(f"笔刷粗细 {viewer.brush_size} px（[ 细 · ] 粗）")
+
+    def _setup_tool_shortcuts(self) -> None:
+        """PS 同款工具快捷键（B/E/I、[ ]、D/X）。
+
+        作用域刻意选 ``WidgetWithChildrenShortcut`` 挂在画布上，而**不是**
+        ApplicationShortcut：这些是**单字母**键，全局生效的话用户在"重命名动作"的
+        输入框里打 b/e/i 就会被抢走（PS 也是"光标不在输入框里才响应工具键"）。
+        画布在鼠标按下时就会拿到焦点，正常用不会失效。
+        """
+        canvas = self.image_viewer.canvas
+        bindings = [
+            ("B", lambda: self._shortcut_tool("brush")),
+            ("E", lambda: self._shortcut_tool("eraser")),
+            ("I", lambda: self._shortcut_tool("pick")),
+            ("[", lambda: self._nudge_brush_size(-1)),
+            ("]", lambda: self._nudge_brush_size(1)),
+            ("D", self._reset_paint_colors),
+            ("X", self._swap_paint_colors),
+        ]
+        for key, slot in bindings:
+            action = QAction(self)
+            action.setShortcut(QKeySequence(key))
+            action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            action.triggered.connect(slot)
+            canvas.addAction(action)
+            self._tool_shortcuts.append(action)
+
+    def _shortcut_tool(self, name: str) -> None:
+        """快捷键切工具：同一个键再按一次 = 关掉（与点按钮两下的行为一致）。"""
+        viewer = self.image_viewer
+        target = None if viewer.paint_tool == name else name
+        viewer._v_toolbar.set_active_tool(target)
+        self._set_active_tool(target)
+
     def _open_key_panel(self) -> None:
         """左侧竖条「抠除背景」：打开参数浮层（预览不动原图，点"应用"才落地）。"""
         viewer = self.image_viewer
@@ -2539,7 +2709,12 @@ class MainWindow(QMainWindow):
         self.image_viewer.canvas.update()
         button = self.image_viewer._v_toolbar.btn_key
         if button.isChecked():
+            # blockSignals：这里只是"把按钮弹回去"。若让它发 toggled 信号，会再绕回
+            # _on_tool_button_toggled → _set_active_tool → _close_key_panel，白跑一圈
+            # （虽然能收敛，但状态来回设两遍，出问题时难查）
+            button.blockSignals(True)
             button.setChecked(False)
+            button.blockSignals(False)
 
     def _on_key_pick_mode(self, on: bool) -> None:
         """吸管模式：画布换十字光标并抢焦点（Esc 退出由面板自己处理）。"""
@@ -2560,6 +2735,18 @@ class MainWindow(QMainWindow):
         self._push_snapshot("抠除背景", current_only=False)
         viewer._preview_pixmap = None
         viewer._pixmap = keyed
+        # 每张原图也换成抠过的那一份（按原图分块从合成图上切）。
+        # **必须同步**：抠图只算出/替换了合成大图 `_pixmap`，而"按原图重拼"（拖动原图、
+        # 画布长大）与导出、重裁帧读的都是 `_source_images` —— 不同步的话，用户抠完背景
+        # 一拖动原图、或用画笔涂两笔，抠掉的底色就会原样回来（用户报过的症状）。
+        # 抠图只改像素不改几何，所以按同一套分块切出来写回即可。
+        rects = viewer.source_rects()
+        if len(rects) == len(viewer._source_images) and rects:
+            keyed_image = keyed.toImage()
+            viewer._source_images = [
+                QPixmap.fromImage(keyed_image.copy(QRect(x, y, w, h)))
+                for (x, y, w, h) in rects
+            ]
         if not self.actions:
             # 还没编排过动作：抠完背景就该重新认元素，直接重检一遍。
             # 不用 set_pixmap()：那个会把 _source_images 重置成单张，多张原图的信息会丢。

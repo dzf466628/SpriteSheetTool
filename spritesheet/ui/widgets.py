@@ -4,6 +4,7 @@
 
 包含：
 - ``make_tool_icon``：SVG 图标渲染；
+- ``ColorSwatchButton``：PS 式前景/背景双色块（画笔/吸管的取色入口）；
 - ``AppNameLabel``：软件名标签（首字母放大 + 与其余文字垂直居中）；
 - ``ProjectTabBar``：窗口底部的工程标签栏（切换 / 重命名 / 新建 / 关闭）；
 - ``_Ruler`` / ``RULER_SIZE``：PS 风格标尺；
@@ -91,6 +92,80 @@ def _icon_with_disabled(pm: QPixmap) -> QIcon:
     icon.addPixmap(gray, QIcon.Mode.Disabled, QIcon.State.Off)
     icon.addPixmap(gray, QIcon.Mode.Disabled, QIcon.State.On)
     return icon
+
+
+class ColorSwatchButton(QPushButton):
+    """PS 式「前景色 / 背景色」双色块按钮（点哪块改哪块）。
+
+    为什么自绘而不是用图标：颜色是**动态**的（用户挑什么就显示什么），图标只能是固定色。
+    为什么会重叠两块：这是 Photoshop 工具栏最底部那对色块的经典样子 —— 一眼就能看出
+    "前景 / 背景"两个状态，而且能分别点开各自的调色板。左上的前块在上层，右下的后块
+    只在**未被前块盖住**的那块 L 形区域里可点（与 PS 一致）。
+
+    颜色本身不在这里存：由主窗口/查看器持有（见 ``ImageViewer.paint_color``），
+    这个控件只负责显示 + 把"点了前块/后块"报出去（``foreground_clicked`` /
+    ``background_clicked``），避免两处各存一份颜色导致不同步。
+    """
+
+    foreground_clicked = pyqtSignal()
+    background_clicked = pyqtSignal()
+
+    def __init__(self, size: int = 24, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("颜色选择：左键改前景色，右键（或点右下角那块）改背景色\n"
+                        "D 恢复黑白 · X 前后景互换")
+        self._fg = QColor("#FFFFFF")
+        self._bg = QColor("#000000")
+        # 两块的位置：前块左上、后块右下，各占 2/3 边长，重叠 1/3（PS 的比例观感）
+        side = max(8, round(size * 0.62))
+        self._front = QRect(1, 1, side, side)
+        self._back = QRect(size - side - 1, size - side - 1, side, side)
+
+    # ---- 状态 ----
+
+    def colors(self) -> tuple[QColor, QColor]:
+        return QColor(self._fg), QColor(self._bg)
+
+    def set_colors(self, fg: QColor, bg: QColor) -> None:
+        self._fg = QColor(fg)
+        self._bg = QColor(bg)
+        self.update()
+
+    # ---- 交互 ----
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton:
+            self.background_clicked.emit()
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.LeftButton:
+            # 点在后块**独占**的那块 L 形区域才算后块（重叠区归前块，与 PS 一致）
+            point = event.position().toPoint()
+            if self._back.contains(point) and not self._front.contains(point):
+                self.background_clicked.emit()
+            else:
+                self.foreground_clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    # ---- 绘制 ----
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # 悬停/按下给点反馈（规范：不能有"点了没反应"的死按钮）
+        if self.underMouse():
+            p.setBrush(QColor(233, 30, 99, 60 if self.isDown() else 30))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 4, 4)
+        for rect, color in ((self._back, self._bg), (self._front, self._fg)):
+            p.setBrush(color)
+            p.setPen(QPen(QColor("#8C8C8C"), 1))
+            p.drawRect(QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5))
+        p.end()
 
 
 def _blend(start: QColor, end: QColor, t: float) -> QColor:
@@ -1088,7 +1163,53 @@ class _Ruler(QWidget):
                         p.rotate(-90)
                         p.drawText(0, 0, str(doc_y))
                         p.restore()
+        self._paint_guide_marks(p, zoom, offset)
         p.end()
+
+    def _paint_guide_marks(self, p: QPainter, zoom: float, offset) -> None:
+        """在标尺上标出每条标线的位置（横跨整条标尺的 1px 线）。
+
+        为什么要有：标线画在画布上，滚出可视区或者被别的东西挡住时就"找不到了"；
+        标尺上这个小标记始终在，一看就知道有几条线、在哪。
+        **上标尺标的是竖直标线（v，按 x），左标尺标的是水平标线（h，按 y）** ——
+        与"从哪条标尺拖出来"的方位是交叉的，别搞反。
+        """
+        selected = self._viewer.selected_guide()
+        for guide in self._viewer._guides:
+            if (guide[0] == "v") != (self._orientation == "horizontal"):
+                continue
+            p.setPen(QPen(QColor("#E91E63") if guide is selected else QColor("#00FFFF"), 1))
+            if self._orientation == "horizontal":
+                px = round(offset.x() + guide[1] * zoom)
+                p.drawLine(px, 0, px, self.height())
+            else:
+                py = round(offset.y() + guide[1] * zoom)
+                p.drawLine(0, py, self.width(), py)
+
+    # ---- 从标尺上拖出标线（PS：上标尺往下拉出水平线、左标尺往右拉出竖直线）----
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and \
+                self._viewer.begin_guide_drag(self._orientation,
+                                              self.mapToGlobal(event.position().toPoint())):
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._viewer._guide_drag_active:
+            self._viewer.drag_guide_to_global(self.mapToGlobal(event.position().toPoint()))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._viewer._guide_drag_active:
+            # 松手位置由 viewer 按"在不在画布里"判定：拖回标尺上 = 撤掉这条线
+            self._viewer.finish_guide_drag(self.mapToGlobal(event.position().toPoint()))
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 _SLIDER_QSS = (
