@@ -1667,6 +1667,9 @@ class ImageViewer(QWidget):
             self._toolbar.btn_compose.setChecked(True)
 
     def end_ctrl_composition(self) -> None:
+        # Ctrl+Alt 那一轮的边界到此为止 —— 一次"按住"只开一张新帧，松开就收尾。
+        # 只被组合键路径读，单 Ctrl 的行为一字未改。
+        self._alt_ctrl_round = False
         if not self._ctrl_composing:
             return
         self._ctrl_composing = False
@@ -1709,19 +1712,28 @@ class ImageViewer(QWidget):
         if idx not in self._active_composite_group:
             self._active_composite_group.append(idx)
 
+    # Ctrl+Alt 一轮是否已经开着（一次**按住** = 一张新帧）。只服务组合键路径
+    _alt_ctrl_round = False
+
     def seal_alt_ctrl_round(self) -> None:
-        """Alt+Ctrl 组合键：**每一轮自成一帧**，封掉之后绝不再被追加。
+        """Ctrl+Alt：**一次按住 = 一张新帧**（不是一次点击一张）。
 
-        为什么必须在"点击起手"封，而不是等按键松开：松开时是否走到
-        ``end_ctrl_composition()`` 取决于原生按键监听，Alt+Ctrl 这种组合未必触发；
-        一旦没触发，``_active_composite_group`` 还挂着，下一次点击就会继续往
-        **上一帧那一组**里塞 —— 用户的原话："松开再点击就不要动第一帧了，就变第二帧了啊"。
-        这里不看按键时序，只在每次起手把上一组摘掉（组本身仍留在 composite_groups 里，
-        所以第一帧的内容一个字节都不会变），下一次 add_to_composite 自然另起一组 = 新的一帧。
+        用户口径："只要按下这两个键，再点其他的，所有的都是新的一帧的元素，直到松开"。
+        所以轮的边界是**按键**，不是点击：
+        - 同一次按住里连点好几个元素 → 全都进这一张新帧（已经开着就直接 return）；
+        - 松开（`eventFilter` 会走到 `end_ctrl_composition()`，把 `_alt_ctrl_round` 清掉）
+          后再按住 → 才另起一张。
 
-        只服务 Alt+Ctrl 这条路径，单 Ctrl / 单 Alt 的行为不受影响。
+        封的是"上一轮那一组"：把 `_active_composite_group` 摘掉，组本身仍留在
+        `action.composite_groups` 里，所以上一帧内容一个字节都不会变。
+
+        上一版按"每次点击都封一轮"做，成了**一点一帧**，用户反馈还是不对，这里改成按键边界。
+        只服务 Alt+Ctrl，单 Ctrl / 单 Alt 的逻辑一字未改。
         """
+        if self._alt_ctrl_round:
+            return
         self._active_composite_group = None
+        self._alt_ctrl_round = True
 
     def _normalize_composite_groups(self) -> None:
         if not self.current_action:
