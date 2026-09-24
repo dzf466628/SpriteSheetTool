@@ -729,7 +729,11 @@ class _Canvas(QWidget):
                         if ctrl and alt:
                             # 每轮 Alt+Ctrl 自成一帧：起手先封掉上一轮（第一帧不再被动）
                             self._viewer.seal_alt_ctrl_round()
-                        if (ctrl and alt and idx in self._viewer.current_action.selected_indices):
+                        # 判定看**当前这一帧的成员**（不是全局选中集）：跨轮带过来的选中项
+                        # 不在这一帧里，所以会被**加进这一帧** —— 它在旧帧里存在时，这一步的
+                        # 效果就是"复用进这一帧"；只有本来就属于这一帧的，再点才是取消。
+                        _active = self._viewer._active_composite_group
+                        if (ctrl and alt and _active is not None and idx in _active):
                             # Alt+Ctrl 按住期间"选中的就是这一帧"：再点已选中的 = 从这一帧移出
                             # （用户明确要求）。所以这条组合键用普通点击的 toggle 规则，
                             # 而不是 add_to_composite 的"只加不减"。
