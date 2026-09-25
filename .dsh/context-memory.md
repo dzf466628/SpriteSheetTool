@@ -32,11 +32,11 @@
   space_pan 过滤器**绝不吞键**（原图空格拖动靠它）。
 
 **Next**
-1. 探针收尾崩 0xC0000005（`_check_extract.py`）；断言转正 → `verify_extract.py`，探针退休；
-   顺手改掉里面过期的注释「应回到 2」（正确是 3）。
+1. 探针收尾崩 0xC0000005 → **v1.1.40 已做**：断言转正为 `tools/verify_extract.py`（38/38、退出码 0），
+   探针 `tools/_check_extract.py` 已退休；里面过期的注释「应回到 2」也改对了（正确是 3）。
 2. `NEXT.md`/`README.md` 补相似帧、抽帧、导入进度三节与回归表。
 3. 新度量（64×64 特征）的变异验证。
 4. 合成帧的相似彩块（目前不标色，老行为）——用户未要求改，待问。
 
 **Landmarks**：`spritesheet/ui/similar.py`（算法+plan/remap）、`extract_dialog.py`（窗口）、
-`main_window.py`（`_on_extract_decimate` 等）、`tools/verify_decimate.py`、`tools/_check_extract.py`、`HANDOFF.md`。
+`main_window.py`（`_on_extract_decimate` 等）、`tools/verify_decimate.py`、`tools/verify_extract.py`、`HANDOFF.md`。

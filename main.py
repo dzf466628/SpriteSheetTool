@@ -104,6 +104,14 @@ def main() -> int:
     guard.opened.connect(_on_external_open)
 
     window.show()
+    # 「本次更新」：更新完**第一次**打开时弹一次，点掉就记住版本号，之后不再打扰。
+    # 用单次定时器推迟 800ms：先把主窗口画出来再弹，启动观感更顺；
+    # 逻辑全在 whats_new 里（没看过才弹、异常静默、不碰用户设置）。
+    from PyQt6.QtCore import QTimer as _QTimer
+    def _show_whats_new() -> None:
+        from spritesheet.ui.whats_new import maybe_show
+        maybe_show(window)
+    _QTimer.singleShot(800, _show_whats_new)
     # Windows file association passes the clicked document as argv[1].
     # Defer opening until the event loop is running so the main window is
     # fully initialized before project state is restored.

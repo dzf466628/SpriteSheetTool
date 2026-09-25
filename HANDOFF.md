@@ -10,8 +10,9 @@
   - `& ".venv\Scripts\python.exe" -m pyflakes spritesheet`
   - `$env:QT_QPA_PLATFORM="offscreen"` 后再跑脚本（无声环境必须）
   - `& ".venv\Scripts\python.exe" -X utf8 -u smoke_test.py`
-  - 回归：`tools\verify_similar.py`（21/21）、`tools\verify_auto_align.py`（45/45）、`tools\verify_decimate.py`（35/35）
-  - 探针：`tools\_check_extract.py`（抽帧窗口端到端，暂时是探针，待转正）
+  - 回归：`tools\verify_similar.py`（30/30，末行 `SIMILAR OK n/n`；旧的 `SIMILAR FRAMES OK` 已废）、
+    `tools\verify_auto_align.py`（45/45）、`tools\verify_decimate.py`（42/42）、
+    `tools\verify_extract.py`（抽帧窗口端到端，38/38；由探针 `tools\_check_extract.py` 转正而来）
 - 用户设置（别动）：`detect_min_area = 30`、`grid_zoom = 400`、guide `#00ffff`、guide_selected `#e91e63`、grid `#808080`、相似帧容差 0。
 - **本批待发 v1.1.38**：版本号两处已改（`spritesheet/__init__.py` 的 `__version__` + `installer.iss` 的 `MyAppVersion`）；**还没打包**（用户交代：先不打包，先优化）。
 
@@ -89,9 +90,9 @@
 ## 3. 待还的账
 
 1. 位移（上面 P0）。
-2. `tools\_check_extract.py` 收尾会崩（0xC0000005，断言全过、崩在退出阶段）——
-   同类老坑：带定时器/模态对象被回收。修完把探针那 6 条端到端断言转进 `verify_decimate.py` 或新建
-   `verify_extract.py`，让探针退休。
+2. ~~`tools\_check_extract.py` 收尾会崩（0xC0000005，断言全过、崩在退出阶段）~~ —— **已解决（v1.1.40）**：
+   收尾改成 `sys.stdout.flush()` + `os._exit(0)`，断言转正为 `tools\verify_extract.py`（38/38、退出码 0），
+   探针已退休。同类老坑还在：带定时器/模态对象被回收 —— 关窗前先 `_timer.stop()` / `_recalc.stop()`。
 3. `NEXT.md` 补「相似帧 / 抽帧」两批的章节；`README.md` 的功能特性与回归表要加上抽帧窗口与
    `verify_decimate.py`。
 4. 新度量（64×64 特征）的**变异验证**还没做（项目惯例：改产品代码 → 确认预期断言变红 → 按字节还原）。

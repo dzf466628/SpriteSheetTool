@@ -4743,10 +4743,10 @@ class MainWindow(QMainWindow):
         if action is None or len(action.frames) < 2:
             return (len(action.frames) if action else 0, "帧太少，抽不动")
         if self._action_has_composite(action):
-            # 用户口径：有合成帧时点了要提示"合并为一帧"。这里**只提示、不记快照、不改数据**，
-            # 所以档位按钮点了也只是弹这句话，什么都不会被抽掉。
-            return (len(action.frames),
-                    "这个动作里有合成帧（多个元素并成了一帧），抽帧按元素抽，用不了")
+            # 用户口径（v1.1.39 改文案）：有合成帧时点了要提示「将此帧合并」。这里**只提示、
+            # 不记快照、不改数据**，所以档位按钮点了也只是把这句话写到窗口的 hint 上，
+            # 什么都不会被抽掉（按钮照旧是灰的样子、不给弹窗）。
+            return (len(action.frames), "将此帧合并")
         if getattr(self, "_extract_origin", None) is None:
             # 第一次抽：记下原始状态（换档还原用）+ 推一份撤销快照（Ctrl+Z 回到抽之前）
             self._extract_origin = (action, self._capture_extract_state(action))
@@ -4856,7 +4856,7 @@ class MainWindow(QMainWindow):
 
         三种来源都算：composite_groups / 帧里有多个部件 / 导入布局里一帧列了多个部件。
         用户在意的就是这类帧 —— 它们没有"单独一个元素"，所以相似色块标不出来，
-        抽帧也没法按元素抽（用户口径：有合成帧就灰 / 点了就提示"合并为一帧"）。
+        抽帧也没法按元素抽（用户口径：有合成帧就灰 / 点了就提示「将此帧合并」）。
         """
         if action is None:
             return False
@@ -4886,11 +4886,10 @@ class MainWindow(QMainWindow):
     def _similar_enable_state(self):
         """「相似帧」能不能按：原图上元素 ≥2 就能（不用先加动作，用户要求直接看原图也行）。
 
-        但**当前动作里有合成帧时不给按** —— 合成帧是多个元素并成一帧，没有"一个元素"
-        可以标色，按下去那些帧也只是空白（用户口径：有合成帧这个按钮就灰）。
+        合成帧**不再当拦路虎**：合成帧是多个元素并成一帧，彩块按"帧里的部件"取色
+        （见 ``_similar_color_for_frame``），所以有合成帧时这个开关照旧可用。
+        原图页面标的是**元素**框，合成帧的成员元素本来就有框，一直标得出来。
         """
-        if self._action_has_composite(self.image_viewer.current_action):
-            return False, "当前动作里有合成帧（多个元素并成了一帧），彩块标不了"
         count = len(getattr(self.image_viewer, "_frames", None) or ())
         if count >= 2:
             return True, ""
@@ -4899,27 +4898,54 @@ class MainWindow(QMainWindow):
         return False, "原图上还没有元素（先拖一张图进来）"
 
     def _similar_color_for_frame(self, action, i: int):
-        """帧缩略图问色：这一帧对应的元素属于哪个相似组（找不到就返回 None，不标）。"""
+        """帧缩略图问色：这一帧对应的元素属于哪个相似组（找不到就返回 None，不标）。
+
+        单元素帧照旧按 ``frame_rects`` 直接反查；**合成帧**的 rect 是各成员元素的
+        包围盒/逻辑包围盒，原图里没有哪个元素的 rect 等于它，所以那条路查不到 ——
+        再按"这一帧由哪些部件拼出来"（``frame_parts``，与 ``crop_frames_for_action``
+        同源）逐个反查，取下标最小的那个有标记的部件。
+        """
+        return self._similar_mark_of_frame(action, i, want_group=False)
+
+    def _similar_group_of_frame(self, action, i: int):
+        """这一帧的元素属于第几组相似帧（没组就 None）—— 循环长度提示要用组号。"""
+        return self._similar_mark_of_frame(action, i, want_group=True)
+
+    def _similar_mark_of_frame(self, action, i: int, want_group: bool):
+        """一帧的相似标记：正常帧 = 组色，``want_group`` 时 = 组号；没标记就是 None。
+
+        合成帧取"帧内**第一个**有标记的部件"（合成组内元素不重复，所以这个选择是定的）。
+        任何一步对不上（没算过标记 / 帧号越界 / 帧的部件表缺失）都安静地返回 None ——
+        这是给缩略图重建调的，不能抛异常。
+        """
         marks = self.image_viewer.similar_marks
         if not marks or action is None:
             return None
         rects = action.frame_rects
         if i < 0 or i >= len(rects):
             return None
+        index_of = getattr(self, "_similar_index_of", {})
+        groups = getattr(self, "_similar_groups", {})
+        found = None
         r = rects[i]
         key = (int(r[0]), int(r[1]), int(r[2]), int(r[3]))
-        idx = getattr(self, "_similar_index_of", {}).get(key)
-        return marks.get(idx) if idx is not None else None
-
-    def _similar_group_of_frame(self, action, i: int):
-        """这一帧的元素属于第几组相似帧（没组就 None）—— 循环长度提示要用组号。"""
-        rects = action.frame_rects
-        if i < 0 or i >= len(rects):
+        idx = index_of.get(key)
+        if idx is not None:
+            found = idx
+        else:
+            parts = getattr(action, "frame_parts", None) or ()
+            if i < len(parts):
+                for part in parts[i]:
+                    src = part[0]
+                    if not isinstance(src, (tuple, list)) or len(src) < 4:
+                        continue                  # 结构不对就当没有这个部件（别抛）
+                    hit = index_of.get((int(src[0]), int(src[1]), int(src[2]), int(src[3])))
+                    if hit is not None and hit in marks:
+                        found = hit
+                        break
+        if found is None:
             return None
-        r = rects[i]
-        key = (int(r[0]), int(r[1]), int(r[2]), int(r[3]))
-        idx = getattr(self, "_similar_index_of", {}).get(key)
-        return getattr(self, "_similar_groups", {}).get(idx)
+        return groups.get(found) if want_group else marks.get(found)
 
     def _on_similar_toggled(self, on: bool) -> None:
         """「相似帧」开关：按下 = 全图元素两两比、同组标同色；松开 = 两处标记一起清掉。

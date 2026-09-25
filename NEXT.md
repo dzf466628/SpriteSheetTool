@@ -911,3 +911,112 @@ D·X·`[`·`]`·B·E·I、画笔开着不抢 Ctrl+点击合成、无图时弹回
   （`C:\Users\dudu\Desktop\SpriteSheetTool\SpriteSheetTool\main.py`）一跑起来同样会抢走
   转发请求，症状一模一样。所以排查时一定要看命令行里跑的是**哪一份代码**：
   桌面副本与 `D:\SpriteSheetTool\SpriteSheetTool.exe` 都是旧版本，本身也不含左侧竖条。
+
+# NEXT.md —— 每批发布往这里追加一节（README 版本历史行的「详见」指向本文件）
+
+## 2026-09-26 · v1.1.38（已打包、已上传 NAS）
+
+### 1. 抽帧（全新）
+- 入口：「帧工具」第三颗按钮 → 独立窗口（上：预览 / 中：帧缩略图 / 下：四档按钮 + 真进度条）
+- 四档互斥，力度 3/5 ＜ 1/2 ＜ 1/4 ＜ 强力去重（强力在最右）
+- 判定口径：只把**相邻且同色**的帧算作一串，每串保留最标准那一帧
+- 相似度改完：回车立刻执行，或停手 2 秒自动执行；Ctrl+Z 可退；「取消」整轮撤回
+
+### 2. 相似帧 / 真进度条 / 导入
+- 相似帧从占位变实装（彩块标出长得像的帧）
+- 抽帧 / 相似帧 / 自动对齐 全改成按 n/N 报真进度（相似帧：md5 段 0→50%，容差段 50→100%）
+- 导入：单个大文件按真实字节数报进度；多文件或拖文件夹按「第 n/N 个」依次追加成原图
+- 修掉拖文件夹没反应；关掉抽帧 / 导出窗口时不再刷 GetDC failed 与 External WM_DESTROY
+
+### 3. 修掉的两个真 bug
+- 抽帧后元素位移、换档位越抽越少 —— 根因与证据写在 HANDOFF.md §1（别再照旧猜测）
+- 关键口径：基准永远是窗口打开时抓的原始帧表，**每次应用前都先恢复它并重建帧**再说
+
+### 4. 关于页
+- 软件名前加图标；底部加官网 duadu.cc 与邮箱 3140992714@qq.com
+
+### 5. 首次打开一次的「更新说明」
+- 只在「上次看过的版本 ≠ 当前版本」时弹一次，记录写 %APPDATA%\SpriteSheetTool\whats_new.json（不碰用户设置项）
+- 实测：从进程外部 EnumWindows 查到标题「本次更新」的可见窗口；点掉后写下 {"version": "1.1.38"}
+
+### 6. 使用统计
+- 客户端：spritesheet/telemetry.py（零 Qt 依赖，心跳 5 分钟，退出时等待 1.5 秒把计数发完）
+- 服务端：ss_stats/server.js（零依赖，端口默认 3008，监听 0.0.0.0，处理 /api/health、/api/report、/api/stats）
+- NAS 部署：/volume1/web/data/ss_stats/（等于 Y:\data\ss_stats\），数据落 /volume1/web/data/ss_stats-YYYY-MM-DD.jsonl
+- 看板：https://dudua.synology.me:8443/data/ss_stats/（相对路径取数，面板按「站点目录」配的反代）
+- 上报口径：脱敏计算机名 + 网段 + 版本 + 功能使用次数；不发文件名 / 路径 / 图片；出错静默
+- 实测：打包版自己上报成功 → 机器数 1、在线 1、版本 {1.1.38:1}
+
+### 7. 本批验证（都是真跑出来的数字）
+AUTO ALIGN 45/45 · DECIMATE 42/42 · SIMILAR 21/21 · SMOKE OK · 导入探针 3/3 + 文件夹 a1/a2 + 跳 1 · 大文件进度 maximum == 文件字节数 · 更新链路（假装本机 1.1.37 → 提示更新、证书严格校验通过）
+
+### 8. 故意没写进来的
+- 收边 13 档 / 完美像素 / 标线颜色 / 缩放阈值：属于更早的 1.1.x，版本历史行对不上就不硬凑
+
+### 9. 还欠着的（下一批）
+- **取消抽帧后档位高亮清不掉**（真 bug，v1.1.40 **故意没修** —— 用户口径「只改文案」）：
+  `extract_dialog.py::_on_cancel` 的 `setChecked(False)` 在**排他** `QButtonGroup` 里是空操作；
+  最小修法 `setExclusive(False)` → 清干净 → `setExclusive(True)`。成因、实测与"已复原"证据见
+  上面 v1.1.40 那节第 2 条。
+- ~~tools/_check_extract.py 收尾时 0xC0000005（断言全过）~~ —— **v1.1.40 已做完**：断言提升为
+  `tools/verify_extract.py`、探针退役，收尾 `sys.stdout.flush()` + `os._exit(0)` 兜底，
+  实测 `EXTRACT OK 41/41`、退出码 0。
+- **（已实装的记录，不再是待办）** 合成帧的相似度彩块：`_similar_color_for_frame` 按"帧里的部件"取色，
+  合成帧一直标得出来 —— 当年那条"不显示彩块"只是那时的置灰口径，早已作废。v1.1.40 这边只改了抽帧的
+  **提示文案**（「将此帧合并」），彩块逻辑一个字没动。
+- ~~64x64 相似度指标缺一次变异校验~~ —— 并行那条线已在 `tools/verify_similar.py` 第 3 节补上
+  （内存里故意把指标算错：64→32、判定反转），本机实测 `SIMILAR OK 30/30`。
+
+## 2026-09-26 · v1.1.40（已打包、已上传 NAS）
+
+### 1. 合成帧的提示文案改「将此帧合并」
+- 用户实际看到的那句在 `main_window.py::_on_extract_decimate` 的**返回值**里（`extract_dialog._apply_decimate`
+  把它 `setText` 到窗口的 `hint`），原来是「这个动作里有合成帧（多个元素并成了一帧），抽帧按元素抽，用不了」，
+  现在就是一句「将此帧合并」（`main_window.py` 4749 行，另把 4746 / 4859 两处注释里的旧口径同步成新口径）。
+- **只改文案**：有合成帧的动作照旧"按钮看着是灰的、点下去只给提示"，**不记快照、不改数据、不弹东西**。
+  回归里四条实测咬着：帧数一帧没掉、`frame_rects` + `_capture_extract_state` 前后一字不差、
+  `_undo_stack.count()` 没多一步、`_extract_origin` 保持 None。
+- 右键菜单那条**命令**「合并为一帧（拼成同一帧）」（`image_viewer.py:1196`）**没动**（那是操作，不是提示）；
+  `_similar_color_for_frame` 的彩块逻辑也没动（合成帧早就支持彩块）。
+- 全局 grep 复查：剩下的"合并为一帧"只有那条命令名、`models.py` 的注释、README 里对命令的描述，
+  以及 `tools/_mutate_similar.py`（并行任务的文件，没碰）。
+
+### 2. 「取消抽帧后档位高亮清不掉」——**本批没修**（用户口径：只改文案）
+- 现象仍在：`extract_dialog.py::_on_cancel` 里那句 `for _btn in self.decimate_buttons:
+  _btn.setChecked(False)` 在**排他** `QButtonGroup`（`self._decimate_group`，`setExclusive(True)`）里
+  是**空操作** —— Qt6 排他组"组内必有一选"、不许全不选，`setAutoExclusive(False)` 也救不了。
+  实测：取消之后 `checkedButton()` 还指着那颗（变异复现时打印 `还亮着=['抽帧强力去重']`），
+  下次开窗就看到"选中了某档却没抽帧"，等于骗人。
+- **最小修法（留着下次做）**：`setExclusive(False)` → 清掉所有选中 → `setExclusive(True)`；
+  正常使用时四档仍然互斥。取消的语义本来就是"整轮撤回 + 恢复默认"，没有"当前生效档位"需要另存。
+- 代码**一个字没动**：`git diff -- spritesheet/ui/extract_dialog.py` 是**空的**（已复原成原样）。
+  回归脚本里也没为它加断言，`tools/verify_extract.py` 第 5 节原有那段"这里没查…不在本脚本改造范围"
+  的注释原样保留。
+
+### 3. 测试侧：探针转正 + 退役
+- `tools/_check_extract.py`（只 print 不判定、收尾崩 0xC0000005）**提升为** `tools/verify_extract.py`，
+  原探针退役（已删）。
+- 转正时 **33 条断言**；本批为这条**文案**又补了 **5 条**（现在 **38/38**）：合成帧 fixture 前提
+  （2 帧 + `composite_groups=[[0,1]]`）/ 提示就是「将此帧合并」/ 只提示不动帧数 /
+  不动帧表与 `_capture_extract_state` / 不推撤销快照。
+- **变异校验（真跑过，两次输出都留档）**：① 把文案改回旧那句 → `EXTRACT FAILED 37/38`、退出码 1
+  （红的就是「窗口上给的提示就是「将此帧合并」」）；② 改回新文案 → `EXTRACT OK 38/38`、退出码 0。
+- **另一条测试线的产出（另一个人做的，同一批发出去）**：`tools/verify_similar.py` 从 **21 → 30 条** ——
+  新增 64×64 缩略指纹（容差模式的指标本体）**6 条断言** + **3 条变异校验**；变异走**内存 monkeypatch，
+  产品源码零改动**；末行格式也从 `SIMILAR FRAMES OK` 改成 **`SIMILAR OK 30/30`**（本机实测这行、
+  退出码 0）；变异模式下一次红 2/6、一次红 4/6（退出码 1），恢复后 30/30。全库已无 `SIMILAR FRAMES OK`
+  残留（脚本与文档都对齐到 `SIMILAR OK`）。
+- 夹具事实（别推翻）：这支 3 帧夹具四档实测 **3/2/2/2**，窗口默认宽度 **390**（不是 500）。
+- 本批 7 项回归：compileall 0 / pyflakes 无输出 / **EXTRACT 38/38** / AUTO ALIGN 45/45 /
+  DECIMATE 42/42 / SIMILAR 30/30 / SMOKE TEST OK（18/18）。后两本打完结论后退出码
+  `-1073741819`（0xC0000005）是这台机器收尾阶段的老毛病，不是本批弄坏的。
+
+### 4. 打包与上线
+- `installer\SpriteSheetTool_v.1.1.40.exe`（30.88 MB，Inno Setup 6.7.3）→ 复制到
+  `Y:\download\SpriteSheetTool\`；NAS 上原来 6 个包**一个没删**，现在 7 个（1.1.31/34/35/36/37/38/39）。
+- 打包版真跑（全新临时 APPDATA，保证「本次更新」必弹）：6 秒后 EnumWindows 查到该 PID 的**可见**窗口
+  `hwnd=0xB20E84 title=「本次更新」`（主窗口标题 `未命名工程 - SpriteSheetTool v1.1.40`）→
+  发 `WM_CLOSE(0x0010)` → 3 秒后 `whats_new.json` = `{"version": "1.1.40"}` → 杀进程无残留。
+- 统计链路实测：`versions = {"1.1.38":0,"1.1.40":1}`，`machines_detail` 里 `hm: DESKT***`、`v: 1.1.40`、在线；
+  更新链路实测 `verify_updater.py 1.1.38` → 「服务器最高 1.1.40 > 本地 1.1.38，客户端会提示更新」，
+  目录里 7 个包、证书严格校验通过。
