@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QVBoxLayout, QWidget,
 )
 
+from spritesheet.anim import is_animated_file, plan_frame_offsets
 from spritesheet.settings import (
     detect_min_area, guide_color, guide_selected_color, last_directory, pixel_grid_color,
     pixel_grid_zoom, set_last_directory,
@@ -1239,6 +1240,12 @@ class _Canvas(QWidget):
             if json_candidate.is_file():
                 self.json_selected.emit(str(json_candidate))
                 return
+            # 真动图不直接当静态图载入：交给主窗口问"转序列帧 / 以单张图片修改"。
+            # 走 image_path_dropped 这条已有的路 —— 和"把文件拖进来"完全同一条逻辑，
+            # 不在这里另开一套判断（否则两处迟早长歪）。静态图这个判断是 False，照旧往下走。
+            if is_animated_file(path):
+                self.image_path_dropped.emit(path)
+                return
             pm = QPixmap(path)
             if not pm.isNull():
                 self.image_loaded.emit(pm)
@@ -1950,6 +1957,13 @@ class ImageViewer(QWidget):
         self._paint_last: QPointF | None = None   # 上一段终点（图片坐标）
         self._paint_active = False
         self._paint_tool_now = ""                 # 正在画的那一笔的工具名
+        # 动图文档专用：把这一笔的**线段**记下来（图片坐标，拷贝过的 QPointF）。
+        # 动图文档要"所有改动同步到全部帧"，靠的就是"同一批线段、同样的笔刷"重放到每一帧；
+        # 普通文档这里是 None，一点额外开销都没有（只是不记录）。
+        self._stroke_record: list | None = None
+        # 当前是不是动图文档（② 以单张图片修改）：只影响"哪些工具用不上"，
+        # 像素状态全在主窗口那份 AnimDoc 里
+        self.anim_doc_mode = False
         self._brush_pos: QPointF | None = None    # 鼠标位置（画布坐标），画笔刷圈用
         # 标线（从标尺拖出来的参考线）：只当"看图和量尺寸"的参考，**不参与导出/识别**。
         # 每条是 ["h"|"v", 图片坐标]，用**列表对象本身**当选中的身份标识（删掉一条不会让
@@ -2138,6 +2152,146 @@ class ImageViewer(QWidget):
         self._update_rulers()
         # 布局完成后再适配一次，确保居中
         QTimer.singleShot(0, self.fit_view)
+
+    def reset_document(self) -> None:
+        """清空成"还没载入任何图"的状态（动图文档退回普通工程时用）。
+
+        不复用 ``set_pixmap``：那个要求给一张真图、而且会立刻启动元素检测 —— 这里只把
+        状态清干净，紧接着的载入流程自己会 set_pixmap + 重新检测，别检测两遍。
+        """
+        self._detect_generation += 1
+        self._refit_generation += 1
+        self._pixmap = None
+        self._source_images = []
+        self._source_offsets = []
+        self._frames = []
+        self._frame_logical = {}
+        self._ignored_frames = set()
+        self._cleared_frames = set()
+        self._selected_sources.clear()
+        self._preview_pixmap = None
+        self._paint_display = None
+        self._paint_copies.clear()
+        self.canvas.update()
+        self._update_rulers()
+
+    def import_frames(self, frames: list[QPixmap]) -> bool:
+        """把一批帧图（动图解出来的序列帧）**一次性**铺进画布。
+
+        用户口径（「① 转成序列帧」）：每帧都成为一张原图，**横向排、一行最宽 4096 就换行**；
+        每帧**整帧就是一个元素**（不跑自动检测）。为什么不让检测去裁紧致框 —— 动图每帧
+        本来就是一张完整画面，自动裁边会让每帧的框大小/位置都不同 → 播放时角色帧间抖动。
+
+        追加语义：老原图、老元素的下标**一个都不动**（帧号、选中、合成组、复用全是按下标
+        记的，动一个就全错位）；新帧排在末尾，顺序 = 从左到右、从上到下 = 帧序。
+        """
+        usable = [pm for pm in frames if pm is not None and not pm.isNull()]
+        if not usable:
+            return False
+        # 掐掉在跑的元素检测 / 重贴紧：它们的结果落到这批新帧上会凭空多出一堆元素
+        self._detect_generation += 1
+        self._refit_generation += 1
+
+        had_image = self._pixmap is not None and not self._pixmap.isNull()
+        start_y = (self._pixmap.height() + self.SOURCE_GAP) if had_image else 0
+        offsets, size = plan_frame_offsets(usable, start_y=start_y,
+                                           max_row=self.SOURCE_MAX_ROW, gap=self.SOURCE_GAP)
+        if had_image:
+            # 接在已有内容下面：画布只往右下长大，左上原点不动（坐标基准/导出都不受影响）
+            width = max(size.width(), self._pixmap.width())
+            height = max(size.height(), self._pixmap.height())
+        else:
+            width, height = size.width(), size.height()
+            self._source_images = []
+            self._source_offsets = []
+            self._frames = []
+            self._frame_logical = {}
+            # 「已忽略/已清除」是按下标记的临时视图状态：换了一整张图必须清，
+            # 否则会拿上一张图的索引在新图上找元素（这个坑以前踩过）
+            self._ignored_frames = set()
+            self._cleared_frames = set()
+            self._selected_sources.clear()
+        self._source_images.extend(usable)
+        self._source_offsets.extend(offsets)
+        for (x, y), pm in zip(offsets, usable):
+            self._frames.append((int(x), int(y), pm.width(), pm.height()))
+        if had_image:
+            self._recompose_sources(QSize(int(width), int(height)))
+        else:
+            blank = QPixmap(int(width), int(height))
+            blank.fill(Qt.GlobalColor.transparent)
+            self._pixmap = blank
+            self._recompose_sources()
+        self.fit_view()
+        self.canvas.update()
+        self._update_rulers()
+        QTimer.singleShot(0, self.fit_view)
+        return True
+
+    def set_animation_frame(self, pm: QPixmap, fit: bool = False) -> None:
+        """动图文档：画布上**只显示这一帧**（没有元素，也不跑自动检测）。
+
+        为什么不复用 ``set_pixmap``：那个会启动元素识别线程 —— 动图文档"不玩元素那套"，
+        多出来一堆虚线框只会让用户以为能拖帧。这里连 ``_frames`` 都保持空。
+        ``fit`` 只在**第一次**进来时给 True（换帧时重新适配会把用户放大的视图打回去）。
+        """
+        self._detect_generation += 1
+        self._refit_generation += 1
+        self._frames = []
+        self._frame_logical = {}
+        self._ignored_frames = set()
+        self._cleared_frames = set()
+        self._selected_sources.clear()
+        self.clear_ignored_hint()
+        self._preview_pixmap = None
+        self._paint_display = None
+        self._paint_copies.clear()
+        has = pm is not None and not pm.isNull()
+        self._pixmap = pm if has else None
+        # 画笔/抠图/重放都按"原图"来读写，所以这里就当成**一张**原图（就是这一帧）
+        self._source_images = [pm] if has else []
+        self._source_offsets = [(0, 0)] if has else []
+        if fit:
+            self.fit_view()
+            QTimer.singleShot(0, self.fit_view)
+        self.canvas.update()
+        self._update_rulers()
+
+    def set_animation_document_mode(self, on: bool) -> None:
+        """进出动图文档：把用不上的工具收掉/放回来。
+
+        收掉的三样（原图选择移动、Ctrl+合成、Alt+复用）在动图文档里都没有对象可作用
+        （没有元素、没有动作），留着就是"点了没反应"的死按钮 —— 宁可禁用 + 写清原因。
+        """
+        self.anim_doc_mode = bool(on)
+        pairs = (
+            (getattr(self._v_toolbar, "btn_source", None),
+             "动图文档里没有「原图排列」这回事：画布上就是这一帧"),
+            (getattr(self._toolbar, "btn_compose", None),
+             "动图文档不做合成帧：改动是同步到全部帧的"),
+            (getattr(self._toolbar, "btn_reuse", None),
+             "动图文档不做帧复用：改动是同步到全部帧的"),
+        )
+        for button, why in pairs:
+            if button is None:
+                continue
+            if on:
+                if button.toolTip() and not button.toolTip().startswith("动图文档"):
+                    button.setProperty("normalTip", button.toolTip())
+                button.setToolTip(f"动图文档：禁用（{why}）")
+                if button.isChecked():
+                    button.blockSignals(True)
+                    button.setChecked(False)
+                    button.blockSignals(False)
+                button.setEnabled(False)
+            else:
+                button.setEnabled(True)
+                saved = button.property("normalTip")
+                if saved:
+                    button.setToolTip(str(saved))
+        if on:
+            self.set_compose_mode(False)
+            self.set_reuse_mode(False)
 
     def append_pixmap(self, pm: QPixmap) -> bool:
         """将新的原图追加到当前原图下方，并保留已有帧索引与动作。"""
@@ -3444,6 +3598,10 @@ class ImageViewer(QWidget):
 
     # 多张原图叠成一张大图时的间距（必须与 append_pixmap 里的 gap 是同一个数）
     SOURCE_GAP = 16
+    # 批量铺帧（导入动图的序列帧）时**一行最多多宽**：用户口径是"横排一长条，超过阈值
+    # 换到第二行"。竖排一列的话画布高度 = 帧数 × 帧高，几百帧就爆内存；横排换行能把
+    # 宽高都压在 4096 这个量级（也接近常见引擎图集上限）。
+    SOURCE_MAX_ROW = 4096
     # 拖动移位时画布能长到多大：同宽的图横向本来没余量，允许长大才有"随意移动"；
     # 再大也没意义（还容易把内存吃满），到顶就夹住
     SOURCE_MOVE_MAX = 8192
@@ -3989,6 +4147,53 @@ class ImageViewer(QWidget):
         self._stroke_segment(self._paint_last, self._paint_last)
         return True
 
+    # ---- 动图文档：一笔的"记录"与"重放" ----
+    def start_stroke_record(self) -> None:
+        """开始记录接下来的笔画线段（动图文档用，见 ``_stroke_record``）。"""
+        self._stroke_record = []
+
+    def take_stroke_record(self) -> list | None:
+        """取走这一笔记录的线段，并结束记录（没记录时返回 None）。"""
+        record = self._stroke_record
+        self._stroke_record = None
+        return record
+
+    def replay_stroke(self, pm: QPixmap, segments: list, tool: str, size: int,
+                      color: str, pixel_perfect: bool) -> QPixmap:
+        """把一笔（同一批线段 + 同样的工具/笔刷/颜色）重放到另一张图上。
+
+        动图文档"所有改动同步到全部帧"就是靠这个方法：**复用同一套落笔代码**
+        （``_set_paint_pen`` / ``_draw_stamp`` / ``brush_square_image``），所以重放出来的
+        那一笔和用户手上画出来的那一笔是同一套像素结果 —— 另写一份绘制逻辑迟早会走样
+        （连完美像素模式的像素对齐、橡皮的 Clear 合成都一起继承）。
+        """
+        if pm is None or pm.isNull() or not segments:
+            return pm
+        image = self._to_paint_image(pm)
+        # 落笔代码读的是 self 上的这几个状态（笔刷/颜色/工具/PP），临时换成"这笔的参数"，
+        # 画完立刻还原 —— 用户手上的设置一点都不能被重放改掉。
+        saved = (self.brush_size, self.paint_color, self._paint_tool_now, self.pixel_perfect)
+        self.brush_size = max(1, int(size))
+        self.paint_color = QColor(color)
+        self._paint_tool_now = tool
+        self.pixel_perfect = bool(pixel_perfect)
+        try:
+            painter = self._begin_painter(image)
+            if painter is None:
+                return pm
+            self._set_paint_pen(painter, tool)
+            for start, end in segments:
+                a, b = QPointF(start), QPointF(end)
+                if self.pixel_perfect:
+                    a = QPointF(math.floor(a.x()) + 0.5, math.floor(a.y()) + 0.5)
+                    b = QPointF(math.floor(b.x()) + 0.5, math.floor(b.y()) + 0.5)
+                self._draw_stamp(painter, a, b)
+            painter.end()
+        finally:
+            (self.brush_size, self.paint_color, self._paint_tool_now,
+             self.pixel_perfect) = saved
+        return QPixmap.fromImage(image)
+
     def paint_stroke_to(self, pos: QPointF) -> None:
         """拖到新位置：把上一段到这一段画出来。"""
         if not self._paint_active:
@@ -4060,6 +4265,10 @@ class ImageViewer(QWidget):
         tool = self._paint_tool_now
         radius = max(1.0, self.brush_size / 2.0)
         rects = self.source_rects()
+        # 动图文档要重放到每一帧，所以把线段原样记一份（QPointF 必须**拷贝**：
+        # 调用方那边的对象还会被后续拖动作改，记引用等于记了个会动的值）
+        if self._stroke_record is not None:
+            self._stroke_record.append((QPointF(start), QPointF(end)))
         # 完美像素模式：坐标先吸到"像素中心"（整数 + 0.5）。
         # 不吸的话，一条 3px 宽的线画在整数坐标上，跨过的行数是 2 而不是 3
         # （半开区间把正好落在边界上的那行排除了），像素画就会出现"粗细不均匀"。

@@ -411,6 +411,161 @@ def compute_preview_layout(action: Action, frame_index: int = 0):
     return canvas_w, canvas_h, positions, (pad, max_w, max_h)
 
 
+def frame_has_content(action: Action, index: int) -> bool:
+    """第 index 帧有没有画面（非透明像素）。
+
+    **不能**拿"裁切后是不是 1x1"来判断：``action_frame_pixmap`` 只在帧带了变换时才会
+    收缩透明边界（原始帧图原样返回），所以一帧全透明的图仍然是它原来那个尺寸。
+    老老实实扫 alpha（``_alpha_bounds`` 是 C 层快路径，普通精灵帧几十微秒）。
+    """
+    if not (0 <= index < len(action.frames)):
+        return False
+    return _alpha_bounds(action_frame_pixmap(action, index)) is not None
+
+
+def compute_source_anchor_offsets(local_boxes, frame_sizes, content_in_frame,
+                                 max_w: int, max_h: int, padding: int = 0):
+    """按「原图锚点」精确补回偏移 —— 这是**精确**那条路，不做任何推断。
+
+    用户口径（原话）："你先正常切割记录锚点位置，然后再紧切割记录位置，这两个位置的
+    差值不就是偏移量吗" —— 对，就是这个：
+
+      * 正常切割 = 整帧原图，锚点是它**画布**上的固定点（默认底部中心 = 脚底），每帧同一个点
+      * 紧切割 = alpha 外框，这一帧的内容在原图坐标系里的位置是 ``local_boxes[i]``
+      * 于是"把紧切图放回它原来的位置"就等价于把偏移补回去
+
+    这里只要求"放回原位置"，不要求把锚点摆到画布某个特定点上 —— 各帧相对位置对了，
+    播放就不会飘（整体平移多少不影响观看）。所以 ``offset = 原图坐标 − 居中落点``，
+    落点公式与 ``compute_preview_layout`` 完全一致（居中 + 偏移），画布会按既有规则
+    自己长大到装得下，padding 一个字不用动。
+
+    参数：
+        local_boxes[i]     该帧内容在**原图坐标系**里的 (x, y, w, h)，None = 这帧不参与
+        frame_sizes[i]     该帧显示尺寸 (w, h)（与布局里用的一致）
+        content_in_frame[i]  内容在该帧图像内部的偏移 (cx, cy)（单元素紧切帧就是 (0, 0)）
+    返回 ``{帧序: (dx, dy)}``；信息不全的帧不出现在字典里（保留它原来的偏移）。
+    """
+    out: dict[int, tuple[int, int]] = {}
+    count = len(local_boxes or ())
+    for i in range(count):
+        box = local_boxes[i]
+        size = frame_sizes[i] if i < len(frame_sizes) else None
+        inner = content_in_frame[i] if i < len(content_in_frame) else None
+        if box is None or size is None or inner is None:
+            continue
+        bx, by, _bw, _bh = box
+        w, h = size
+        cix, ciy = inner
+        place_x = padding + (max_w - w) // 2
+        place_y = padding + (max_h - h) // 2
+        out[i] = (int(round(bx)) - (place_x + int(round(cix))),
+                  int(round(by)) - (place_y + int(round(ciy))))
+    return out
+
+
+def _frame_profile(pm: QPixmap, step: int = 4) -> tuple[list[int], list[int]]:
+    """抽样的 alpha 列/行投影（给互相关用）。
+
+    先在 C 层把图缩小（``scaled``），再用 Python 过一遍小图 —— 300x350 的帧缩到
+    75x87 只有 6500 个字节，几百帧也就几百万次操作，点按钮不会卡界面。
+    """
+    if not pm or pm.isNull():
+        return [], []
+    sw = max(1, pm.width() // step)
+    sh = max(1, pm.height() // step)
+    small = pm.scaled(sw, sh, Qt.AspectRatioMode.IgnoreAspectRatio,
+                      Qt.TransformationMode.FastTransformation)
+    image = small.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
+    bits = image.constBits()
+    bits.setsize(image.sizeInBytes())
+    data = bytes(bits)
+    stride = image.bytesPerLine()
+    cols = [0] * sw
+    rows = [0] * sh
+    for y in range(sh):
+        row = data[y * stride:y * stride + sw * 4]
+        s = 0
+        for x, v in enumerate(row[3::4]):
+            if v:
+                cols[x] += v
+                s += v
+        rows[y] = s
+    return cols, rows
+
+
+def _correlate_profiles(ref: list[int], prof: list[int], span: int) -> int:
+    """``prof`` 要对上 ``ref`` 需要移动多少（重叠区点积最大处）。"""
+    if not ref or not prof:
+        return 0
+    best, best_score = 0, None
+    for shift in range(-span, span + 1):
+        score = 0
+        for i, v in enumerate(prof):
+            if not v:
+                continue
+            j = i + shift
+            if 0 <= j < len(ref):
+                score += v * ref[j]
+        if best_score is None or score > best_score:
+            best_score, best = score, shift
+    return best
+
+
+def compute_align_offsets(action: Action) -> dict[int, tuple[int, int]]:
+    """**事后估算**：帧间 alpha 投影互相关 → 以"内容质量中位"的那一帧为准。
+
+    只在拿不到"正常切割"（原图已经是紧切小图）的时候用这条路 —— 精确那条是
+    ``compute_source_anchor_offsets``。为什么不用外框：外框由最远的那几个像素决定，
+    尾巴/手臂一展开就把中线拽走（实测某段素材上外框法残留 6.0px，互相关 1.1px，
+    而"点一下按钮什么都没变"正是外框法的典型表现）。
+
+    为什么参考帧取"中位"而不是"内容最多"：飘的往往就是展开的那几帧，拿最展开的帧
+    当基准等于把对的帧全带偏。中位数天然偏向多数帧（没展开的那些）。
+
+    纯函数式：修正量只由各帧图像本身决定，所以连点两次结果一样（幂等）；
+    代价是会把用户手动拖过的偏移覆盖掉 —— 一条 Ctrl+Z 能退回来。
+    """
+    count = len(action.frames)
+    if count < 2:
+        return dict(action.frame_offsets)          # 一帧谈不上"对齐"
+    positions = compute_preview_layout(action)[2]
+    if len(positions) != count:
+        return dict(action.frame_offsets)
+    live = [i for i in range(count) if frame_has_content(action, i)]
+    if len(live) < 2:
+        return dict(action.frame_offsets)
+    step = 4
+    profiles: dict[int, tuple[list[int], list[int]]] = {}
+    mass: dict[int, int] = {}
+    for i in live:
+        cols, rows = _frame_profile(action_frame_pixmap(action, i), step)
+        profiles[i] = (cols, rows)
+        mass[i] = sum(cols)
+    # 参考帧 = 内容量（投影质量）中位的那一帧，见 docstring
+    order = sorted(live, key=lambda i: mass[i])
+    ref_i = order[len(order) // 2]
+    ref_x, ref_y = profiles[ref_i]
+    # 目标落点取"参考帧去掉自身偏移后的居中落点"（= 纯函数，跟当前偏移无关），
+    # 于是连点两次结果完全一样：第一次算完各帧内容已经重合，第二次算出来还是同一组值。
+    # 反例（踩过）：拿"当前落点"当基准 → 第二次把上一次的修正又减一遍，按钮来回摆。
+    ref_off = action.frame_offsets.get(ref_i, (0, 0))
+    base_ref_x = positions[ref_i][0] - int(ref_off[0])
+    base_ref_y = positions[ref_i][1] - int(ref_off[1])
+    span_x = max(4, max(1, max(len(profiles[i][0]) for i in live)) // 4)
+    span_y = max(4, max(1, max(len(profiles[i][1]) for i in live)) // 4)
+    offsets = dict(action.frame_offsets)
+    for i in live:
+        off = action.frame_offsets.get(i, (0, 0))
+        base_x = positions[i][0]
+        base_y = positions[i][1]
+        dx = _correlate_profiles(ref_x, profiles[i][0], span_x) * step
+        dy = _correlate_profiles(ref_y, profiles[i][1], span_y) * step
+        # 互相关是在"各帧自己内部"的坐标里算的 → 换算成落点：落点_i 应等于 落点_ref + 位移
+        offsets[i] = (int(round(base_ref_x + dx - base_x)),
+                      int(round(base_ref_y + dy - base_y)))
+    return offsets
+
+
 def action_anchor_pixels(action: Action, canvas_w: int, canvas_h: int) -> tuple[int, int]:
     """返回动作自身逻辑画布内的锚点像素坐标。"""
     nx = max(0.0, min(1.0, float(action.anchor[0])))

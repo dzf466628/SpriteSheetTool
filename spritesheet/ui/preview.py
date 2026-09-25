@@ -32,7 +32,7 @@ from .models import Action
 from .transform import (
     DEFAULT_QUAD, DEFAULT_ROTATION_PIVOT, _alpha_bounds, _normalized_rotation_pivot,
     _rotation_transform, action_anchor_pixels, action_frame_pixmap, action_frame_size,
-    compute_preview_layout, distribute_whole_quad, frame_base_size,
+    compute_preview_layout, distribute_whole_quad, frame_base_size, frame_has_content,
     frame_pivot_in_pixmap, frame_pivot_output, transform_ratio_limit, whole_reference,
 )
 from .widgets import (
@@ -1742,6 +1742,7 @@ class AnimAdjustPanel(QWidget):
     """
 
     changed = pyqtSignal()
+    align_requested = pyqtSignal()      # 「自动对齐」：由主窗口算偏移 + 落一条撤销
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1763,6 +1764,27 @@ class AnimAdjustPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
+
+        # ---- 帧工具：整段动作的批量活儿（不碰单帧设置）----
+        # 放在「帧变换」上面：它俩是"对整段动作"的操作，比单帧变换高一层。
+        tools_wrap = QWidget()
+        tools_wrap.setStyleSheet("background: transparent;")
+        tools_row = QHBoxLayout(tools_wrap)
+        tools_row.setContentsMargins(0, 0, 0, 0)
+        tools_row.setSpacing(5)
+        self.btn_auto_align = self._tool_btn(
+            "自动对齐",
+            "自动对齐：把每一帧按原图锚点放回它原来的位置（原图不是整帧时改为按重合度估算）。\n"
+            "只改逐帧偏移：锚点、尺寸、帧图像都不动，一条 Ctrl+Z 可退回。")
+        # 主窗口塞进来的回调：返回 "" = 可以走精确那条路；否则返回"为什么只能估算"
+        # （要看原图是不是整帧，这是主窗口/图元那边的信息，面板自己拿不到）
+        self.align_reason_provider = None
+        self.btn_similar_frames = self._tool_btn(
+            "相似帧", "还没做（下一批做）—— 先占个位，不点也点不动。", enabled=False)
+        tools_row.addWidget(self.btn_auto_align)
+        tools_row.addWidget(self.btn_similar_frames)
+        layout.addWidget(tools_wrap)
+        self.btn_auto_align.clicked.connect(lambda: self.align_requested.emit())
 
         # ---- 帧变换（只作用于当前帧；整段动画参数在「动画设置」横条）----
         g1 = QGroupBox("帧变换")
@@ -1992,6 +2014,63 @@ class AnimAdjustPanel(QWidget):
         )
         return btn
 
+    def _tool_btn(self, text: str, tip: str, enabled: bool = True) -> QPushButton:
+        """「帧工具」那一行的按钮：跟着面板配色，比 24x24 的小图标按钮宽（要写汉字）。"""
+        btn = QPushButton(text)
+        btn.setToolTip(tip)
+        btn.setEnabled(enabled)
+        btn.setMinimumHeight(26)
+        btn.setStyleSheet(
+            "QPushButton { background: #2b2b2b; border: 1px solid #3d3d3d; border-radius: 3px;"
+            " color: #e8e8e8; font-size: 11px; padding: 2px 4px; }"
+            "QPushButton:hover { background: #3a3a3a; border-color: #E91E63; }"
+            "QPushButton:pressed { background: #4a4a4a; }"
+            "QPushButton:disabled { color: #6a6a6a; border-color: #333; }"
+        )
+        return btn
+
+    def _sync_align_buttons(self) -> None:
+        """「自动对齐」的可用性：要有当前动作、至少两帧、且至少两帧有画面。
+
+        没得对齐时按钮禁用并写明原因 —— 不留"点了没反应的按钮"。
+        """
+        action = self._action
+        ok = action is not None and len(action.frames) >= 2
+        why = ""
+        if action is None:
+            why = "先选一个动作（当前没有动作）"
+        elif len(action.frames) < 2:
+            why = "这个动作只有一帧，谈不上对齐"
+        else:
+            live = sum(1 for i in range(len(action.frames))
+                       if frame_has_content(action, i))
+            if live < 2:
+                ok = False
+                why = "这个动作里带画面的帧不足两帧，没有可对齐的内容"
+        self.btn_auto_align.setEnabled(ok)
+        if ok:
+            # 能不能走"精确"那条路由主窗口判断（要看原图是不是整帧），这里只负责把话说清楚
+            reason = ""
+            if callable(self.align_reason_provider):
+                try:
+                    reason = self.align_reason_provider(action) or ""
+                except Exception:  # noqa: BLE001
+                    reason = ""
+            if not reason:
+                self.btn_auto_align.setToolTip(
+                    "自动对齐（精确）：这些原图是整帧画面，锚点位置算得准 ——\n"
+                    "按「原图锚点 − 紧切框中心」把每帧放回它在原图里的位置，\n"
+                    "于是播放/导出时角色不再帧间乱飘。\n"
+                    "只改逐帧偏移：锚点、尺寸、帧图像都不动，一条 Ctrl+Z 可退回。")
+            else:
+                self.btn_auto_align.setToolTip(
+                    f"自动对齐（只能估算）：{reason}\n"
+                    "原始位置（正常切割那个框）已经不在工程里，只能按帧间重合度去猜 ——\n"
+                    "**可能不准，建议点完手动核对那几帧**，点下去会先弹提示确认。\n"
+                    "只改逐帧偏移：锚点、尺寸、帧图像都不动，一条 Ctrl+Z 可退回。")
+        else:
+            self.btn_auto_align.setToolTip(f"自动对齐：现在用不了 —— {why}")
+
     def set_action(self, action: Action | None):
         self._action = action
         if action is None:
@@ -1999,6 +2078,7 @@ class AnimAdjustPanel(QWidget):
             self.combo_ref.clear()
             self._sync_transform_widgets()
             self._sync_duration_widget()
+            self._sync_align_buttons()
             return
         # 参照帧下拉
         self.combo_ref.blockSignals(True)
@@ -2017,6 +2097,7 @@ class AnimAdjustPanel(QWidget):
         self._sync_transform_widgets()
         self._refresh_canvas_label()
         self._sync_duration_widget()
+        self._sync_align_buttons()
 
     def _refresh_canvas_label(self):
         if self._action and self._action.frames:

@@ -21,11 +21,14 @@ import weakref
 
 from PIL import Image, ImageChops
 from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QHBoxLayout, QLabel,
                              QPushButton, QSlider, QVBoxLayout, QWidget)
 
 from spritesheet import keying
+# Pillow RGBA → QPixmap 的实现放在模型层（spritesheet/anim.py）：动图解帧也要用它。
+# 方向是 UI → 模型，跟上面 pixmap_to_pil「两个 UI 各留一份」不是一回事。
+from spritesheet.anim import pil_to_pixmap, pixmap_to_pil as _pixmap_to_pil
 
 # 面板内按钮统一外观：深底细边 + **悬浮/按下反馈**（用户要求"按钮要添加悬浮动效"）。
 # 主题里虽然也有 hover，但作用范围按钮自己带 QSS，会把主题那份盖掉一半，
@@ -84,21 +87,12 @@ def pixmap_to_pil(pixmap: QPixmap) -> Image.Image:
     与 ``export_dialog._pixmap_to_pil`` 是同一套做法：那边是私有函数、只服务导出，
     这边还要反向转换，所以各留一份、互不依赖（不为了省 5 行代码把两个层焊在一起）。
     """
-    image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
-    ptr = image.bits()
-    ptr.setsize(image.sizeInBytes())
-    return Image.frombytes("RGBA", (image.width(), image.height()), bytes(ptr))
+    return _pixmap_to_pil(pixmap)
 
 
-def pil_to_pixmap(img: Image.Image) -> QPixmap:
-    """Pillow RGBA -> QPixmap。
-
-    必须 ``copy()``：``QImage(data, ...)`` 只是"包"住这块 bytes，不持有所有权，
-    bytes 被回收后图像就是野指针（症状是偶发花屏或崩溃）。
-    """
-    data = img.tobytes("raw", "RGBA")
-    qimage = QImage(data, img.width, img.height, QImage.Format.Format_RGBA8888).copy()
-    return QPixmap.fromImage(qimage)
+# pil_to_pixmap（Pillow RGBA → QPixmap）已搬到 spritesheet/anim.py，在本文件顶部导入。
+# 这里原来那份的实现、包括「必须 copy()」的坑，一并搬了过去，本文件与回归脚本
+# 继续按 `from ...key_panel import pil_to_pixmap` 用，调用方不用改。
 
 
 class KeyPanel(QWidget):

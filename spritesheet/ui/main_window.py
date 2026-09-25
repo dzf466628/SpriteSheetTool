@@ -30,6 +30,8 @@ from PyQt6.QtWidgets import (
 )
 
 from spritesheet import __app_name__, __version__
+from spritesheet.anim import (Animation, fps_and_overrides, is_animated_file,
+                              read_animation, size_warning)
 from spritesheet.project_file import (
     _pixmap_bytes, _pixmap_from_bytes, _rect_from_dict, read_project, write_project,
 )
@@ -38,13 +40,18 @@ from spritesheet.settings import (
 )
 from spritesheet.updater import UPDATE_URL, UpdateCheckThread, UpdateDownloadThread
 
+from .anim_doc import (AnimDoc, AnimDocBar, FramesSource, KeyOp, MODE_DOC, MODE_FRAMES,
+                       StrokeOp, TransformOp, anim_doc_from_payload, anim_doc_payload,
+                       ask_animation_mode, frames_source_from_payload,
+                       frames_source_payload)
 from .anim_settings import AnimSettingsBar
 from .image_viewer import SUPPORTED_IMAGE_EXT, ImageViewer
 from .key_panel import KeyPanel
 from .models import Action, MACARON_COLORS
 from .preview import ActionPreviewWidget
 from .settings_dialog import SettingsDialog
-from .transform import action_frame_pixmap
+from .transform import (action_frame_pixmap, action_frame_size, _alpha_bounds,
+                        compute_align_offsets, compute_source_anchor_offsets)
 from .widgets import (
     ActionCardWidget, ActionItemDelegate, AppNameLabel, ProjectTabBar, _APP_ROOT,
     paint_checkerboard,
@@ -785,6 +792,14 @@ class MainWindow(QMainWindow):
         self._project_path: Path | None = None
         self._project_json_path: str | None = None  # 当前工程关联的 JSON 文件路径
         self._project_dirty = False
+        # ② 动图文档（以单张图片修改）：当前标签页的动图数据，普通工程时为 None。
+        # 像素状态（帧 + 操作链）全在这个 AnimDoc 里，撤销也走它自己的操作链（见 anim_doc.py）。
+        self._anim_doc: AnimDoc | None = None
+        # 动图文档喂给预览/导出弹窗的那份"壳动作"（只装帧和逐帧时长）
+        self._anim_preview_action: Action | None = None
+        # ① 序列帧那边的"这份工程是从动图来的"记忆（那条横条 + 转回动图文档都靠它）。
+        # 与 _anim_doc 互斥：文档模式时为 None，序列帧模式时才有值。
+        self._anim_source: FramesSource | None = None
         # 工程显示名（标签页上那个）与"是否被用户改过名"。改名后不再被文件名覆盖。
         self._project_name = "未命名工程"
         self._name_custom = False
@@ -957,6 +972,18 @@ class MainWindow(QMainWindow):
         "点了完全没反应"（全局记录明明在，却够不到）。现在动作内操作先撤，
         撤完了才落到全局；顺序约定写进 NEXT.md。
         """
+        doc = self._anim_doc
+        if doc is not None:
+            # 动图文档走它自己的操作链（originals + ops 重放），不走快照栈 ——
+            # N 帧一份快照就是几十 MB、几十步就上 G（理由见 ui/anim_doc.py 开头）
+            label = doc.undo_label()          # 撤之前先记下要撤的是哪一步
+            if doc.undo(self.image_viewer):
+                self._anim_doc_after_op(f"已撤销：{label}（画面已按操作链重算）")
+                return
+        # 文档里没得撤了**不 return**：继续往下落到全局栈 —— 那里可能压着
+        # 「转为序列帧 / 转为动图文档」这种跨模式的记录（用户口径：转换要能 Ctrl+Z 退回，
+        # 连"撤销后就退回动图文档"也要成立）。落到别的快照上也是对的：快照里带着
+        # anim_doc/anim_source，恢复后模式与画面是一致的。
         stack = self._active_stack()
         if stack.canUndo():
             stack.undo()
@@ -965,6 +992,13 @@ class MainWindow(QMainWindow):
             self._undo_stack.undo()
 
     def _do_redo(self) -> None:
+        doc = self._anim_doc
+        if doc is not None:
+            label = doc.redo_label()
+            if doc.redo(self.image_viewer):
+                self._anim_doc_after_op(f"已重做：{label}")
+                return
+        # 同 _do_undo：文档里没得重做了就落到全局栈（跨模式的那条记录在那边）
         stack = self._active_stack()
         if stack.canRedo():
             stack.redo()
@@ -1052,6 +1086,10 @@ class MainWindow(QMainWindow):
             # 每张原图在合成大图里的位置（拖动移位改它）：不存进快照的话，
             # 撤销"移动原图"就回不到原位
             snap["source_offsets"] = [tuple(o) for o in viewer._source_offsets]
+            # 动图那两种状态也带上（引用，不复制帧）：这样"转为序列帧 / 转为动图文档"
+            # 能被 Ctrl+Z 整条退回 —— 退回动图文档时操作链原样还在（见 anim_doc.py 开头）
+            snap["anim_doc"] = self._anim_doc
+            snap["anim_source"] = self._anim_source
         return snap
 
     def _apply_action_data(self, action: Action, raw: dict) -> None:
@@ -1186,6 +1224,12 @@ class MainWindow(QMainWindow):
                     viewer.set_current_action(action)
                     self.action_list.setCurrentRow(ai)
                     self.preview.set_action(action)
+                # 动图那两种状态跟着快照回来（"转为序列帧 / 转为动图文档"要能整条退回）。
+                # 放在动作/原图都装完**之后**：界面切模式时会读 viewer 的当前状态。
+                if "anim_doc" in snap or "anim_source" in snap:
+                    self._anim_doc = snap.get("anim_doc")
+                    self._anim_source = snap.get("anim_source")
+                    self._apply_anim_doc_mode(fit=False)
             self._transform_history_state = self._capture_transform_state()
             viewer.canvas.update()
         except Exception as e:  # noqa: BLE001
@@ -1198,15 +1242,93 @@ class MainWindow(QMainWindow):
                 self._history_panel.rebuild()
 
     def _push_snapshot(self, text: str, current_only: bool = True,
-                       focus_action: Action | None = None) -> None:
+                       focus_action: Action | None = None,
+                       forced: bool = False) -> None:
         """结构性/命名性操作开始前调用：抓 before 快照。
 
         focus_action：改的是非当前动作（改名/改色）时传它，记录与恢复都只落在这个动作。
+        forced：**在动图文档里也要记一条全局快照**（只有"转成序列帧"用得上 —— 它要把
+        文档整个换掉，得留一条能退回动图文档的记录；动图文档自己的撤销仍走操作链）。
         """
+        if self._anim_doc is not None and not forced:
+            # 动图文档的撤销走它自己的操作链（AnimDoc.ops）：这里**不记**快照，
+            # 否则全局栈里会堆一堆"动图文档也用不上"的整帧快照（而且很吃内存）
+            self._snapshot_before = None
+            self._snapshot_text = ""
+            return
         self._snapshot_before = self._capture_snapshot(current_only, focus_action)
         self._snapshot_text = text
         self._snapshot_current_only = current_only
         self._snapshot_focus = focus_action
+
+    def _create_animation_action(self, name_hint: str, durations: list[int],
+                                 first: int, total: int) -> Action:
+        """给"一帧一张原图"的序列帧建动作：帧序 = 原图顺序、逐帧时长跟着动图。
+
+        ① 导入与 ②→① 转换共用这一处 —— 两条路的建法必须一模一样，不然"转过去"和
+        "导进来"出来的动作会长得不一样（用户口径里这俩是一回事）。
+        """
+        fps, overrides = fps_and_overrides(durations)
+        action = Action(self._animation_action_name(name_hint), self._next_action_color())
+        action.undo_stack = QUndoStack(self)
+        from spritesheet.settings import undo_limit
+        action.undo_stack.setUndoLimit(undo_limit())
+        action.selected_indices = list(range(first, total))
+        action.fps = fps
+        # 逐帧时长一帧一条写清楚：fps 是整数，反推不出 80ms 这种值（12.5fps 只能取 13）
+        action.frame_durations = overrides
+        return action
+
+    def _install_animation_action(self, action: Action) -> None:
+        """把动作挂上界面（列表 / 卡牌 / 裁帧 / 预览）—— ① 导入与 ②→① 转换共用。"""
+        viewer = self.image_viewer
+        self.actions.append(action)
+        viewer.set_actions(self.actions)
+        self._append_action_card(action)
+        # 裁剪出每一帧的像素（动作的 frames 就是在这里填上的）
+        for item in self.actions:
+            viewer.crop_frames_for_action(item)
+        viewer.set_current_action(action)
+        self.action_list.blockSignals(True)
+        self.action_list.setCurrentRow(self.actions.index(action))
+        self.action_list.blockSignals(False)
+        self.preview.set_action(action)
+        self.preview.set_source_pixmap(viewer._pixmap)
+
+    def _remember_animation_frames(self, first: int, count: int, durations, action: Action,
+                                   name: str, path: str) -> None:
+        """记住"这份工程是从动图来的"（序列帧模式那条横条的根据）。"""
+        self._anim_source = FramesSource(
+            source_indices=list(range(first, first + count)),
+            durations=[int(d) for d in durations],
+            action=action, name=name, path=path,
+            source_total=len(self.image_viewer._source_images))
+
+    def _live_animation_frames(self) -> list[tuple[int, int, int, int]] | None:
+        """把记下来的原图下标换算成**当前**矩形；对不上就返回 None（转换按钮据此禁用）。
+
+        对不上有两种：那几张原图被删了（下标越界），或者工程里原图数量又变了
+        （用户在别处加/删过原图）—— 那时"第 i 帧到底是哪一张"已经说不准了，
+        与其猜一个，不如老老实实说不转（按钮禁用 + 写明原因）。
+        """
+        source = self._anim_source
+        if source is None:
+            return None
+        rects = self.image_viewer.source_rects()
+        if len(rects) != source.source_total:
+            return None
+        if any(i < 0 or i >= len(rects) for i in source.source_indices):
+            return None
+        return [tuple(int(v) for v in rects[i]) for i in source.source_indices]
+
+    def _anim_frames_index(self) -> int:
+        """序列帧模式下"现在看的是第几帧"：只有那个动图动作是当前动作时才有意义。"""
+        source = self._anim_source
+        if source is None or source.action is None or source.action not in self.actions:
+            return 0
+        if self.image_viewer.current_action is not source.action:
+            return 0
+        return max(0, min(int(self.preview._frame_index), max(0, source.count - 1)))
 
     def _push_snapshot_done(self) -> None:
         """结构性/命名性操作完成后调用：push snapshot command。"""
@@ -1245,6 +1367,9 @@ class MainWindow(QMainWindow):
         """Collect the complete in-memory document into manifest + PNG sections."""
         sections: dict[str, bytes] = {}
         viewer = self.image_viewer
+        if self._anim_doc is not None:
+            # ② 动图文档走自己那一套：存 originals + 操作链（理由见 ui/anim_doc.py 开头）
+            return self._anim_doc_manifest()
 
         def add_pixmap(name: str, pm: QPixmap | None) -> str | None:
             payload = _pixmap_bytes(pm)
@@ -1390,6 +1515,13 @@ class MainWindow(QMainWindow):
             },
             "actions": actions,
         }
+        if self._anim_source is not None:
+            # 序列帧那份"从动图来"的记忆（那条 gif 横条 + 「转为动图文档」）：不存的话，
+            # 工程存了再打开这条横条就没了，看着像功能丢了。动作对象存不下，
+            # 记它的下标 + 名字，打开时按这两样重新认回来。
+            source = self._anim_source
+            index = self.actions.index(source.action) if source.action in self.actions else -1
+            manifest["anim_source"] = frames_source_payload(source, index)
         return manifest, sections
 
     def _set_project_title(self) -> None:
@@ -1464,6 +1596,10 @@ class MainWindow(QMainWindow):
             "name_custom": self._name_custom,
             "undo_stack": self._undo_stack,
             "transform_state": self._transform_history_state,
+            # ② 动图文档：整份数据（帧 + 操作链）跟着标签页走。
+            # **按引用**存，跟 pixmap/source_images 一个道理：切标签页不能复制 N 帧像素。
+            "anim_doc": self._anim_doc,
+            "anim_source": self._anim_source,
         }
 
     @staticmethod
@@ -1498,6 +1634,8 @@ class MainWindow(QMainWindow):
             "name_custom": False,
             "undo_stack": None,
             "transform_state": None,
+            "anim_doc": None,
+            "anim_source": None,
         }
 
     def _restore_document(self, doc: dict) -> None:
@@ -1561,6 +1699,12 @@ class MainWindow(QMainWindow):
         self.preview.canvas._zoom = float(doc["preview_zoom"])
         self.preview.canvas._offset = QPointF(doc["preview_offset"])
         self.preview.canvas._fit = bool(doc["preview_fit"])
+        # ② 动图文档：切回这种标签页要把画布/工具条/预览都切回"单帧 + 同步全部帧"那套，
+        # 切到普通工程则要原样退回来（这里一处决定，别在别处再判一遍）
+        self._anim_doc = doc.get("anim_doc")
+        # ① 序列帧的"从动图来"记忆也跟着标签页走（引用：同一份来源对象，不在标签间改它）
+        self._anim_source = doc.get("anim_source")
+        self._apply_anim_doc_mode(fit=False)
 
         self._project_path = doc["project_path"]
         self._project_json_path = doc.get("project_json_path")
@@ -1838,6 +1982,54 @@ class MainWindow(QMainWindow):
                                + ("" if was_current else "（新标签页）"))
         return True
 
+    def _anim_doc_manifest(self) -> tuple[dict, dict[str, bytes]]:
+        """动图文档 → 工程清单 + PNG sections。
+
+        帧只存 ``originals``（导入时那批原始帧）；用户做过的抠图/画笔/翻转都是**参数**，
+        以操作链存进清单 —— 存盘体积小，而且重新打开后撤销栈还是活的。
+        """
+        doc = self._anim_doc
+        sections: dict[str, bytes] = {}
+        frame_names = []
+        for index, pm in enumerate(doc.originals):
+            name = f"anim/frame_{index:04d}.png"
+            payload = _pixmap_bytes(pm)
+            if not payload:
+                raise ValueError(f"动图文档第 {index + 1} 帧是空的，存不下来")
+            sections[name] = payload
+            frame_names.append(name)
+        current = _pixmap_bytes(doc.frame())
+        if current:
+            # 当前帧当缩略图：.sstool 本身在资源管理器里就是一张能看的图
+            sections["thumbnail.png"] = current
+        manifest = {
+            "format": "spritesheet-tool-project",
+            "version": 2,
+            "anim_doc": anim_doc_payload(doc, frame_names),
+        }
+        return manifest, sections
+
+    def _apply_anim_doc_project(self, sections: dict, payload: dict) -> None:
+        """工程里存的是动图文档：按操作链还原，**不**走图集那套（没有元素/动作）。"""
+        frames = []
+        for name in payload.get("frames") or []:
+            pm = _pixmap_from_bytes(sections.get(name, b""))
+            if pm.isNull():
+                raise ValueError(f"动图文档缺少帧数据：{name}")
+            frames.append(pm)
+        doc = anim_doc_from_payload(payload, frames)
+        viewer = self.image_viewer
+        viewer._detect_generation += 1
+        self.actions = []
+        self.action_list.clear()
+        viewer.set_actions([])
+        viewer.set_current_action(None)
+        self._anim_doc = doc
+        doc.rebuild(viewer)             # originals 过一遍 ops = 用户当初看到的那一帧帧
+        self._apply_anim_doc_mode(fit=True)
+        self.lbl_status.setText(
+            f"动图文档已打开：{doc.count} 帧 · {len(doc.ops)} 步操作（Ctrl+Z 照样能退）")
+
     def _safe_open_project(self, path: str) -> None:
         """Safe slot for delayed drag/drop project loading."""
         try:
@@ -1848,6 +2040,12 @@ class MainWindow(QMainWindow):
     def _apply_sstool_project(self, manifest: dict, sections: dict[str, bytes]) -> None:
         if manifest.get("format") != "spritesheet-tool-project":
             raise ValueError("不是有效的 SSTOOL 工程清单")
+        payload = manifest.get("anim_doc")
+        if payload:
+            # ② 动图文档：先分流出去 —— 下面那套会去找 combined_image，
+            # 动图文档根本没有"合成大图"这个概念（画布上就是当前那一帧）
+            self._apply_anim_doc_project(sections, payload)
+            return
         viewer_state = manifest.get("viewer") or {}
         viewer = self.image_viewer
         viewer._detect_generation += 1
@@ -1958,6 +2156,11 @@ class MainWindow(QMainWindow):
         viewer.canvas.update()
         viewer._update_rulers()
         self._reset_transform_history()
+        # 序列帧那份"从动图来"的记忆：动作对象是刚从清单重建的，按"下标 + 名字"认回来
+        # （认不回来也只是那条横条不能"跳到第 i 帧"，转换照样能用 —— 它只要原图下标）
+        self._anim_source = frames_source_from_payload(manifest.get("anim_source") or {},
+                                                       self.actions)
+        self._apply_anim_doc_mode(fit=False)
         self._project_path = None
         self._project_dirty = False
 
@@ -2086,6 +2289,14 @@ class MainWindow(QMainWindow):
         self.anim_bar = AnimSettingsBar()
         self.anim_bar.set_actions(self.actions)
         self.left_layout.addWidget(self.anim_bar)
+        # ② 动图文档的横条（看第几帧的滑块 + 整段变换按钮）：跟「动画设置」横条**同一个位置**
+        # 二选一显示 —— 动图文档里没有动作，那条 fps/循环/锚点全都用不上。
+        self.anim_doc_bar = AnimDocBar()
+        self.anim_doc_bar.setVisible(False)
+        self.anim_doc_bar.frame_changed.connect(self._on_anim_bar_frame_changed)
+        self.anim_doc_bar.convert_requested.connect(self._on_anim_doc_convert)
+        self.anim_doc_bar.transform_requested.connect(self._on_anim_doc_transform)
+        self.left_layout.addWidget(self.anim_doc_bar)
         self.splitter.addWidget(left_column)
 
         self.preview = ActionPreviewWidget()
@@ -2100,6 +2311,9 @@ class MainWindow(QMainWindow):
         self.preview.adjust_panel.changed.connect(self._on_transform_history_changed)
         self.preview.adjust_panel.changed.connect(self._mark_project_dirty)
         self.preview.adjust_panel.changed.connect(self._on_adjust_panel_changed)
+        self.preview.adjust_panel.align_requested.connect(self._on_auto_align)
+        # 面板只负责按结果改提示文字，判断"精确还是只能估算"要问主窗口（要读原图）
+        self.preview.adjust_panel.align_reason_provider = self._auto_align_reason
         self.preview.canvas.transform_edit_started.connect(self._begin_transform_history)
         self.preview.canvas.transform_edit_finished.connect(self._finish_transform_history)
         self.preview.toolbar.bg_changed.connect(lambda _mode: self._mark_project_dirty())
@@ -2680,6 +2894,10 @@ class MainWindow(QMainWindow):
         顺序不能反：快照必须在**改像素之前**抓。笔画落在原图的**深拷贝**上再替换回列表
         （见 ImageViewer._paint_copy_of），所以快照里那份"涂之前"的引用不会被改坏。
         """
+        if self._anim_doc is not None:
+            # 动图文档：不抓快照，改记"这一笔的线段"（松手时同步到全部帧）
+            self.image_viewer.start_stroke_record()
+            return
         self._push_snapshot("画笔" if tool == "brush" else "橡皮擦", current_only=False)
 
     def _on_paint_stroke_finished(self, tool: str) -> None:
@@ -2689,6 +2907,23 @@ class MainWindow(QMainWindow):
         所以用户排好的帧、合成组、复用都不会被破坏。
         """
         viewer = self.image_viewer
+        doc = self._anim_doc
+        if doc is not None:
+            # 动图文档：把这一笔（同一批线段 + 同样的工具/笔刷/颜色）记成一条操作，
+            # 重放到每一帧上 —— 用户口径"所有改动影响全部帧"就是这一步在落实。
+            # 注意**连当前这一帧也一起重放**：画笔已经把这一帧涂过了，只能以重放结果为准，
+            # 不然当前帧会被涂两遍（这一帧和别的帧就不一样了）。
+            segments = viewer.take_stroke_record() or []
+            if segments:
+                op = StrokeOp(tool=tool, size=int(viewer.brush_size),
+                              color=viewer.paint_color.name(),
+                              pixel_perfect=bool(viewer.pixel_perfect),
+                              segments=segments,
+                              label="画笔" if tool == "brush" else "橡皮")
+                doc.apply(op, viewer)
+                self._anim_doc_after_op(
+                    f"已把这一笔同步到全部 {doc.count} 帧（Ctrl+Z 可撤销）")
+            return
         if self.actions:
             for action in self.actions:
                 action.invalidate_transforms()
@@ -2828,6 +3063,24 @@ class MainWindow(QMainWindow):
         """把抠好的结果换成原图：记一条全局撤销，Ctrl+Z 能整个撤回来。"""
         viewer = self.image_viewer
         if keyed is None or keyed.isNull():
+            return
+        doc = self._anim_doc
+        if doc is not None:
+            # 动图文档：把"同一套抠图参数"记成一条操作同步到全部帧。
+            # 为什么重算而不是把这一帧的结果硬贴给别的帧：每帧背景可能不同 ——
+            # 面板本来就是"每张原图各自猜色"，这里按**同一套规则**对每帧各抠一遍，
+            # 跟用户手动逐帧抠的结果一致（而且能撤销、能重做）。
+            panel = getattr(self, "_key_panel", None)
+            params = dict(getattr(panel, "_params", {}) or {})
+            raw_color = getattr(panel, "_bg_color", None)
+            color = tuple(raw_color) if raw_color is not None else None
+            # 面板选了「抠全部」时它自己就是"每块各自猜色"（key_panel._run_blocks），
+            # 这里照搬同一条口径：猜色规则一致，重放出来的结果才和用户手上看到的一样
+            per_frame = getattr(panel, "_scope", "single") == "all"
+            doc.apply(KeyOp(params=params, color=color, per_frame_guess=per_frame,
+                            label="抠除背景"), viewer)
+            self._anim_doc_after_op(
+                f"已把这次抠背景同步到全部 {doc.count} 帧（Ctrl+Z 可撤销）")
             return
         # 先抓 before（含旧原图引用），再换图 —— 顺序反了撤销就回不去了
         self._push_snapshot("抠除背景", current_only=False)
@@ -3102,6 +3355,42 @@ class MainWindow(QMainWindow):
             self._close_key_panel()
         super().closeEvent(event)
 
+    def _handle_animated_path(self, path: str) -> bool:
+        """动图专用入口：问"转序列帧 / 以单张图片修改"，然后走对应那条路。
+
+        返回 True = 这条路已经处理完了（含用户按取消），调用方**别再**当静态图导入；
+        返回 False = 不是真动图（静态 gif/webp、单帧、坏文件都算），调用方照旧走普通流程。
+        """
+        if not is_animated_file(path):
+            return False
+        anim = read_animation(path)
+        if anim is None or anim.count <= 1:
+            # 静态图静默处理（用户口径）：不问，也不报错，就当普通图片进去
+            return False
+        name = Path(path).stem
+        warning = size_warning(anim.count, anim.width, anim.height)
+        if warning:
+            # 大动图先问一句：几百帧全部同步抠图/重放会明显卡，别让用户以为是死机
+            box = QMessageBox(self)
+            box.setWindowTitle("这张动图有点大")
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setText(f"「{name}」{anim.count} 帧 · {anim.width}×{anim.height}")
+            box.setInformativeText(f"{warning}\n要继续吗？")
+            box.setStandardButtons(QMessageBox.StandardButton.Yes
+                                   | QMessageBox.StandardButton.No)
+            box.setDefaultButton(QMessageBox.StandardButton.No)
+            if box.exec() != QMessageBox.StandardButton.Yes:
+                return True
+        mode = ask_animation_mode(self, anim, name)
+        if mode == MODE_FRAMES:
+            self._import_animation_as_frames(anim, name, "动图", path=path)
+            return True
+        if mode == MODE_DOC:
+            self._open_animation_document(anim, name, path)
+            return True
+        self.lbl_status.setText("已取消：这张动图没有导入")
+        return True
+
     def _open_image(self):
         paths, _ = QFileDialog.getOpenFileNames(
             self, "添加图片", self._dialog_start(),
@@ -3117,6 +3406,9 @@ class MainWindow(QMainWindow):
                     continue
                 except Exception:  # noqa: BLE001 - JSON 导入失败时回退为只导入图片
                     pass
+            # 真动图先问"转序列帧 / 以单张图片修改"（静态图在那边会返回 False，照旧往下走）
+            if self._handle_animated_path(path):
+                continue
             pm = QPixmap(path)
             if not pm.isNull():
                 self._on_image_loaded(pm)
@@ -3480,6 +3772,9 @@ class MainWindow(QMainWindow):
             if json_sidecar.is_file():
                 self._import_project(str(json_sidecar), target=target)
                 return
+            # 真动图先问一句怎么处理（静态图返回 False，走下面的普通导入）
+            if self._handle_animated_path(path):
+                return
             pm = QPixmap(path)
             if not pm.isNull():
                 self._on_image_loaded(pm)
@@ -3498,6 +3793,21 @@ class MainWindow(QMainWindow):
 
     def _on_image_loaded(self, pm: QPixmap):
         """首次载入或追加原图；追加时保留已有动作和帧排序。"""
+        if self._anim_doc is not None:
+            # 动图文档里又载入普通图片 = 用户要开一份普通工程：先把动图文档收干净。
+            # 不收就会落到下面的"追加原图"分支 —— 那等于"往动图文档里塞第二张原图"，
+            # 而动图文档的原图区只有当前这一帧（根本不是这个模型）。
+            self._anim_doc = None
+            self.actions = []
+            self.action_list.clear()
+            self.image_viewer.set_animation_document_mode(False)
+            self.image_viewer.reset_document()
+            self._apply_anim_doc_mode()
+        if self._anim_source is not None and self._anim_doc is None and not self.actions:
+            # 从动图来的序列帧工程里又载入普通图片：这份工程不再是"那个动图"了，
+            # 那条 gif 横条要收掉（不然"第几帧"对应哪张已经说不准，按钮还得禁用着）
+            self._anim_source = None
+            self._apply_anim_doc_mode()
         has_image = self.image_viewer._pixmap is not None and not self.image_viewer._pixmap.isNull()
         if not has_image:
             self.image_viewer.set_pixmap(pm)
@@ -3569,15 +3879,289 @@ class MainWindow(QMainWindow):
         item.setData(Qt.ItemDataRole.UserRole, action)
         return card
 
+    def _next_action_color(self) -> str:
+        """给新动作挑一个没用过的主题色（手动加动作、导入动图共用同一套规则）。"""
+        used_colors = {a.color for a in self.actions}
+        for color in MACARON_COLORS:
+            if color not in used_colors:
+                return color
+        return "#E91E63"
+
+    def _animation_action_name(self, hint: str) -> str:
+        """导入动图自动建的动作名：优选用文件名（比"动作7"有信息量），重名就加序号。"""
+        base = (hint or "").strip() or "动图"
+        used = {a.name for a in self.actions}
+        if base not in used:
+            return base
+        n = 2
+        while f"{base} {n}" in used:
+            n += 1
+        return f"{base} {n}"
+
+    def _import_animation_as_frames(self, anim: Animation, name_hint: str = "",
+                                    source_label: str = "", path: str = "") -> bool:
+        """「① 转成序列帧」：一次性铺进画布 + 每帧整帧一个元素 + 自动建动作（带逐帧时长）。
+
+        为什么自动建动作：用户口径是"导入后自动建一个动作、按顺序放 N 帧、并带上原动图的
+        逐帧时长" —— 不然进来还得手动挑一遍元素才能预览/导出 GIF，等于白导。
+        撤销：整次导入是**一条**全局记录（老规矩，见"添加原图"）。
+        """
+        viewer = self.image_viewer
+        had_image = viewer._pixmap is not None and not viewer._pixmap.isNull()
+        label = source_label or f"动图（{anim.count} 帧）"
+        self._push_snapshot(f"导入{label}", current_only=False)
+        if not viewer.import_frames(anim.frames):
+            # 一张都铺不进去：把已经压进栈的记录撤掉，别留一条"没发生"的撤销
+            self._snapshot_before = None
+            self._snapshot_text = ""
+            return False
+
+        # 新元素正好在末尾、顺序就是帧序（布局是从左到右、从上到下），取末尾 N 个即可
+        total = len(viewer._frames)
+        first = max(0, total - anim.count)
+        action = self._create_animation_action(name_hint, anim.durations, first, total)
+        self._install_animation_action(action)
+        # 记住"这份工程是从动图来的"：序列帧模式下那条横条 + 「转为动图文档」都靠它
+        self._remember_animation_frames(first, anim.count, anim.durations, action,
+                                        name_hint or "动图", path)
+        self._push_snapshot_done()
+        if had_image:
+            self._refresh_history_after_change()
+        else:
+            self._reset_transform_history()
+        self._mark_project_dirty()
+        self._apply_anim_doc_mode(fit=False)     # 序列帧模式也要露出那条 gif 横条
+        self.lbl_status.setText(
+            f"已导入动图 {anim.count} 帧（横向铺开，每帧一个元素），"
+            f"并建了动作「{action.name}」（逐帧时长跟着原动图）"
+        )
+        return True
+
+    # ---------------------------------------------------------------- ② 动图文档
+    def _apply_anim_doc_mode(self, fit: bool = False) -> None:
+        """把界面切到（或切回）动图文档该有的样子：画布只露一帧、横条二选一、预览用壳动作。
+
+        所有进出路径都只调这一处（切标签页、新建动图文档、导入普通图片），
+        免得"哪儿记得收、哪儿忘了收"。
+        """
+        viewer = self.image_viewer
+        doc = self._anim_doc
+        # 三种状态：动图文档 / 从动图来的序列帧工程 / 普通工程
+        if doc is not None:
+            self.anim_doc_bar.set_doc(doc)
+            self.anim_doc_bar.set_convert_enabled(True)
+            self.anim_doc_bar.setVisible(True)
+            # 动图文档里没有动作：「动画设置」横条（fps/循环/锚点）全是空的，同一个位置二选一
+            self.anim_bar.setVisible(False)
+        elif self._anim_source is not None:
+            # ① 序列帧（用户口径：序列帧模式也显示这个 gif 工具）。这条横条**额外**加一行，
+            # 「动画设置」横条照样在 —— 序列帧还是正常工程，fps/锚点那些还得能用。
+            rects = self._live_animation_frames()
+            self.anim_doc_bar.set_frames_state(self._anim_source, rects,
+                                               self._anim_frames_index())
+            self.anim_doc_bar.set_convert_enabled(
+                rects is not None,
+                "转不了：那几帧原图被删过、或工程里原图数量变了（第几帧对应哪张已经说不准）")
+            self.anim_doc_bar.setVisible(True)
+            self.anim_bar.setVisible(True)
+        else:
+            self.anim_doc_bar.set_doc(None)
+            self.anim_doc_bar.setVisible(False)
+            self.anim_bar.setVisible(True)
+        viewer.set_animation_document_mode(doc is not None)
+        if doc is None:
+            self._anim_preview_action = None
+            self.preview._project_manifest = self._project_manifest
+            return
+        viewer.set_animation_frame(doc.frame(), fit=fit)
+        # 动图文档不玩元素/动作：把动作列表清掉，别让「当前动作」指着一份不存在的编排
+        viewer.set_actions([])
+        self._refresh_anim_doc_views()
+
+    def _refresh_anim_doc_views(self) -> None:
+        """动图文档改动之后：刷画布上那一帧、预览播放、导出用的壳动作、帧数横条。"""
+        doc = self._anim_doc
+        if doc is None:
+            return
+        viewer = self.image_viewer
+        viewer.set_animation_frame(doc.frame(), fit=False)
+        action = doc.synthetic_action()
+        self._anim_preview_action = action
+        self.preview.set_actions([action])
+        self.preview.set_action(action)
+        self.preview.set_source_pixmap(viewer._pixmap)
+        self.anim_doc_bar.refresh()
+
+    def _on_anim_bar_frame_changed(self, value: int) -> None:
+        """横条上「查看第几帧」（两种模式共用这条信号）：两种都**只看**，不动数据。"""
+        if self._anim_doc is not None:
+            self._on_anim_doc_frame_changed(value)
+            return
+        source = self._anim_source
+        if source is None:
+            return
+        action = source.action
+        if action is None or action not in self.actions:
+            self.lbl_status.setText("那个动图动作已经不在了（被删掉或改过），说不出这是第几帧")
+            return
+        index = max(0, min(int(value), max(0, source.count - 1)))
+        if self.image_viewer.current_action is not action:
+            # 滑块说的就是"那个动图动作的第几帧"：当前动作不是它就先切过去
+            self._select_action_by_obj(action)
+        # 走预览自己的切帧入口：缩略图、微调控件、帧号标签一起同步。直接摸
+        # `preview._frame_index` 只会动播放指针，右边「当前帧」面板还停在上一个帧上。
+        self.preview._on_slider_changed(index)
+        self.anim_doc_bar.refresh()
+        self.lbl_status.setText(f"看第 {index + 1} / {source.count} 帧（只切当前帧，不改数据）")
+
+    # ---------------------------------------------------------------- 两种模式互转
+    def _on_anim_doc_convert(self) -> None:
+        """横条上那个转换按钮：按当前模式决定方向（动图文档 ⇄ 序列帧）。"""
+        if self._anim_doc is not None:
+            self._convert_anim_doc_to_frames()
+        elif self._anim_source is not None:
+            self._convert_frames_to_anim_doc()
+
+    def _live_animation_durations(self) -> list[int]:
+        """转换时用的逐帧时长：动作还在就用动作里**现在**的（用户可能改过 fps），
+        否则退回记下来的原动图时长。"""
+        source = self._anim_source
+        if source is None:
+            return []
+        action = source.action
+        if action is not None and action in self.actions and action.frames:
+            count = min(len(action.frames), source.count)
+            return [int(action.frame_duration_ms(i)) for i in range(count)]
+        return list(source.durations)
+
+    def _convert_anim_doc_to_frames(self) -> None:
+        """②→①：拿**现在这一帧帧**（改过的样子）铺成序列帧工程。
+
+        用户口径「换载入模式但是修改过的不还原」—— 用的是 ``doc.frames``（操作链已经
+        作用过的那一帧帧），**不是**重新读一遍 gif。于是操作链在这里"烙进像素"：转过去
+        就是普通图集工程、动图文档那条撤销链到此为止；转换本身记**一条**全局撤销，
+        Ctrl+Z 能整条退回动图文档（用户口径）。
+        """
+        doc = self._anim_doc
+        if doc is None:
+            return
+        frames = list(doc.frames)
+        durations = list(doc.durations)
+        name, path = doc.name, doc.path
+        viewer = self.image_viewer
+        # 先记快照再动 doc：_push_snapshot 平时在动图文档里是**早退**的，这里要用 forced
+        self._push_snapshot("转为序列帧", current_only=False, forced=True)
+        self._anim_doc = None
+        viewer.reset_document()
+        if not viewer.import_frames(frames):
+            # 铺不进去：把刚记的撤销撤掉，并把用户的动图文档**原样还回来**
+            self._snapshot_before = None
+            self._snapshot_text = ""
+            self._anim_doc = doc
+            self._apply_anim_doc_mode(fit=False)
+            self.lbl_status.setText("转不了：这几帧铺不出序列帧（画布已经恢复成动图文档）")
+            return
+        first = max(0, len(viewer._frames) - len(frames))
+        action = self._create_animation_action(name, durations, first, len(viewer._frames))
+        self._install_animation_action(action)
+        self._remember_animation_frames(first, len(frames), durations, action,
+                                        name or "动图", path)
+        self._apply_anim_doc_mode(fit=True)
+        self._push_snapshot_done()
+        self._refresh_history_after_change()
+        self._mark_project_dirty()
+        self.lbl_status.setText(
+            f"已转为序列帧：{len(frames)} 帧铺成原图 + 建了动作「{action.name}」"
+            f"（改动都留在图上，Ctrl+Z 可退回动图文档）")
+
+    def _convert_frames_to_anim_doc(self) -> None:
+        """①→②：把序列帧工程这几帧收成动图文档（用**现在的像素**，改过也带着走）。"""
+        source = self._anim_source
+        rects = self._live_animation_frames()
+        if source is None or rects is None:
+            self.lbl_status.setText(
+                "转不了：这份工程不是从动图来的，或那几帧原图动过（第几帧对应哪张说不准）")
+            self._apply_anim_doc_mode(fit=False)      # 顺手把横条/按钮状态刷对
+            return
+        viewer = self.image_viewer
+        composite = viewer._pixmap
+        frames = [composite.copy(int(x), int(y), int(w), int(h)) for x, y, w, h in rects]
+        durations = self._live_animation_durations()
+        self._push_snapshot("转为动图文档", current_only=False)
+        doc = AnimDoc(frames, durations, name=source.name or "动图", path=source.path)
+        self._anim_source = None          # 进文档模式：横条改由 _anim_doc 说话
+        self.actions = []
+        self.action_list.clear()
+        viewer.set_actions([])
+        viewer.set_current_action(None)
+        self._anim_doc = doc
+        doc.rebuild(viewer)
+        self._apply_anim_doc_mode(fit=True)
+        self._push_snapshot_done()
+        self._refresh_history_after_change()
+        self._mark_project_dirty()
+        self.lbl_status.setText(
+            f"已转为动图文档：{doc.count} 帧（用的是它们现在的像素，改过的都带着）"
+            f" · Ctrl+Z 可退回序列帧")
+
+    def _open_animation_document(self, anim: Animation, name_hint: str = "",
+                                 path: str = "") -> bool:
+        """② 以单张图片修改：开一个动图文档。
+
+        当前标签页**是空的**就用它；已经有内容就新开一个标签页 —— 动图文档跟图集工程不是
+        一回事，塞进有内容的标签页会把用户那份编排顶掉（用户口径里没要求这个）。
+        """
+        viewer = self.image_viewer
+        has_content = bool(self.actions) or (viewer._pixmap is not None
+                                             and not viewer._pixmap.isNull())
+        if has_content:
+            self._new_tab(switch=True)
+        doc = AnimDoc(anim.frames, anim.durations, name=name_hint or "动图", path=path)
+        self._anim_doc = doc
+        self.actions = []
+        self.action_list.clear()
+        viewer.set_current_action(None)
+        self._apply_anim_doc_mode(fit=True)
+        self._mark_project_dirty()
+        self.lbl_status.setText(
+            f"动图文档：{doc.count} 帧（画布上只显示当前帧，所有改动会同步到全部帧）"
+        )
+        return True
+
+    def _on_anim_doc_frame_changed(self, value: int) -> None:
+        """「查看第几帧」：只换"看的是哪一帧"，**不改编辑范围**（用户口径）。"""
+        doc = self._anim_doc
+        if doc is None:
+            return
+        doc.index = max(0, min(int(value), doc.count - 1))
+        self.image_viewer.set_animation_frame(doc.frame(), fit=False)
+        self.preview.set_source_pixmap(self.image_viewer._pixmap)
+        self.anim_doc_bar.refresh()
+        self.lbl_status.setText(
+            f"看第 {doc.index + 1} / {doc.count} 帧（改动照样作用于全部帧）")
+
+    def _on_anim_doc_transform(self, kind: str) -> None:
+        """整段变换（翻转/旋转）：每帧做同样的像素变换，记成一条可撤销的操作。"""
+        doc = self._anim_doc
+        if doc is None:
+            return
+        label = {"flip_h": "左右翻转", "flip_v": "上下翻转",
+                 "rot90": "转 90°", "rot180": "转 180°"}.get(kind, "变换")
+        doc.apply(TransformOp(kind, label=label), self.image_viewer)
+        self._refresh_anim_doc_views()
+        self._mark_project_dirty()
+        self.lbl_status.setText(f"已对全部 {doc.count} 帧{label}（Ctrl+Z 可撤销）")
+
+    def _anim_doc_after_op(self, text: str) -> None:
+        """动图文档里一条破坏性操作落地之后：刷视图 + 标脏 + 状态文字。"""
+        self._refresh_anim_doc_views()
+        self._mark_project_dirty()
+        self.lbl_status.setText(text)
+
     def _create_action(self):
         """无图片时打开文件对话框；有图片时直接创建动作卡牌。"""
         # 选一个未被使用的颜色
-        used_colors = {a.color for a in self.actions}
-        color = "#E91E63"
-        for c in MACARON_COLORS:
-            if c not in used_colors:
-                color = c
-                break
+        color = self._next_action_color()
         used_names = {a.name for a in self.actions}
         n = len(self.actions) + 1
         while f"动作{n}" in used_names:
@@ -3857,6 +4441,168 @@ class MainWindow(QMainWindow):
         cur = self.image_viewer.current_action
         name = f"「{cur.name}」" if cur else ""
         self._schedule_per_action_snapshot(f"微调帧偏移{name}")
+
+    def _auto_align_reason(self, action) -> str:
+        """能不能按「原图锚点」**精确**补回偏移；不能就说清是为什么。
+
+        用户要求"你可以自己确定"，所以这里全部自己看、不弹窗问：
+          * 用到的原图必须是**同尺寸的整帧画面** —— 尺寸不一致，或者原图的 alpha 外框
+            几乎顶满原图本身（说明原图自己就已经是紧切过的小图），精确就无从谈起
+          * 抽查最多 8 帧就够判断（几百帧逐个扫会把界面卡住）
+        返回 "" = 精确可用；否则是一句人话原因。
+        """
+        viewer = self.image_viewer
+        if viewer is None or not getattr(viewer, "_source_images", None):
+            return "这一份工程里没有可用的原图（帧是直接拼出来的）"
+        total = len(action.frames)
+        picked = sorted({int(round(k * (total - 1) / max(1, min(8, total) - 1)))
+                         for k in range(min(8, total))}) if total > 1 else [0]
+        rects = viewer.source_rects()
+        if not rects:
+            return "拿不到原图的坐标（工程里没存原图位置）"
+        sizes = set()
+        for i in picked:
+            frect = action.frame_rects[i] if i < len(action.frame_rects) else None
+            if not frect:
+                return "有帧记不清自己是从哪块原图切下来的"
+            cx, cy = frect[0] + frect[2] / 2.0, frect[1] + frect[3] / 2.0
+            sx = sy = None
+            for (rx, ry, rw, rh) in rects:
+                if rx <= cx < rx + rw and ry <= cy < ry + rh:
+                    sx, sy = rx, ry
+                    break
+            if sx is None:
+                return "有帧落不到任何一张原图里（工程状态对不上）"
+            idx = (viewer._source_offsets.index((sx, sy))
+                   if (sx, sy) in list(viewer._source_offsets or []) else None)
+            if idx is None or idx >= len(viewer._source_images):
+                return "原图和合成图对不上号，算不准"
+            pm = viewer._source_images[idx]
+            if pm is None or pm.isNull():
+                return "有一张原图读不出来了"
+            sizes.add((pm.width(), pm.height()))
+            if len(sizes) > 1:
+                return "这些原图的尺寸不一样，不像「一整帧完整画面」"
+            bounds = _alpha_bounds(pm)
+            # 外框几乎顶满原图 = 原图自己就是紧切过的小图（正常切割那个框已经不存在了）
+            if bounds is not None and bounds.width() >= pm.width() * 0.98 \
+                    and bounds.height() >= pm.height() * 0.98:
+                return "原图本身就已经是紧切过的小图（四周没有留白）"
+        return ""
+
+    def _source_anchor_data(self, action):
+        """精确那条路要用的数据：每帧内容在**原图坐标系**里的框 + 帧内偏移。
+
+        返回 None = 有帧满足不了（多元素合成的帧、带变换的帧）；调用方据此走估算路。
+        """
+        viewer = self.image_viewer
+        rects = viewer.source_rects()
+        total = len(action.frames)
+        local_boxes: list[tuple[int, int, int, int] | None] = [None] * total
+        content_in_frame: list[tuple[int, int] | None] = [None] * total
+        frame_sizes: list[tuple[int, int] | None] = [None] * total
+        for i in range(total):
+            if action.frame_rotations.get(i) or action.frame_mirror_h & {i} \
+                    or action.frame_mirror_v & {i} or action.frame_quads.get(i):
+                return None                      # 带变换的帧：帧内位置变了，先不猜
+            parts = action.frame_parts[i] if i < len(action.frame_parts) else None
+            if not parts or len(parts) != 1:
+                return None                      # 多元素合成的帧：帧内内容位置不止一个
+            (_src, rx, ry, _sx, _sy) = parts[0]
+            frect = action.frame_rects[i] if i < len(action.frame_rects) else None
+            if not frect:
+                return None
+            cx, cy = frect[0] + frect[2] / 2.0, frect[1] + frect[3] / 2.0
+            origin = None
+            for (ox, oy, ow, oh) in rects:
+                if ox <= cx < ox + ow and oy <= cy < oy + oh:
+                    origin = (ox, oy)
+                    break
+            if origin is None:
+                return None
+            local_boxes[i] = (frect[0] - origin[0], frect[1] - origin[1], frect[2], frect[3])
+            content_in_frame[i] = (rx, ry)
+            frame_sizes[i] = action_frame_size(action, i)
+        max_w = max(s[0] for s in frame_sizes if s)
+        max_h = max(s[1] for s in frame_sizes if s)
+        return local_boxes, frame_sizes, content_in_frame, max_w, max_h
+
+    def _confirm_estimate_align(self, reason: str) -> bool:
+        """只能估算时先弹个提示：说清为什么估、可能不准、建议手动核对。"""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("自动对齐（只能估算）")
+        box.setText("这次只能估算，可能不准 —— 要不要继续？")
+        box.setInformativeText(
+            f"{reason}\n\n"
+            "原始位置（正常切割那个框）已经不在工程里了，只能按帧间重合度去猜。\n"
+            "「身型展开」的那几帧（尾巴/手臂伸出去、紧切框变大）仍可能对不齐，"
+            "点完之后建议对着预览手动核对、必要时拖一下那几帧的逐帧偏移。\n\n"
+            "只改逐帧偏移数据，锚点 / padding / 帧图像都不动，一条 Ctrl+Z 可退回。")
+        use_it = box.addButton("用估算值", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(use_it)
+        box.exec()
+        return box.clickedButton() is use_it
+
+    def _on_auto_align(self) -> None:
+        """「自动对齐」：算好逐帧偏移写回去。
+
+        用户口径：**只改帧的偏移数据** —— 锚点、padding、帧图像、尺寸一概不碰。
+        两条路，自己判断走哪条（用户要求"你可以自己确定"）：
+          * **精确**：原图是整帧画面时，按「原图锚点 − 紧切框中心」把每帧放回它在原图里的
+            位置（用户原话："正常切割记一次锚点、紧切再记一次，差值就是偏移量"）。
+          * **估算**：原图已经是紧切小图 / 带变换 / 多元素合成时，原始位置已经丢了，
+            只能按帧间重合度去猜 —— 先弹提示说明"可能不准、建议手动核对"。
+        一条撤销：改前/改后当场各抓一份快照，Ctrl+Z 能退回对齐前的偏移。
+        """
+        action = self.image_viewer.current_action
+        if action is None or len(action.frames) < 2:
+            self.lbl_status.setText("自动对齐：先选一个动作（至少两帧）")
+            return
+        reason = self._auto_align_reason(action)
+        data = None if reason else self._source_anchor_data(action)
+        if data is None and not reason:
+            reason = "这些帧是合成的或带了变换，原图里的位置推不出来"
+        if data is not None:
+            local_boxes, frame_sizes, content_in_frame, max_w, max_h = data
+            offsets = compute_source_anchor_offsets(
+                local_boxes, frame_sizes, content_in_frame, max_w, max_h, action.padding)
+            how = "精确：按「原图锚点 − 紧切框中心」把每帧放回它在原图里的位置"
+            tail = "锚点、padding、帧图像都没动 · Ctrl+Z 可退回"
+        else:
+            if not self._confirm_estimate_align(reason):
+                self.lbl_status.setText("自动对齐：已取消（只能估算的那条路）")
+                return
+            offsets = compute_align_offsets(action)
+            how = f"估算（{reason}）：按帧间重合度对齐"
+            tail = "锚点、padding、帧图像都没动 —— 估的，建议手动核对那几帧 · Ctrl+Z 可退回"
+        if not offsets:
+            self.lbl_status.setText("自动对齐：这些帧本来就在该在的位置上，偏移没变")
+            return
+        changed_offsets = {i: v for i, v in offsets.items()
+                           if action.frame_offsets.get(i, (0, 0)) != v}
+        if not changed_offsets:
+            # 原图就是整帧时算出来全是 0：本来就不飘，别写一堆没用的 (0,0) 进工程
+            self.lbl_status.setText("自动对齐：这些帧本来就在该在的位置上，偏移没变")
+            return
+        merged = dict(action.frame_offsets)
+        merged.update(offsets)
+        changed = len(changed_offsets)
+        # 改前/改后**当场各抓一份**（不靠动作内那条 400ms 合并 timer 的旧基线）：
+        # 按钮是一次点击、一锤子买卖，快照里必须带着"改之前的样子"，
+        # 否则 Ctrl+Z 可能退到一个跟当前动作对不上的旧状态
+        self._push_snapshot("自动对齐", current_only=True)
+        action.frame_offsets = merged
+        action.invalidate_transforms()
+        self.preview.set_action(action)
+        self.preview.update()
+        if self.preview.canvas is not None:
+            self.preview.canvas.update()
+        self.preview.adjust_panel._refresh_canvas_label()
+        self._push_snapshot_done()
+        self._mark_project_dirty()
+        self.lbl_status.setText(f"已自动对齐：{changed} 帧的逐帧偏移改了（{how}）；{tail}")
 
     def _on_frames_updated(self):
         """后台检测完成后刷新动作帧和界面摘要。"""
