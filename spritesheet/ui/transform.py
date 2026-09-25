@@ -556,8 +556,8 @@ def compute_align_offsets(action: Action) -> dict[int, tuple[int, int]]:
     offsets = dict(action.frame_offsets)
     for i in live:
         off = action.frame_offsets.get(i, (0, 0))
-        base_x = positions[i][0]
-        base_y = positions[i][1]
+        base_x = positions[i][0] - int(off[0])
+        base_y = positions[i][1] - int(off[1])
         dx = _correlate_profiles(ref_x, profiles[i][0], span_x) * step
         dy = _correlate_profiles(ref_y, profiles[i][1], span_y) * step
         # 互相关是在"各帧自己内部"的坐标里算的 → 换算成落点：落点_i 应等于 落点_ref + 位移
