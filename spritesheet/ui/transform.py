@@ -423,6 +423,126 @@ def frame_has_content(action: Action, index: int) -> bool:
     return _alpha_bounds(action_frame_pixmap(action, index)) is not None
 
 
+def _cluster_1d(values, tol):
+    """把一维数值按"大间隔就断开"聚成组，返回 (每组的均值, 每个值属于哪一组)。
+
+    精灵图是均分的话，内容块中心在某一个方向上会聚成"等距的若干组"（组内差几像素、
+    组间差一整格），所以断点很好找：比容差大的间隔就断开。
+    """
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    groups: list[list[int]] = []
+    for idx in order:
+        if groups and values[idx] - values[groups[-1][-1]] <= tol:
+            groups[-1].append(idx)
+        else:
+            groups.append([idx])
+    labels = [0] * len(values)
+    centers = []
+    for gi, g in enumerate(groups):
+        for idx in g:
+            labels[idx] = gi
+        centers.append(sum(values[i] for i in g) / len(g))
+    return centers, labels
+
+
+def _center_pitch(values):
+    """一维中心的"簇间距"（中位数）——均分的话相邻格的中心差就是一格。"""
+    ordered = sorted(values)
+    gaps = [b - a for a, b in zip(ordered, ordered[1:]) if b > 0]
+    if not gaps:
+        return 0.0
+    gaps.sort()
+    return gaps[len(gaps) // 2]
+
+
+def detect_sheet_grid(rects, canvas_w: int, canvas_h: int):
+    """判定这张精灵图是不是「横竖均分」，是的话返回 {帧序: (列, 行)}，不是就返回 None。
+
+    用户口径：「拖进来默认那些灰线是**紧切**的线，不要动；点对齐以后别参考灰线，要看的是
+    整个精灵图**横竖均分**的状态 —— 那才是正常那一帧的框，跟紧切框一比差值就出来了」。
+    所以判均分是这条路的地基，判错就是给错数据，必须当场能验。
+
+    判法（对"检测多检出几个碎屑"免疫，所以**不能**要求"每格元素个数相等"）：
+      1. 内容块中心在某个方向上会聚成等距的若干组 → 组数 = 那个方向的格数，
+         组间距的中位数 = 一格多长
+      2. 另一个方向的格数由"画布尺寸 ÷ 格长"推（不靠该方向中心是否整齐 —— 横向会动时
+         中心是散的）；同时把两个方向的聚簇结果也当候选
+      3. 每个候选都**逐个内容块验算**：按均分切格子，看内容是否完整落在自己那一格里
+         （格子归属用"中心落在第几格"算，不用排名 —— 碎屑、缺格都不影响）
+         —— 第一个全中的候选才算判定成立；全都不中 → 返回 None，宁可不做也不给错偏移
+
+    纯函数，只看框不看图，不碰任何数据。
+    """
+    count = len(rects or ())
+    if count < 4 or canvas_w <= 0 or canvas_h <= 0:
+        return None
+    xs = [float(r[0]) + float(r[2]) / 2.0 for r in rects]
+    ys = [float(r[1]) + float(r[3]) / 2.0 for r in rects]
+
+    def clusters(values):
+        ordered = sorted(values)
+        gaps = [b - a for a, b in zip(ordered, ordered[1:]) if b > 0]
+        tol = max(2.0, (max(gaps) * 0.25) if gaps else 2.0)
+        return _cluster_1d(values, tol)[0]
+
+    cx, cy = clusters(xs), clusters(ys)
+    cols_guess, rows_guess = len(cx), len(cy)
+    pitch_x, pitch_y = _center_pitch(cx), _center_pitch(cy)
+    candidates: list[tuple[int, int]] = []
+
+    def add(cols, rows):
+        cols, rows = int(cols), int(rows)
+        if cols >= 2 and rows >= 2 and (cols, rows) not in candidates:
+            candidates.append((cols, rows))
+
+    add(cols_guess, rows_guess)
+    if pitch_y > 0:
+        add(round(canvas_w / pitch_y), rows_guess)          # 方格假设
+    if pitch_x > 0:
+        add(cols_guess, round(canvas_h / pitch_x))
+    for cols, rows in list(candidates):                     # 非方格时容错：附近再试两档
+        add(cols, round(canvas_h / (canvas_w / cols)) if cols else 0)
+        add(round(canvas_w / (canvas_h / rows)) if rows else 0, rows)
+
+    for cols, rows in candidates:
+        cell_w, cell_h = canvas_w / cols, canvas_h / rows
+        index_of: dict[int, tuple[int, int]] = {}
+        ok = True
+        for i, r in enumerate(rects):
+            col = min(max(int(xs[i] // cell_w), 0), cols - 1)
+            row = min(max(int(ys[i] // cell_h), 0), rows - 1)
+            index_of[i] = (col, row)
+            left, top, cw, ch = cell_rect(index_of, i, canvas_w, canvas_h, cols, rows)
+            if r[0] < left - 1 or r[0] + r[2] > left + cw + 1:
+                ok = False
+                break
+            if r[1] < top - 1 or r[1] + r[3] > top + ch + 1:
+                ok = False
+                break
+        if ok:
+            return index_of                                 # 验算通过：均分判定成立
+    return None
+
+
+def grid_shape(index_of) -> tuple[int, int]:
+    """从 {帧序: (列, 行)} 反推 (列数, 行数)。"""
+    if not index_of:
+        return 0, 0
+    return (max(v[0] for v in index_of.values()) + 1,
+            max(v[1] for v in index_of.values()) + 1)
+
+
+def cell_rect(index_of, i: int, canvas_w: int, canvas_h: int,
+              cols: int, rows: int) -> tuple[int, int, int, int]:
+    """第 i 帧所在的「均分格」矩形 (x, y, w, h)；边界取整方式与导出时的 480/482 交替一致。"""
+    col, row = index_of[i]
+    left = int(round(col * canvas_w / cols))
+    right = int(round((col + 1) * canvas_w / cols))
+    top = int(round(row * canvas_h / rows))
+    bottom = int(round((row + 1) * canvas_h / rows))
+    return (left, top, right - left, bottom - top)
+
+
 def compute_source_anchor_offsets(local_boxes, frame_sizes, content_in_frame,
                                  max_w: int, max_h: int, padding: int = 0):
     """按「原图锚点」精确补回偏移 —— 这是**精确**那条路，不做任何推断。

@@ -17,22 +17,18 @@ PY = str(ROOT / ".venv" / "Scripts" / "python.exe")
 TEST = str(ROOT / "tools" / "verify_auto_align.py")
 
 MUTATIONS = [
-    ("transform.py", "估算用「当前落点」当基准（等于把上次的修正又减一遍）",
-     "        base_x = positions[i][0] - int(off[0])\n        base_y = positions[i][1] - int(off[1])",
-     "        base_x = positions[i][0]\n        base_y = positions[i][1]",
-     ["再点一次偏移没变"]),
-    ("transform.py", "估算把全透明的帧也算进去",
-     "    live = [i for i in range(count) if frame_has_content(action, i)]",
-     "    live = [i for i in range(count)]",
-     ["全透明的那帧不参与对齐"]),
-    ("main_window.py", "认不出「原图已经被紧切」",
-     'return "原图本身就已经是紧切过的小图（四周没有留白）"',
-     'return ""',
-     ["检测器自己认出", "先弹了提示"]),
-    ("main_window.py", "紧切时不再弹提示确认，直接动手",
-     "if not self._confirm_estimate_align(reason):",
-     "if False:",
-     ["点「取消」→ 偏移一点都不动"]),
+    ("transform.py", "均分判定不验算就认（碎屑/散图都会被当成均分）",
+     "        if ok:\n            return index_of                                 # 验算通过：均分判定成立",
+     "        if True:\n            return index_of                                 # 验算通过：均分判定成立",
+     ["散着摆的图判不出均分"]),
+    ("main_window.py", "均分格那条路拿「整张画布坐标」当格内落点",
+     "            local_boxes.append((r[0] - cell[0], r[1] - cell[1], r[2], r[3]))",
+     "            local_boxes.append((r[0], r[1], r[2], r[3]))",
+     ["每帧都落回它那一格里的原位"]),
+    ("main_window.py", "按钮压根不走均分格那条路",
+     "        grid_offsets = self._grid_align_offsets(action)",
+     "        grid_offsets = None",
+     ["状态栏写明走的是均分格那条路"]),
 ]
 
 

@@ -283,6 +283,87 @@ def main() -> int:
           and "还没做" in panel.btn_similar_frames.toolTip(),
           panel.btn_similar_frames.toolTip())
 
+    print("=== 8. 精灵图横竖均分：每格 = 正常那一帧，紧切框在格里的落点就是原图里的落点 ===")
+    win = fresh_window(win)
+    panel = win.preview.adjust_panel
+    COLS, ROWS, CW, CH = 3, 3, 60, 70
+    atlas = QPixmap(COLS * CW, ROWS * CH)
+    atlas.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(atlas)
+    plan = []                                   # (列, 行, 帧内宽, 帧内高, 格内 x, 格内 y)
+    for row in range(ROWS):
+        for col in range(COLS):
+            w = 20 + 8 * ((col + row) % 3)
+            h = 30 + 5 * ((col * 2 + row) % 3)
+            dx = 8 + 4 * col
+            dy = 10 + 6 * row
+            painter.fillRect(col * CW + dx, row * CH + dy, w, h, QColor("#1565C0"))
+            plan.append((col, row, w, h, dx, dy))
+    painter.end()
+    win.image_viewer.set_pixmap(atlas)          # 用户拖单张图集的入口（走自动检测）
+    wait(1200)
+    check("图集被切成 9 个元素（3×3 格各一个）",
+          len(win.image_viewer._frames) == 9, f"{len(win.image_viewer._frames)} 个")
+    action4 = win._create_animation_action("均分图集测试", [], 0, 9)
+    win._install_animation_action(action4)
+    wait(600)
+    from spritesheet.ui.transform import detect_sheet_grid, grid_shape, cell_rect
+    index_of = detect_sheet_grid(action4.frame_rects, atlas.width(), atlas.height())
+    check("判定出「横竖均分 = 3×3」", grid_shape(index_of) if index_of else None == (3, 3),
+          f"{grid_shape(index_of) if index_of else None}")
+    check("每个元素都被认到正确的那一格", bool(index_of) and all(
+        index_of[i] == (c, r) for i, (c, r, *_rest) in enumerate(plan)),
+        f"{index_of}")
+    before_pos = positions_of(action4)
+    # 防呆：均分那条路**不该弹任何确认**。万一它没走成、退到估算那条路，这里直接拒掉，
+    # 免得模态弹窗把 offscreen 测试挂死（那样只会看到超时，看不到"走错路了"）。
+    win._confirm_estimate_align = lambda why: False
+    panel.btn_auto_align.click()
+    wait(600)
+    print("  状态栏：", win.lbl_status.text()[:80])
+    check("状态栏写明走的是均分格那条路、不是估的",
+          "均分格（3×3）" in win.lbl_status.text() and "不是估的" in win.lbl_status.text(),
+          win.lbl_status.text()[:90])
+    after_pos = positions_of(action4)
+    # 真值：每帧内容在"格坐标系"里的落点 = 格内 (dx, dy)=plan[4]/plan[5]；
+    # 对齐后落点必须等于它 + 同一个常数（整体平移无所谓，跨帧不一致就是没对齐）
+    kx = [p[0] - r[4] for p, r in zip(after_pos, plan)]
+    ky = [p[1] - r[5] for p, r in zip(after_pos, plan)]
+    check("每帧都落回它那一格里的原位（误差是同一个常数）",
+          max(kx) - min(kx) == 0 and max(ky) - min(ky) == 0,
+          f"x 异 {max(kx)-min(kx)}，y 异 {max(ky)-min(ky)}")
+    check("横向真实位移被保住（不是把各帧拉齐了）",
+          max(r[4] for r in plan) - min(r[4] for r in plan) == 8,
+          f"格内 x 跨度 {max(r[4] for r in plan) - min(r[4] for r in plan)}（夹具里是 8~16）")
+    check("锚点/padding 没动",
+          tuple(action4.anchor) == (0.5, 0.5) and action4.padding == 0,
+          f"{tuple(action4.anchor)} / {action4.padding}")
+    snap4 = dict(action4.frame_offsets)
+    panel.btn_auto_align.click()
+    wait(400)
+    check("连点两次结果一样", dict(action4.frame_offsets) == snap4, f"{snap4}")
+    win._do_undo()
+    wait(300)
+    check("一条 Ctrl+Z 退回均分对齐前", dict(action4.frame_offsets) == {},
+          f"{dict(action4.frame_offsets)}")
+
+    print("=== 9. 不是均分的图：判定不出来 → 老实说，不硬猜 ===")
+    win = fresh_window(win)
+    scattered = QPixmap(180, 180)
+    scattered.fill(Qt.GlobalColor.transparent)
+    p2 = QPainter(scattered)
+    for k, (x, y) in enumerate([(10, 12), (48, 40), (95, 20), (30, 90), (120, 110),
+                                (70, 150), (150, 60), (16, 150), (110, 78)]):
+        p2.fillRect(x, y, 20 + k % 3 * 5, 26 + k % 2 * 6, QColor("#1565C0"))
+    p2.end()
+    win.image_viewer.set_pixmap(scattered)
+    wait(1200)
+    a5 = win._create_animation_action("散图测试", [], 0, len(win.image_viewer._frames))
+    win._install_animation_action(a5)
+    wait(400)
+    check("散着摆的图判不出均分（返回 None，不硬猜）",
+          detect_sheet_grid(a5.frame_rects, scattered.width(), scattered.height()) is None)
+
     win.image_viewer.set_current_action(None)
     for w in OLD_WINDOWS + [win]:
         w.close()

@@ -51,7 +51,8 @@ from .models import Action, MACARON_COLORS
 from .preview import ActionPreviewWidget
 from .settings_dialog import SettingsDialog
 from .transform import (action_frame_pixmap, action_frame_size, _alpha_bounds,
-                        compute_align_offsets, compute_source_anchor_offsets)
+                        cell_rect, compute_align_offsets, compute_source_anchor_offsets,
+                        detect_sheet_grid, grid_shape)
 from .widgets import (
     ActionCardWidget, ActionItemDelegate, AppNameLabel, ProjectTabBar, _APP_ROOT,
     paint_checkerboard,
@@ -4442,6 +4443,52 @@ class MainWindow(QMainWindow):
         name = f"「{cur.name}」" if cur else ""
         self._schedule_per_action_snapshot(f"微调帧偏移{name}")
 
+    def _grid_align_offsets(self, action):
+        """路①：这张精灵图**横竖均分** → 每一格就是"正常那一帧的框"。
+
+        用户口径：拖进来那些灰线是**紧切**的线，一个都不动；点对齐时参考的是整张精灵图的
+        均分状态 —— 紧切框落在格里的哪个位置，就是它在原图里的哪个位置，跟"正常那一帧"
+        一比差值（误差）就出来了。所以这条路**不是估的**，是读图上本来就有的信息。
+
+        锚点算法跟平时一样：同一条公式对"格子"和"紧切框"各算一次，差值就是误差 ——
+        不新增锚点选项，也不在画布上画均分线（用户明确说不用显示）。
+
+        返回 (偏移字典, 说明)；判不出均分 / 有带变换或多元素合成的帧 → None（交给后面的路）。
+        """
+        viewer = self.image_viewer
+        pixmap = getattr(viewer, "_pixmap", None)
+        if pixmap is None or pixmap.isNull():
+            return None
+        total = len(action.frames)
+        rects = action.frame_rects
+        if total < 4 or len(rects) != total:
+            return None
+        for i in range(total):
+            if action.frame_rotations.get(i) or i in action.frame_mirror_h \
+                    or i in action.frame_mirror_v or action.frame_quads.get(i):
+                return None               # 带变换的帧：帧内位置变了，先不掺和
+            parts = action.frame_parts[i] if i < len(action.frame_parts) else None
+            if not parts or len(parts) != 1:
+                return None               # 多元素合成的帧：内容在帧内的原点不止一个
+        index_of = detect_sheet_grid(rects, pixmap.width(), pixmap.height())
+        if not index_of:
+            return None
+        cols, rows = grid_shape(index_of)
+        canvas_w, canvas_h = pixmap.width(), pixmap.height()
+        local_boxes, frame_sizes, content_in_frame = [], [], []
+        for i in range(total):
+            cell = cell_rect(index_of, i, canvas_w, canvas_h, cols, rows)
+            r = rects[i]
+            local_boxes.append((r[0] - cell[0], r[1] - cell[1], r[2], r[3]))
+            frame_sizes.append(action_frame_size(action, i))
+            part = action.frame_parts[i][0]
+            content_in_frame.append((part[1], part[2]))
+        max_w = max(s[0] for s in frame_sizes)
+        max_h = max(s[1] for s in frame_sizes)
+        offsets = compute_source_anchor_offsets(local_boxes, frame_sizes, content_in_frame,
+                                                max_w, max_h, action.padding)
+        return offsets, f"按精灵图均分格（{cols}×{rows}）把每帧放回它那一格里的位置（不是估的）"
+
     def _auto_align_reason(self, action) -> str:
         """能不能按「原图锚点」**精确**补回偏移；不能就说清是为什么。
 
@@ -4549,9 +4596,11 @@ class MainWindow(QMainWindow):
         """「自动对齐」：算好逐帧偏移写回去。
 
         用户口径：**只改帧的偏移数据** —— 锚点、padding、帧图像、尺寸一概不碰。
-        两条路，自己判断走哪条（用户要求"你可以自己确定"）：
-          * **精确**：原图是整帧画面时，按「原图锚点 − 紧切框中心」把每帧放回它在原图里的
-            位置（用户原话："正常切割记一次锚点、紧切再记一次，差值就是偏移量"）。
+        三条路，自己判断走哪条（用户要求"你可以自己确定"）：
+          * **均分格**（首选）：这张精灵图本身是横竖均分的 → 每格 = 正常那一帧的框，
+            紧切框在格里的落点就是它在原图里的落点，差值（误差）就是偏移。**不是估的**。
+          * **精确**：原图是整帧画面时，按「原图锚点 − 紧切框中心」把每帧放回它在原图里的位置
+            （用户原话："正常切割记一次锚点、紧切再记一次，差值就是偏移量"）。
           * **估算**：原图已经是紧切小图 / 带变换 / 多元素合成时，原始位置已经丢了，
             只能按帧间重合度去猜 —— 先弹提示说明"可能不准、建议手动核对"。
         一条撤销：改前/改后当场各抓一份快照，Ctrl+Z 能退回对齐前的偏移。
@@ -4560,23 +4609,30 @@ class MainWindow(QMainWindow):
         if action is None or len(action.frames) < 2:
             self.lbl_status.setText("自动对齐：先选一个动作（至少两帧）")
             return
-        reason = self._auto_align_reason(action)
-        data = None if reason else self._source_anchor_data(action)
-        if data is None and not reason:
-            reason = "这些帧是合成的或带了变换，原图里的位置推不出来"
-        if data is not None:
-            local_boxes, frame_sizes, content_in_frame, max_w, max_h = data
-            offsets = compute_source_anchor_offsets(
-                local_boxes, frame_sizes, content_in_frame, max_w, max_h, action.padding)
-            how = "精确：按「原图锚点 − 紧切框中心」把每帧放回它在原图里的位置"
+        # 路①：这张精灵图本身是「横竖均分」的 → 每一格就是正常那一帧的框，
+        # 紧切框在格里的位置就是原图里的位置，差值就是误差（用户口径，不是估的）
+        grid_offsets = self._grid_align_offsets(action)
+        if grid_offsets is not None:
+            offsets, how = grid_offsets
             tail = "锚点、padding、帧图像都没动 · Ctrl+Z 可退回"
         else:
-            if not self._confirm_estimate_align(reason):
-                self.lbl_status.setText("自动对齐：已取消（只能估算的那条路）")
-                return
-            offsets = compute_align_offsets(action)
-            how = f"估算（{reason}）：按帧间重合度对齐"
-            tail = "锚点、padding、帧图像都没动 —— 估的，建议手动核对那几帧 · Ctrl+Z 可退回"
+            reason = self._auto_align_reason(action)
+            data = None if reason else self._source_anchor_data(action)
+            if data is None and not reason:
+                reason = "这些帧是合成的或带了变换，原图里的位置推不出来"
+            if data is not None:
+                local_boxes, frame_sizes, content_in_frame, max_w, max_h = data
+                offsets = compute_source_anchor_offsets(
+                    local_boxes, frame_sizes, content_in_frame, max_w, max_h, action.padding)
+                how = "精确：按「原图锚点 − 紧切框中心」把每帧放回它在原图里的位置"
+                tail = "锚点、padding、帧图像都没动 · Ctrl+Z 可退回"
+            else:
+                if not self._confirm_estimate_align(reason):
+                    self.lbl_status.setText("自动对齐：已取消（只能估算的那条路）")
+                    return
+                offsets = compute_align_offsets(action)
+                how = f"估算（{reason}）：按帧间重合度对齐"
+                tail = "锚点、padding、帧图像都没动 —— 估的，建议手动核对那几帧 · Ctrl+Z 可退回"
         if not offsets:
             self.lbl_status.setText("自动对齐：这些帧本来就在该在的位置上，偏移没变")
             return
