@@ -27,6 +27,7 @@ from spritesheet.settings import (
     set_guide_selected_color, set_pixel_grid_color, set_pixel_grid_zoom,
     set_show_project_thumbnail, show_project_thumbnail,
     set_undo_limit, undo_limit,
+    set_similar_tolerance, similar_tolerance,
 )
 from spritesheet.ui.widgets import CompactSpinBox
 
@@ -153,6 +154,36 @@ class SettingsDialog(QDialog):
         hint_min.setStyleSheet("color: #9a9a9a; font-size: 11px;")
         hint_min.setContentsMargins(22, 0, 0, 0)
         layout.addWidget(hint_min)
+
+        title_sim = QLabel("相似帧")
+        title_sim.setStyleSheet("color: #F06292; font-weight: bold; font-size: 13px;")
+        layout.addWidget(title_sim)
+
+        row_sim = QHBoxLayout()
+        row_sim.addWidget(QLabel("判定容差"))
+        self.spin_similar = CompactSpinBox()
+        self.spin_similar.setRange(0, 100)
+        self.spin_similar.setSingleStep(1)
+        self.spin_similar.setValue(similar_tolerance())
+        self.spin_similar.setFixedWidth(80)
+        self.spin_similar.setFixedHeight(24)
+        self.spin_similar.valueChanged.connect(self._on_similar_changed)
+        row_sim.addWidget(self.spin_similar)
+        row_sim.addWidget(QLabel("%"))
+        row_sim.addStretch()
+        layout.addLayout(row_sim)
+
+        hint_sim = QLabel(
+            "「帧工具 · 相似帧」按这个容差给相似的帧标同一种颜色。\n"
+            "0 = 一模一样才算相似（默认；只差一个抗锯齿像素都不算）。\n"
+            "1 起步 = 允许形状/颜色有一点差别，数字越大越宽松（建议从 1~5 试着调）。\n"
+            "判定看的是「形状重合度 + 有内容处的平均色差」，透明背景不参与。\n"
+            "改完把开关按钮重新按一次生效。"
+        )
+        hint_sim.setWordWrap(True)
+        hint_sim.setStyleSheet("color: #9a9a9a; font-size: 11px;")
+        hint_sim.setContentsMargins(22, 0, 0, 0)
+        layout.addWidget(hint_sim)
 
         title_hist = QLabel("历史记录")
         title_hist.setStyleSheet("color: #F06292; font-weight: bold; font-size: 13px;")
@@ -284,6 +315,9 @@ class SettingsDialog(QDialog):
     def _on_min_area_changed(self, value: int) -> None:
         set_detect_min_area(value)
         self._update_min_preview(value)
+
+    def _on_similar_changed(self, value: int) -> None:
+        set_similar_tolerance(value)
 
     def _update_min_preview(self, value: int) -> None:
         """在 40x40 预览框里画红色方块，大小 = min(value, 32)。"""

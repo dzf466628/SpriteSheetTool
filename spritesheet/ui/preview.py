@@ -60,7 +60,9 @@ class PreviewFloatingBar(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedSize(136, 32)
+        # 宽度=三颗背景按钮（24×3 + 间距 + 边距）：撤掉放大/缩小后不能再留 136 的空档
+        # 位置由 _reposition_toolbar() 顶着画布右上角，所以缩短后自然就是右对齐
+        self.setFixedSize(86, 32)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._bg_mode = "checker"
 
@@ -68,13 +70,8 @@ class PreviewFloatingBar(QWidget):
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(2)
 
-        self.btn_zoom_in = self._make_button("zoom_in", "放大")
-        self.btn_zoom_in.clicked.connect(self.zoom_in_requested)
-        layout.addWidget(self.btn_zoom_in)
-
-        self.btn_zoom_out = self._make_button("zoom_out", "缩小")
-        self.btn_zoom_out.clicked.connect(self.zoom_out_requested)
-        layout.addWidget(self.btn_zoom_out)
+        # 放大/缩小按钮已按用户要求撤掉（「功能还在就是没必要放这里」）：缩放走滚轮/快捷键，
+        # 信号仍保留在类里，只是这里不再摆按钮。不要再加回来。
 
         # 背景切换
         self._bg_group = QButtonGroup(self)
@@ -167,6 +164,8 @@ class PreviewCanvas(QWidget):
         self._fit = True  # 初始自适应
         self._panning = False
         self._pan_start = None
+        # 必须能收键盘：不然空格键根本到不了这里（用户反馈「按住空格拖不动」多是这个）
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._toolbar = None
         # 移动模式背景滚动
         self._bg_scroll = 0.0
@@ -1734,6 +1733,36 @@ class PreviewCanvas(QWidget):
                 p.drawEllipse(rot, handle_r, handle_r)
 
 
+def build_frame_thumb(action, index: int, color=None, size: int = 36) -> QPixmap:
+    """一帧的缩略图：图像居中 + **右下角帧序号** + **右上角相似帧彩块**。
+
+    帧缩略图和抽帧窗口**共用这一份** —— 两处必须长得一样（用户要求抽帧窗口的缩略图
+    也要显示帧号和相似帧彩块）。色块画右上角，右下角留给帧序号。
+    size 可以放大（抽帧窗口要 64×64 更好认），内部留白、帧号、彩块都按比例跟着走。
+    """
+    pm = action_frame_pixmap(action, index)
+    thumb = QPixmap(size, size)
+    thumb.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(thumb)
+    if pm is not None and not pm.isNull():
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        inner = max(1, int(size * 30 / 36))
+        scaled = pm.scaled(inner, inner, Qt.AspectRatioMode.KeepAspectRatio,
+                           Qt.TransformationMode.SmoothTransformation)
+        painter.drawPixmap((size - scaled.width()) // 2, (size - scaled.height()) // 2, scaled)
+    painter.setPen(QColor("#E0E0E0"))
+    painter.setFont(QFont("Microsoft YaHei UI", max(7, int(size * 7 / 36)), QFont.Weight.Bold))
+    painter.drawText(QRect(size // 2, int(size * 20 / 36), size // 2 - 4, int(size * 12 / 36)),
+                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom, str(index + 1))
+    if color is not None:
+        side = max(8, int(size * 9 / 36))        # 相似帧彩块：右上角，跟着放大
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawRoundedRect(QRect(size - side - 3, 3, side, side), 2, 2)
+    painter.end()
+    return thumb
+
+
 class AnimAdjustPanel(QWidget):
     """帧编辑面板：只作用于**当前帧**的变换、偏移、时长、参照帧/透明度。
 
@@ -1743,6 +1772,15 @@ class AnimAdjustPanel(QWidget):
 
     changed = pyqtSignal()
     align_requested = pyqtSignal()      # 「自动对齐」：由主窗口算偏移 + 落一条撤销
+    similar_toggled = pyqtSignal(bool)  # 「相似帧」开关：True = 按下开始标色，False = 松开清掉
+    extract_requested = pyqtSignal()     # 「抽帧」：由主窗口开抽帧窗口
+    # 主窗口塞进来的两个回调，必须是**类属性**：面板构造过程中就可能 set_action →
+    # _populate_thumbs 会读它们，那时实例属性还没建（踩过一次 AttributeError）。
+    align_reason_provider = None
+    similar_color_provider = None
+    # 主窗口塞进来的回调：() → (能不能按, 为什么不能)。「相似帧」看的是**全图元素**，
+    # 所以原图上只要有两个以上元素就能按 —— 用户要求「没有添加动作或者选择的时候也可以点击」。
+    similar_enable_provider = None
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1780,11 +1818,32 @@ class AnimAdjustPanel(QWidget):
         # （要看原图是不是整帧，这是主窗口/图元那边的信息，面板自己拿不到）
         self.align_reason_provider = None
         self.btn_similar_frames = self._tool_btn(
-            "相似帧", "还没做（下一批做）—— 先占个位，不点也点不动。", enabled=False)
+            "相似帧",
+            "相似帧：按下去把**全图所有元素**里长得像的帧找出来，同一组标同一种颜色"
+            "（原图页面标在元素框右下角，帧缩略图标在右上角 —— 右下角留给帧序号）。\n"
+            "再按一下松开，标记全部消失。判定的容差在「软件设置 → 相似帧」里，默认 0 = 一模一样。\n"
+            "用途是找循环帧：状态栏会顺手报出最可能的循环长度。")
+        self.btn_similar_frames.setCheckable(True)
+        # 不同状态要看得出来：按下=粉色高亮（在 _tool_btn 的样式后面补一条 :checked 规则）
+        self.btn_similar_frames.setStyleSheet(
+            self.btn_similar_frames.styleSheet()
+            + "QPushButton:checked { background: #E91E63; color: #FFFFFF;"
+              " border: 1px solid #E91E63; }")
+        # 主窗口塞进来的回调：(动作, 帧下标) → QColor 或 None（这一帧属于哪一组相似帧）
+        self.similar_color_provider = None
         tools_row.addWidget(self.btn_auto_align)
         tools_row.addWidget(self.btn_similar_frames)
+        # 第三颗「抽帧」：点开抽帧窗口（500x600：预览 + 进度条 + 帧缩略图 + 4 个抽帧选项）
+        self.btn_extract = self._tool_btn(
+            "抽帧", "抽帧：打开抽帧窗口（500×600）—— 上面预览当前动作，中间进度条 + 帧缩略图"
+                    "（带帧序号和相似帧彩块），下面 4 个抽帧选项。\n"
+                    "这一版先把位置摆好，4 个选项还没实装。")
+        tools_row.addWidget(self.btn_extract)
         layout.addWidget(tools_wrap)
         self.btn_auto_align.clicked.connect(lambda: self.align_requested.emit())
+        self.btn_similar_frames.toggled.connect(
+            lambda on: self.similar_toggled.emit(bool(on)))
+        self.btn_extract.clicked.connect(lambda: self.extract_requested.emit())
 
         # ---- 帧变换（只作用于当前帧；整段动画参数在「动画设置」横条）----
         g1 = QGroupBox("帧变换")
@@ -2015,6 +2074,8 @@ class AnimAdjustPanel(QWidget):
         return btn
 
     def _tool_btn(self, text: str, tip: str, enabled: bool = True) -> QPushButton:
+        # 按钮一律不抢键盘焦点：否则点过按钮之后空格会去「按」它，预览就没法空格拖动了
+        # （Qt 默认行为）。空格的活儿留给画布。
         """「帧工具」那一行的按钮：跟着面板配色，比 24x24 的小图标按钮宽（要写汉字）。"""
         btn = QPushButton(text)
         btn.setToolTip(tip)
@@ -2070,6 +2131,47 @@ class AnimAdjustPanel(QWidget):
                     "只改逐帧偏移：锚点、尺寸、帧图像都不动，一条 Ctrl+Z 可退回。")
         else:
             self.btn_auto_align.setToolTip(f"自动对齐：现在用不了 —— {why}")
+
+        # 「相似帧」开关：找的是**全图所有元素**（不止这个动作），所以只要原图上有两个以上元素
+        # 就能按 —— 没加动作、没选帧的时候也能直接看原图（用户明确要求）。
+        sim_ok, why_sim = True, "原图上还没有元素"
+        if callable(self.similar_enable_provider):
+            try:
+                sim_ok, why_sim = self.similar_enable_provider()
+            except Exception:  # noqa: BLE001 — 探测失败不能影响面板同步
+                sim_ok, why_sim = False, "读不到原图元素"
+        elif action is not None and len(action.frames) >= 2:
+            sim_ok, why_sim = True, ""
+        else:
+            sim_ok = False
+            why_sim = ("先选一个动作（当前没有动作）" if action is None
+                       else "这个动作只有一帧，没有可比的帧")
+        if not self.btn_similar_frames.isChecked():
+            self.btn_similar_frames.setEnabled(bool(sim_ok))
+            if sim_ok:
+                self.btn_similar_frames.setToolTip(
+                    "相似帧：按下去把**全图所有元素**里长得像的帧找出来，同一组标同一种颜色"
+                    "（原图页面标在元素框右下角，帧缩略图标在右上角 —— 右下角留给帧序号）。\n"
+                    "再按一下松开，标记全部消失。判定容差在「软件设置 → 相似帧」里，默认 0 = 一模一样。\n"
+                    "用途是找循环帧：状态栏会顺手报出最可能的循环长度。")
+            else:
+                self.btn_similar_frames.setToolTip(f"相似帧：现在用不了 —— {why_sim}")
+
+        # 「抽帧」：得有当前动作才谈得上抽帧。动图文档模式下 actions 是空的，
+        # 那时候这颗按钮必须灰掉并写明原因 —— 不留"点了没反应"的按钮。
+        ex_ok, why_ex = (action is not None), "先选一个动作（当前没有动作）"
+        ex_provider = getattr(self, "extract_enable_provider", None)
+        if callable(ex_provider):
+            try:
+                ex_ok, why_ex = ex_provider()
+            except Exception:  # noqa: BLE001 — 探测失败不能影响面板同步
+                ex_ok, why_ex = False, "读不到当前动作"
+        self.btn_extract.setEnabled(bool(ex_ok))
+        self.btn_extract.setToolTip(
+            "抽帧：按相似度把一串**相邻**的重复帧抽稀（4 档由轻到重：抽帧3/5、1/2、1/4、强力去重）。\n"
+            "窗口里可空格拖动、调循环与帧率、实时改相似度；每档都按**这个动作的所有帧**重算，"
+            "结果实时落到当前动作，点「取消」可整轮撤回。"
+            if ex_ok else f"抽帧：现在用不了 —— {why_ex}")
 
     def set_action(self, action: Action | None):
         self._action = action
@@ -2547,6 +2649,9 @@ class ActionPreviewWidget(QWidget):
 
     frame_changed = pyqtSignal(int)
     action_changed = pyqtSignal(object)  # 当前动作切换（供「动画设置」横条同步）
+    # 主窗口塞进来的回调：(动作, 帧下标) → QColor 或 None。**类属性**：构造过程中就可能
+    # 建缩略图，那时实例属性还没建（踩过一次 AttributeError）。
+    similar_color_provider = None
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -2571,8 +2676,7 @@ class ActionPreviewWidget(QWidget):
         self.canvas = PreviewCanvas(self)
         self.toolbar = PreviewFloatingBar(self.canvas)
         self.canvas.set_toolbar(self.toolbar)
-        self.toolbar.zoom_in_requested.connect(self.canvas.zoom_in)
-        self.toolbar.zoom_out_requested.connect(self.canvas.zoom_out)
+        # 放大/缩小按钮已撤掉（功能还在：滚轮/快捷键），所以这里不再连按钮信号
         self.toolbar.bg_changed.connect(self._on_bg_changed)
 
         # 上下两块各自"成一体"，中间是可拖动分隔线：
@@ -2863,27 +2967,13 @@ class ActionPreviewWidget(QWidget):
             return
         for i in range(len(self._action.frames)):
             item = QListWidgetItem()
-            pm = action_frame_pixmap(self._action, i)
-            thumb = QPixmap(36, 36)
-            thumb.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(thumb)
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            scaled = pm.scaled(
-                30, 30,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            painter.drawPixmap(
-                (36 - scaled.width()) // 2,
-                (36 - scaled.height()) // 2,
-                scaled,
-            )
-            # 帧编号画在右下角（角标），不用 item.setText，避免文字撑大 item 导致点击偏移
-            painter.setPen(QColor("#E0E0E0"))
-            painter.setFont(QFont("Microsoft YaHei UI", 7, QFont.Weight.Bold))
-            painter.drawText(QRect(18, 20, 14, 12), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom, str(i + 1))
-            painter.end()
-            item.setIcon(QIcon(thumb))
+            _mark = None
+            if self.similar_color_provider is not None:
+                try:
+                    _mark = self.similar_color_provider(self._action, i)
+                except Exception:  # noqa: BLE001 — 标色失败绝不能影响缩略图重建
+                    _mark = None
+            item.setIcon(QIcon(build_frame_thumb(self._action, i, _mark)))
             item.setSizeHint(QSize(48, 48))
             self.thumb_list.addItem(item)
         # 重建后默认行 0；blockSignals 避免触发 currentRowChanged → _on_thumb_changed

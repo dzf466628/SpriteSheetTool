@@ -278,10 +278,16 @@ def main() -> int:
           not panel.btn_auto_align.isEnabled()
           and "谈不上对齐" in panel.btn_auto_align.toolTip(),
           panel.btn_auto_align.toolTip())
-    check("第二颗「相似帧」摆着但禁用（还没做，不留点了没反应的按钮）",
-          not panel.btn_similar_frames.isEnabled()
-          and "还没做" in panel.btn_similar_frames.toolTip(),
+    check("第二颗「相似帧」是开关，且看的是全图元素 —— 没动作也能按（用户要求直接看原图）",
+          panel.btn_similar_frames.isCheckable()
+          and panel.btn_similar_frames.isEnabled()
+          and "元素框右下角" in panel.btn_similar_frames.toolTip(),
           panel.btn_similar_frames.toolTip())
+    check("第三颗是「抽帧」且已实装（能按、四档说明在、撤回口径在、禁用原因也接上了）",
+          panel.btn_extract.isEnabled() and "抽帧3/5" in panel.btn_extract.toolTip()
+          and "撤回" in panel.btn_extract.toolTip()
+          and callable(getattr(panel, "extract_enable_provider", None)),
+          panel.btn_extract.toolTip())
 
     print("=== 8. 精灵图横竖均分：每格 = 正常那一帧，紧切框在格里的落点就是原图里的落点 ===")
     win = fresh_window(win)
@@ -293,15 +299,21 @@ def main() -> int:
     plan = []                                   # (列, 行, 帧内宽, 帧内高, 格内 x, 格内 y)
     for row in range(ROWS):
         for col in range(COLS):
-            w = 20 + 8 * ((col + row) % 3)
-            h = 30 + 5 * ((col * 2 + row) % 3)
+            # 内容：最长边 41~44（> 设置里的噪点阈值 30，不会被当碎片滤掉），
+            # 且 dx≤16 + w≤44 = 60 刚好不出格、dy≤22 + h≤44 = 66 也在 70 以内
+            w = 41 + ((col + row) % 3)
+            h = 42 + ((col * 2 + row) % 3)
             dx = 8 + 4 * col
             dy = 10 + 6 * row
             painter.fillRect(col * CW + dx, row * CH + dy, w, h, QColor("#1565C0"))
             plan.append((col, row, w, h, dx, dy))
     painter.end()
     win.image_viewer.set_pixmap(atlas)          # 用户拖单张图集的入口（走自动检测）
-    wait(1200)
+    for _ in range(50):                         # 检测在后台线程里跑，等它 settle
+        if len(win.image_viewer._frames) >= 9:  # （固定 wait 会偶发"只切出 7 个"的假失败）
+            break
+        wait(200)
+    wait(200)
     check("图集被切成 9 个元素（3×3 格各一个）",
           len(win.image_viewer._frames) == 9, f"{len(win.image_viewer._frames)} 个")
     action4 = win._create_animation_action("均分图集测试", [], 0, 9)

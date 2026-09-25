@@ -23,6 +23,7 @@ APP_NAME = "SpriteSheetTool"
 KEY_SHOW_THUMBNAIL = "project/show_thumbnail"
 KEY_LAST_DIR = "files/last_directory"
 KEY_DETECT_MIN_AREA = "detect/min_area"
+KEY_SIMILAR_TOLERANCE = "similar/tolerance"
 KEY_UNDO_LIMIT = "history/undo_limit"
 
 # ---- 视图辅助线（标线 / 每像素网格）的颜色与显示门槛 ----
@@ -112,6 +113,27 @@ def set_detect_min_area(value: int) -> None:
         _settings().setValue(KEY_DETECT_MIN_AREA, max(0, int(value)))
     except Exception as e:  # noqa: BLE001
         print(f"[settings] 写入 {KEY_DETECT_MIN_AREA} 失败: {e}", file=sys.stderr)
+
+
+def similar_tolerance() -> int:
+    """「相似帧」判定的容差（0-100）。默认 0 = **一模一样**才算相似。
+
+    用户口径：「阈值要放设置里 默认是要一模一样」—— 所以默认 0，字节级相同才同色；
+    调大以后转成"形状重合度 + 颜色差"的宽容度（呼吸动画那种小幅差异也能归一组）。
+    """
+    try:
+        value = int(_settings().value(KEY_SIMILAR_TOLERANCE, 0))
+    except Exception as e:  # noqa: BLE001
+        print(f"[settings] 读取 {KEY_SIMILAR_TOLERANCE} 失败: {e}", file=sys.stderr)
+        return 0
+    return max(0, min(100, value))
+
+
+def set_similar_tolerance(value: int) -> None:
+    try:
+        _settings().setValue(KEY_SIMILAR_TOLERANCE, max(0, min(100, int(value))))
+    except Exception as e:  # noqa: BLE001
+        print(f"[settings] 写入 {KEY_SIMILAR_TOLERANCE} 失败: {e}", file=sys.stderr)
 
 
 def undo_limit() -> int:

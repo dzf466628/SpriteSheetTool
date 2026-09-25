@@ -631,7 +631,7 @@ def _correlate_profiles(ref: list[int], prof: list[int], span: int) -> int:
     return best
 
 
-def compute_align_offsets(action: Action) -> dict[int, tuple[int, int]]:
+def compute_align_offsets(action: Action, progress=None) -> dict[int, tuple[int, int]]:
     """**事后估算**：帧间 alpha 投影互相关 → 以"内容质量中位"的那一帧为准。
 
     只在拿不到"正常切割"（原图已经是紧切小图）的时候用这条路 —— 精确那条是
@@ -657,10 +657,14 @@ def compute_align_offsets(action: Action) -> dict[int, tuple[int, int]]:
     step = 4
     profiles: dict[int, tuple[list[int], list[int]]] = {}
     mass: dict[int, int] = {}
-    for i in live:
+    for n_done, i in enumerate(live):
         cols, rows = _frame_profile(action_frame_pixmap(action, i), step)
         profiles[i] = (cols, rows)
         mass[i] = sum(cols)
+        if progress is not None:
+            # 真进度（用户要求）：逐帧取 alpha 投影 —— 这一步才是这条路的重活，
+            # 后面的互相关很便宜，所以只在这里报数
+            progress(n_done + 1, len(live))
     # 参考帧 = 内容量（投影质量）中位的那一帧，见 docstring
     order = sorted(live, key=lambda i: mass[i])
     ref_i = order[len(order) // 2]

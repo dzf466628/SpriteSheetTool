@@ -78,6 +78,11 @@ def main() -> int:
     guard.listen()
     app.aboutToQuit.connect(guard.close)
 
+    # 使用统计（只报计数、已脱敏、无开关、全静默）。**必须放在单实例守卫之后**：
+    # 第二次启动只是"把请求转交给已在跑的实例然后自己退出"，不该算一次启动。
+    from spritesheet import telemetry
+    telemetry.install()
+
     app_root = os.path.dirname(os.path.abspath(__file__))
     # The application icon is intentionally separate from the .sstool file icon.
     icon_path = os.path.join(app_root, "SpriteSheetTool.ico")

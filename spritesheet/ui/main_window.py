@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem,
 )
 
-from spritesheet import __app_name__, __version__
+from spritesheet import __app_name__, __version__, telemetry
 from spritesheet.anim import (Animation, fps_and_overrides, is_animated_file,
                               read_animation, size_warning)
 from spritesheet.project_file import (
@@ -206,9 +206,22 @@ class AboutDialog(QDialog):
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
 
+        # 软件名前面加图标（用户要求）。用**应用自己的窗口图标**，不猜文件路径：
+        # 打包/未打包、换机器都一致；拿不到图标就老老实实只显示名字，不留空白。
+        title_row = QHBoxLayout()
+        title_row.setSpacing(10)
+        _app = QApplication.instance()
+        _icon = _app.windowIcon() if _app is not None else None
+        if _icon is not None and not _icon.isNull():
+            icon_label = QLabel()
+            icon_label.setFixedSize(28, 28)
+            icon_label.setPixmap(_icon.pixmap(28, 28))
+            title_row.addWidget(icon_label)
         title = QLabel(f"SpriteSheetTool  v{__version__}")
         title.setStyleSheet("color: #ffffff; font-size: 18px; font-weight: bold;")
-        layout.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch()
+        layout.addLayout(title_row)
 
         subtitle = QLabel("精灵图打包工具：自动检测元素、按动作编排动画、自由变换、一键导出图集/GIF/JSON")
         subtitle.setStyleSheet("color: #9a9a9a; font-size: 11px;")
@@ -254,6 +267,19 @@ class AboutDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
+
+        # 最下面：官网 + 邮箱（用户要求）。做成**可点的链接**（点官网开浏览器、
+        # 点邮箱直接起草邮件），比自己抄一遍地址强；文案走同一套灰，不抢眼。
+        layout.addSpacing(10)
+        footer = QLabel(
+            "官网 <a href='https://duadu.cc' style='color:#E91E63;'>duadu.cc</a>"
+            "　·　邮箱 <a href='mailto:3140992714@qq.com' style='color:#E91E63;'>"
+            "3140992714@qq.com</a>"
+        )
+        footer.setOpenExternalLinks(True)
+        footer.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        footer.setStyleSheet("color: #9a9a9a; font-size: 11px;")
+        layout.addWidget(footer)
 
 
 class HistoryPanel(QWidget):
@@ -2315,6 +2341,20 @@ class MainWindow(QMainWindow):
         self.preview.adjust_panel.align_requested.connect(self._on_auto_align)
         # 面板只负责按结果改提示文字，判断"精确还是只能估算"要问主窗口（要读原图）
         self.preview.adjust_panel.align_reason_provider = self._auto_align_reason
+        # 「相似帧」开关：色块的实际计算/清理由主窗口做（要看全图元素，面板拿不到）
+        self.preview.adjust_panel.similar_toggled.connect(self._on_similar_toggled)
+        # 「相似帧」看的是全图元素：原图上有两个以上元素就能按（不必先加动作）
+        self.preview.adjust_panel.similar_enable_provider = self._similar_enable_state
+        self.preview.adjust_panel.extract_enable_provider = self._extract_enable_state
+        self.preview.adjust_panel.extract_requested.connect(self._on_extract)
+        # 空格 = 按住拖动（**应用级**过滤）：鼠标悬停在预览上按空格就能拖，不用先点画布拿焦点。
+        # 只靠画布自己的 keyPressEvent 不管用 —— 空格是发给有焦点控件的（用户实测拖不动）。
+        from PyQt6.QtWidgets import QApplication
+        from spritesheet.ui.space_pan import SpacePanFilter
+        self._space_pan = SpacePanFilter(self._space_pan_targets, self)
+        QApplication.instance().installEventFilter(self._space_pan)
+        # 换动作/换帧时，抽帧窗口开着就跟着刷
+        self.preview.action_changed.connect(lambda _a: self._refresh_extract_dialog())
         self.preview.canvas.transform_edit_started.connect(self._begin_transform_history)
         self.preview.canvas.transform_edit_finished.connect(self._finish_transform_history)
         self.preview.toolbar.bg_changed.connect(lambda _mode: self._mark_project_dirty())
@@ -3354,6 +3394,30 @@ class MainWindow(QMainWindow):
         # 析构里 fail-fast。
         if getattr(self, "_key_panel", None) is not None:
             self._close_key_panel()
+        # 抽帧窗口 + 各种进度框：**退出前先停表、再关**。
+        # 用户实测：关掉抽帧/导出窗口时刷屏
+        # `QWindowsBackingStore::flush: GetDC failed` + `External WM_DESTROY`。
+        # 根因是"原生窗口先被销毁，而定时器/重绘还在跑"——hideEvent/closeEvent 在
+        # 程序退出销毁原生窗口这条路上**不一定触发**，所以必须在这里主动停表。
+        dlg = getattr(self, "_extract_dialog", None)
+        if dlg is not None:
+            try:
+                dlg._timer.stop()               # 播放表
+                dlg._recalc.stop()              # 相似度攒批表
+                dlg._pending_reapply = False
+                busy = getattr(dlg, "_busy", None)
+                if busy is not None:
+                    busy.close()
+                dlg.close()
+            except Exception as e:  # noqa: BLE001
+                print(f"[shutdown] 收尾抽帧窗口失败: {e!r}", file=sys.stderr)
+        for attr in ("_similar_progress", "_align_progress", "_import_progress"):
+            prog = getattr(self, attr, None)
+            if prog is not None:
+                try:
+                    prog.close()
+                except Exception:  # noqa: BLE001
+                    pass
         super().closeEvent(event)
 
     def _handle_animated_path(self, path: str) -> bool:
@@ -3746,14 +3810,135 @@ class MainWindow(QMainWindow):
 
     def dropEvent(self, event):
         try:
-            for url in event.mimeData().urls():
-                path = url.toLocalFile()
-                # 主窗口空白处拖入：询问新建/加入当前
-                QTimer.singleShot(0, lambda p=path: self._open_path_smart(p, target="ask"))
-                event.acceptProposedAction()
-                return
+            paths = [u.toLocalFile() for u in event.mimeData().urls() if u.toLocalFile()]
         except Exception:  # noqa: BLE001
-            pass
+            return
+        if not paths:
+            return
+        event.acceptProposedAction()
+        if len(paths) > 1 or Path(paths[0]).is_dir():
+            # 多文件 / 拖文件夹：用户口径 **B2** = 依次追加成一张一张原图
+            # （以前这里只取 urls()[0]，文件夹还会静默什么都不发生 —— 一并修掉）
+            QTimer.singleShot(0, lambda ps=list(paths): self._import_image_paths(ps))
+            return
+        path = paths[0]
+        # 单个文件：保持原来的智能打开（自动找同名 JSON、询问新建/加入当前）
+        QTimer.singleShot(0, lambda p=path: self._open_path_smart(p, target="ask"))
+
+    def _load_image_with_progress(self, path: str):
+        """读一张图：**分块读文件**，大文件时给真进度条（用户要求：不要匀速假条）。
+
+        为什么这才是"真"进度：单个大图在 Qt/Pillow 里是一次性解码的，中途拿不到百分比；
+        但**读文件**是我自己干的，可以按字节报。所以进度分两段，各自如实标注：
+        读取（真实字节百分比）→ 解码（一次跳完）→ 之后检测元素交给调用方。
+        """
+        from PyQt6.QtGui import QPixmap
+        from PyQt6.QtWidgets import QProgressDialog
+        try:
+            total = os.path.getsize(path)
+        except OSError:
+            return QPixmap(path)
+        prog = None
+        data = bytearray()
+        with open(path, "rb") as fh:
+            while True:
+                chunk = fh.read(1 << 20)          # 1MB 一块
+                if not chunk:
+                    break
+                data += chunk
+                if prog is None and total > (8 << 20):   # 8MB 以上才值得弹条
+                    prog = QProgressDialog("正在读取图片……", "", 0, max(1, total), self)
+                    prog.setWindowTitle("导入图片")
+                    prog.setWindowModality(Qt.WindowModality.ApplicationModal)
+                    prog.setCancelButton(None)
+                    prog.setMinimumDuration(0)
+                    self._import_progress = prog        # 留引用：老坑
+                    prog.show()
+                if prog is not None:
+                    prog.setMaximum(max(1, total))
+                    prog.setValue(len(data))
+                    prog.setLabelText(f"正在读取图片…… {len(data) // 1024} / "
+                                      f"{max(1, total) // 1024} KB")
+                    QApplication.processEvents()
+        if prog is not None:
+            prog.setLabelText("正在解码图片……（解码是一次性的，没有中间百分比）")
+            QApplication.processEvents()
+        pm = QPixmap()
+        if not pm.loadFromData(bytes(data)):
+            pm = QPixmap(path)                    # 兜底：交回 Qt 自己读
+        if prog is not None:
+            prog.close()
+        return pm
+
+    def _expand_import_paths(self, paths):
+        """把拖进来的路径展开成"要导入的图片文件列表"（文件夹取一层，按名字排序）。"""
+        files: list[str] = []
+        skipped = 0
+        for raw in paths:
+            p = Path(raw)
+            if p.is_dir():
+                for child in sorted(p.iterdir()):
+                    if child.is_file() and child.suffix.lower() in SUPPORTED_IMAGE_EXT:
+                        files.append(str(child))
+                    elif child.is_file():
+                        skipped += 1
+            elif p.is_file() and p.suffix.lower() in SUPPORTED_IMAGE_EXT:
+                files.append(str(p))
+            else:
+                skipped += 1
+        return files, skipped
+
+    def _import_image_paths(self, paths) -> None:
+        """B2（用户选的口径）：多文件 / 拖文件夹 → **依次追加**成一张一张原图。
+
+        不拼 atlas、也不各开标签页，就是按顺序喂给 `_on_image_loaded`
+        （第一张建立工程，其余走现成的"追加图片"那条路，撤销/历史都是它原有的语义）。
+        进度是**真百分比**："第 n/N 个"，每个文件完成跳一格。
+        """
+        from PyQt6.QtWidgets import QProgressDialog
+        files, skipped = self._expand_import_paths(paths)
+        if not files:
+            self.lbl_status.setText("拖进来的东西里没有可导入的图片"
+                                    + (f"（跳过 {skipped} 个不支持的文件）" if skipped else ""))
+            return
+        prog = None
+        if len(files) > 1:
+            prog = QProgressDialog("正在导入图片……", "", 0, len(files), self)
+            prog.setWindowTitle("导入图片")
+            prog.setWindowModality(Qt.WindowModality.ApplicationModal)
+            prog.setCancelButton(None)
+            prog.setMinimumDuration(0)
+            prog.setValue(0)
+            self._import_progress = prog
+            prog.show()
+            QApplication.processEvents()
+        ok = 0
+        for n, path in enumerate(files, 1):
+            # 程序已经在退出（用户关窗口/被关掉）就立刻收手：再往死掉的窗口上刷进度、
+            # 再往正在拆的工程里塞图，正是 GetDC failed / External WM_DESTROY 刷屏的来源。
+            if QApplication.closingDown():
+                break
+            if prog is not None:
+                prog.setValue(n - 1)
+                prog.setLabelText(f"正在导入第 {n}/{len(files)} 个：{Path(path).name}")
+                QApplication.processEvents()
+            pm = self._load_image_with_progress(path)
+            if pm.isNull():
+                skipped += 1
+                continue
+            self._on_image_loaded(pm)
+            ok += 1
+            if prog is not None:
+                prog.setValue(n)
+                QApplication.processEvents()
+        if prog is not None:
+            prog.close()
+        note = f"已导入 {ok} 张原图"
+        if ok:
+            telemetry.note("import_files", ok)     # 统计：按"成功导入了几张"计
+        if skipped:
+            note += f"（跳过 {skipped} 个不支持或读不出的）"
+        self.lbl_status.setText(note)
 
     def _open_path_smart(self, path: str, target: str = "ask") -> None:
         """智能打开拖入/菜单选择的文件：图片自动找同名 JSON，JSON 走导入。
@@ -3776,7 +3961,8 @@ class MainWindow(QMainWindow):
             # 真动图先问一句怎么处理（静态图返回 False，走下面的普通导入）
             if self._handle_animated_path(path):
                 return
-            pm = QPixmap(path)
+            # 普通图片：走**分块读 + 真进度**（大文件才弹条），再交给 _on_image_loaded
+            pm = self._load_image_with_progress(path)
             if not pm.isNull():
                 self._on_image_loaded(pm)
             return
@@ -4489,6 +4675,333 @@ class MainWindow(QMainWindow):
                                                 max_w, max_h, action.padding)
         return offsets, f"按精灵图均分格（{cols}×{rows}）把每帧放回它那一格里的位置（不是估的）"
 
+    def _on_extract(self) -> None:
+        """「抽帧」按钮：开抽帧窗口（500×600，预览 + 进度条 + 缩略图 + 4 个抽帧选项）。
+
+        窗口只开一个、反复点就复用（跟预览一样，不叠一堆窗口）。非模态：开着窗口
+        照样能操作主界面。选项按钮这版只占位、禁用并写明。
+        """
+        from spritesheet.ui.extract_dialog import ExtractDialog
+        dialog = getattr(self, "_extract_dialog", None)
+        if dialog is None:
+            dialog = ExtractDialog(parent=self)
+            self._extract_dialog = dialog     # 留着引用：绝不能让它被回收
+        # 用户要求：抽帧窗口开了就**先处理它**，不能同时操作主界面 → 应用级模态
+        self._extract_origin = None       # 每次打开对话框都重新记"抽帧前"的原始状态
+        dialog.setModal(True)             # 用户要求：开了就**先处理它**，不能同时操作主界面
+        dialog.show()                     # 先显示：刷新逻辑判了 isVisible，关着就不干活
+        self._refresh_extract_dialog()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _refresh_extract_dialog(self) -> None:
+        """抽帧窗口开着的时候，把颜色回调和当前动作推过去（关着就什么都不做）。
+
+        整个包在 try 里：**Qt 槽里抛异常会直接把进程打死**（0xC0000409 那一类，
+        连 traceback 都看不到），抽帧窗口刷不动绝不能连累主界面。这里出错就打一行日志。
+        """
+        try:
+            dialog = getattr(self, "_extract_dialog", None)
+            if dialog is None or not dialog.isVisible():
+                return
+            dialog.color_provider = self._similar_color_for_frame
+            dialog.set_action(self.image_viewer.current_action)
+        except Exception as e:  # noqa: BLE001
+            print(f"[extract] 刷新抽帧窗口失败: {e!r}", file=sys.stderr)
+
+    def _extract_state_fields(self):
+        """抽帧要动的字段（每帧结构与选中元素都在这）。元素编号是全局的，绝不重排。"""
+        return ("selected_indices", "composite_groups", "frame_layouts", "frame_layouts_base",
+                "frame_offsets", "frame_durations", "frame_rotations", "frame_mirror_h",
+                "frame_mirror_v", "frame_rotation_pivots", "frame_quads", "frame_transform_modes")
+
+    def _capture_extract_state(self, action):
+        import copy
+        return {name: copy.deepcopy(getattr(action, name, None))
+                for name in self._extract_state_fields()}
+
+    def _restore_extract_state(self, action, state) -> None:
+        for name, value in (state or {}).items():
+            setattr(action, name, value)
+
+    def _on_extract_decimate(self, mode: str, tolerance: int, from_current: bool = False,
+                             progress=None):
+        """抽帧窗口按档位抽帧：**实时**落到当前动作（可撤销），返回 (新帧数, 说明文字)。
+
+        基准永远是**这个动作的所有帧**（打开窗口时记下的原始帧表）：换档位、调完相似度再抽，
+        都先还原到那份原始帧表再算，不叠着抽、也不拿抽过一次的结果当基准
+        （用户明确：「每次切换按钮 都是从这个动作所有帧选择而不是当前的帧数」）。
+
+        为什么删的是"选中元素"而不是帧条目：帧是从 selected_indices / composite_groups /
+        frame_layouts 派生出来的（image_viewer.crop_frames_for_action 重建），而且元素编号是
+        全局的，删条目会让后面所有元素重编号（撤销、布局、合成组都得跟着重映射，不值当）。
+        """
+        from spritesheet.ui.similar import (compensate_offsets, decimate_indices, group_elements,
+                                            plan_decimate, remap_frame_dict, remap_frame_set)
+        from spritesheet.ui.transform import action_frame_pixmap, action_frame_size
+        action = self.image_viewer.current_action
+        if action is None or len(action.frames) < 2:
+            return (len(action.frames) if action else 0, "帧太少，抽不动")
+        if self._action_has_composite(action):
+            # 用户口径：有合成帧时点了要提示"合并为一帧"。这里**只提示、不记快照、不改数据**，
+            # 所以档位按钮点了也只是弹这句话，什么都不会被抽掉。
+            return (len(action.frames),
+                    "这个动作里有合成帧（多个元素并成了一帧），抽帧按元素抽，用不了")
+        if getattr(self, "_extract_origin", None) is None:
+            # 第一次抽：记下原始状态（换档还原用）+ 推一份撤销快照（Ctrl+Z 回到抽之前）
+            self._extract_origin = (action, self._capture_extract_state(action))
+            self._push_snapshot("抽帧", current_only=True)
+        elif self._extract_origin[0] is action:
+            self._restore_extract_state(action, self._extract_origin[1])
+            # **必须重建帧**：还原的只是"派生源"（选中元素/合成组/布局/每帧字典），
+            # 而 action.frames 里还留着上一次抽完的那份 —— 不重建的话下一档算的就是
+            # "当前帧"而不是原始帧，四颗按钮来回切会越抽越少。
+            # 用户口径：「这几个按钮始终是按照原动作……计算的帧数来用的」，
+            # 用户实测的「切换就会混乱」就是这里漏了重建。
+            action._transform_cache = {}
+            action._base_size_cache = {}
+            action._pivot_out_cache = {}
+            self.image_viewer.crop_frames_for_action(action)
+        else:
+            self._extract_origin = (action, self._capture_extract_state(action))
+
+        pixmaps = [action_frame_pixmap(action, i) for i in range(len(action.frames))]
+        # 抽帧**绝不能让人物挪位置**：落点是 padding + (max−size)//2 + frame_offsets[i]，
+        # max 是"本动作最大那一帧"的尺寸。抽掉最大的那帧后 max 变小，(max−size)//2 跟着变小，
+        # 所有保留下来的帧就会整体往左上挪 —— 用户实测「抽帧以后后面的元素会位移」就是这个。
+        # 所以这里先把旧尺寸/旧偏移记下来，重建后逐帧补偿，让每帧落点**逐帧不变**。
+        sizes_old = {i: action_frame_size(action, i) for i in range(len(action.frames))}
+        offsets_old = dict(action.frame_offsets)
+        marks = group_elements(pixmaps, tolerance=int(tolerance), progress=progress)
+        # 统计：抽帧四档分开计数。放在这一步（真开始抽了）而不是函数入口 ——
+        # 被"有合成帧/帧太少"拦住的点击不该算成一次抽帧。
+        telemetry.note(f"decimate_{mode}")
+        keep = decimate_indices(pixmaps, marks, mode)
+        plan = plan_decimate(len(pixmaps), list(action.selected_indices),
+                             list(action.composite_groups or []), action.frame_layouts,
+                             action.frame_layouts_base, keep,
+                             # 元素总数要传：frame_source_table 必须跟 crop_frames_for_action
+                             # 一样把"索引越界"的部件跳过，否则帧号会整体错位
+                             n_elements=len(self.image_viewer._frames))
+        if not plan["removed_frames"]:
+            return (len(action.frames), "没有相邻的相似帧，这一档抽不掉东西")
+
+        action.selected_indices = [i for i in action.selected_indices
+                                   if i not in set(plan["drop_elements"])]
+        if action.composite_groups:
+            action.composite_groups = plan["keep_composite"]
+        if action.frame_layouts is not None:
+            action.frame_layouts = plan["keep_layouts"] or None
+        action.frame_layouts_base = plan["base_after"]
+        frame_map = plan["frame_map"]
+        action.frame_offsets = remap_frame_dict(action.frame_offsets, frame_map)
+        action.frame_durations = remap_frame_dict(action.frame_durations, frame_map)
+        action.frame_rotations = remap_frame_dict(action.frame_rotations, frame_map)
+        action.frame_rotation_pivots = remap_frame_dict(action.frame_rotation_pivots, frame_map)
+        action.frame_quads = remap_frame_dict(action.frame_quads, frame_map)
+        action.frame_mirror_h = remap_frame_set(action.frame_mirror_h, frame_map)
+        action.frame_mirror_v = remap_frame_set(action.frame_mirror_v, frame_map)
+        # 参照帧（洋葱皮）也是按帧号记的：**跟着重排**，被抽掉就清掉。
+        # 光靠 crop_frames_for_action 那句"越界才清"不够 —— 帧数不变时它会留着，
+        # 于是洋葱皮会指着另一帧，看起来像"某某帧被换了"。这是个很容易漏的每帧字段。
+        _ref = int(getattr(action, "ref_frame", -1) or -1)
+        action.ref_frame = frame_map.get(_ref, -1) if _ref >= 0 else -1
+        if getattr(action, "frame_transform_modes", None):
+            action.frame_transform_modes = remap_frame_dict(action.frame_transform_modes, frame_map)
+        # 帧重建 + 缓存清掉（尺寸/变换缓存是按旧帧号算的，留着会错位）
+        action._transform_cache = {}
+        action._base_size_cache = {}
+        action._pivot_out_cache = {}
+        self.image_viewer.crop_frames_for_action(action)
+        # 逐帧补偿：让每个保留帧的内容落点跟抽帧前**一模一样**（见上面 sizes_old/max_old）
+        sizes_new = {i: action_frame_size(action, i) for i in range(len(action.frames))}
+        action.frame_offsets = compensate_offsets(sizes_old, offsets_old, sizes_new, frame_map)
+        self._push_snapshot_done()
+        self.preview.set_action(action) if hasattr(self.preview, "set_action") else None
+        return (len(action.frames),
+                f"抽帧完成：{len(pixmaps)} → {len(action.frames)} 帧（Ctrl+Z 可撤回）")
+
+    def _commit_extract_state(self) -> None:
+        """点「确定」：这一轮抽帧就算定了，下次打开窗口重新记原始状态。"""
+        self._extract_origin = None
+
+    def _cancel_extract_state(self):
+        """点「取消」：把这一轮抽帧整个撤回到打开窗口时的样子。"""
+        origin = getattr(self, "_extract_origin", None)
+        self._extract_origin = None
+        if origin is None:
+            return (0, "没有要撤回的抽帧")
+        action, state = origin
+        self._restore_extract_state(action, state)
+        action._transform_cache = {}
+        action._base_size_cache = {}
+        action._pivot_out_cache = {}
+        self.image_viewer.crop_frames_for_action(action)
+        self.preview.set_action(action) if hasattr(self.preview, "set_action") else None
+        return (len(action.frames), "已撤回这次抽帧")
+
+    def _space_pan_targets(self):
+        """空格要喂「正在拖」状态的预览控件：右侧预览画布 + 抽帧窗口的预览（开着才有）。
+
+        这两个控件都有 `_panning` / `_pan_start` 与左键拖动逻辑，喂状态即可，不用它们拿焦点。
+        """
+        targets = [getattr(self.preview, "canvas", None)]
+        dialog = getattr(self, "_extract_dialog", None)
+        if dialog is not None:
+            targets.append(getattr(dialog, "preview", None))
+        return targets
+
+    def _action_has_composite(self, action) -> bool:
+        """这个动作里有没有"合成帧"（多个元素并成一帧）。
+
+        三种来源都算：composite_groups / 帧里有多个部件 / 导入布局里一帧列了多个部件。
+        用户在意的就是这类帧 —— 它们没有"单独一个元素"，所以相似色块标不出来，
+        抽帧也没法按元素抽（用户口径：有合成帧就灰 / 点了就提示"合并为一帧"）。
+        """
+        if action is None:
+            return False
+        if getattr(action, "composite_groups", None):
+            return True
+        for parts in (getattr(action, "frame_parts", None) or ()):
+            if len(parts) > 1:
+                return True
+        for layout in (getattr(action, "frame_layouts", None) or ()):
+            if len(layout) > 1:
+                return True
+        return False
+
+    def _extract_enable_state(self):
+        """「抽帧」能不能按。
+
+        动图文档模式下 `self.actions` 是空的、`current_action` 是 None（GIF/WebP 是"单张图片
+        修改"那条路，没有动作），抽帧窗口开了也没有动作可抽 —— 所以这里直接禁用并写明原因。
+        这也是为什么不需要给动图文档的操作链加"抽帧 op"：那种模式压根没有抽帧这件事。
+        """
+        if self._anim_doc is not None:
+            return False, "这是动图文档（不是动作工程），没有可抽的动作"
+        if self.image_viewer.current_action is None:
+            return False, "先选一个动作"
+        return True, ""
+
+    def _similar_enable_state(self):
+        """「相似帧」能不能按：原图上元素 ≥2 就能（不用先加动作，用户要求直接看原图也行）。
+
+        但**当前动作里有合成帧时不给按** —— 合成帧是多个元素并成一帧，没有"一个元素"
+        可以标色，按下去那些帧也只是空白（用户口径：有合成帧这个按钮就灰）。
+        """
+        if self._action_has_composite(self.image_viewer.current_action):
+            return False, "当前动作里有合成帧（多个元素并成了一帧），彩块标不了"
+        count = len(getattr(self.image_viewer, "_frames", None) or ())
+        if count >= 2:
+            return True, ""
+        if count == 1:
+            return False, "原图上只有 1 个元素，没有可比的帧"
+        return False, "原图上还没有元素（先拖一张图进来）"
+
+    def _similar_color_for_frame(self, action, i: int):
+        """帧缩略图问色：这一帧对应的元素属于哪个相似组（找不到就返回 None，不标）。"""
+        marks = self.image_viewer.similar_marks
+        if not marks or action is None:
+            return None
+        rects = action.frame_rects
+        if i < 0 or i >= len(rects):
+            return None
+        r = rects[i]
+        key = (int(r[0]), int(r[1]), int(r[2]), int(r[3]))
+        idx = getattr(self, "_similar_index_of", {}).get(key)
+        return marks.get(idx) if idx is not None else None
+
+    def _similar_group_of_frame(self, action, i: int):
+        """这一帧的元素属于第几组相似帧（没组就 None）—— 循环长度提示要用组号。"""
+        rects = action.frame_rects
+        if i < 0 or i >= len(rects):
+            return None
+        r = rects[i]
+        key = (int(r[0]), int(r[1]), int(r[2]), int(r[3]))
+        idx = getattr(self, "_similar_index_of", {}).get(key)
+        return getattr(self, "_similar_groups", {}).get(idx)
+
+    def _on_similar_toggled(self, on: bool) -> None:
+        """「相似帧」开关：按下 = 全图元素两两比、同组标同色；松开 = 两处标记一起清掉。
+
+        用户口径：① 阈值在软件设置里（默认 0 = 一模一样）；② 全图识别，新加的图也一起找；
+        ③ 不给文字信息，只用颜色；④ 缩略图色块在右上角（右下角是帧序号）；
+        ⑤ 用途是找循环帧 —— 所以状态栏顺手报出最可能的循环长度。
+        **纯显示**：一个字节的工程数据都不改，所以不落撤销、也不需要撤销。
+        """
+        from spritesheet.settings import similar_tolerance
+        from spritesheet.ui.similar import group_color, group_elements, loop_hint
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QApplication, QProgressDialog
+
+        viewer = self.image_viewer
+        if not on:
+            viewer.similar_marks = {}
+            self._similar_index_of = {}
+            self._similar_groups = {}
+            self.preview.similar_color_provider = None      # 缩略图问色的是预览控件
+            self.preview._refresh_thumbs()
+            viewer.update()
+            self.lbl_status.setText("相似帧：已松开，标记清掉了")
+            return
+
+        frames = list(viewer._frames or ())
+        pixmap = getattr(viewer, "_pixmap", None)
+        pixmaps = []
+        for r in frames:
+            x, y, w, h = int(r[0]), int(r[1]), int(r[2]), int(r[3])
+            pixmaps.append(pixmap.copy(x, y, w, h)
+                           if pixmap is not None and not pixmap.isNull() else None)
+        tolerance = similar_tolerance()
+        # 元素多的时候（你那张 289 个）要几百毫秒到一两秒，先弹个**忙碌进度条**说明在干活，
+        # 免得看起来像没反应（用户要求"出个模态窗口或者进度条提示正在检测"）。
+        progress = QProgressDialog("正在检测相似帧……", "", 0, len(pixmaps), self)
+        progress.setWindowTitle("相似帧")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setCancelButton(None)          # **真进度条**（用户要求）：不给取消，算完就关
+        progress.setMinimumDuration(0)
+        progress.setFixedWidth(320)
+        progress.setValue(0)
+        self._similar_progress = progress       # 留引用：绝不能 deleteLater 一个还带着窗口的对象
+        progress.show()
+        QApplication.processEvents()
+
+        def _tick(done, all_units):
+            # 计算期间在**应用级模态**下刷进度：用户点不到主界面，所以这里 processEvents 是安全的
+            progress.setMaximum(max(1, int(all_units)))
+            progress.setValue(min(int(done), int(all_units)))
+            progress.setLabelText(f"正在检测相似帧…… {min(int(done), int(all_units))}"
+                                  f"/{int(all_units)}")
+            QApplication.processEvents()
+
+        groups = group_elements(pixmaps, tolerance, progress=_tick)
+        telemetry.note("similar_frames")       # 统计：相似帧算了一次
+        progress.close()
+        QApplication.processEvents()
+        self._similar_index_of = {(int(r[0]), int(r[1]), int(r[2]), int(r[3])): i
+                                  for i, r in enumerate(frames)}
+        self._similar_groups = dict(groups)
+        viewer.similar_marks = {i: group_color(g) for i, g in groups.items()}
+        self.preview.similar_color_provider = self._similar_color_for_frame
+        self.preview._refresh_thumbs()
+        viewer.update()
+
+        if not groups:
+            self.lbl_status.setText(
+                f"相似帧：全图 {len(frames)} 个元素里没有长得一样的"
+                f"（容差 {tolerance}%，设置里可调）")
+            return
+        group_count = len(set(groups.values()))
+        action = viewer.current_action
+        hint = ""
+        if action is not None and len(action.frames) >= 2:
+            hint = loop_hint({i: g for i in range(len(action.frames))
+                              if (g := self._similar_group_of_frame(action, i)) is not None})
+        text = f"相似帧：找到 {group_count} 组相似帧（共 {len(groups)} 帧）"
+        if hint:
+            text += f"；{hint}"
+        self.lbl_status.setText(text)
+
     def _auto_align_reason(self, action) -> str:
         """能不能按「原图锚点」**精确**补回偏移；不能就说清是为什么。
 
@@ -4609,8 +5122,29 @@ class MainWindow(QMainWindow):
         if action is None or len(action.frames) < 2:
             self.lbl_status.setText("自动对齐：先选一个动作（至少两帧）")
             return
+        # 真进度条（用户要求）：对齐要逐帧量内容/取投影，元素多时会等几秒，
+        # 所以先摆出一条确定性进度条，算哪条路就报哪条路的进度。
+        from PyQt6.QtWidgets import QProgressDialog
+        prog = QProgressDialog("正在自动对齐……", "", 0, max(2, len(action.frames)), self)
+        prog.setWindowTitle("自动对齐")
+        prog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        prog.setCancelButton(None)          # 不给取消：算完就关（应用级模态下刷进度是安全的）
+        prog.setMinimumDuration(0)
+        prog.setValue(0)
+        self._align_progress = prog         # 留引用：带着窗口对象被回收是老坑
+        prog.show()
+        QApplication.processEvents()
+
+        def _align_tick(done, all_units):
+            prog.setMaximum(max(1, int(all_units)))
+            prog.setValue(min(int(done), int(all_units)))
+            prog.setLabelText(f"正在自动对齐…… {min(int(done), int(all_units))}/{int(all_units)}")
+            QApplication.processEvents()
+
         # 路①：这张精灵图本身是「横竖均分」的 → 每一格就是正常那一帧的框，
         # 紧切框在格里的位置就是原图里的位置，差值就是误差（用户口径，不是估的）
+        prog.setLabelText("正在自动对齐…… 判断原图是不是均分格")
+        QApplication.processEvents()
         grid_offsets = self._grid_align_offsets(action)
         if grid_offsets is not None:
             offsets, how = grid_offsets
@@ -4622,17 +5156,23 @@ class MainWindow(QMainWindow):
                 reason = "这些帧是合成的或带了变换，原图里的位置推不出来"
             if data is not None:
                 local_boxes, frame_sizes, content_in_frame, max_w, max_h = data
+                prog.setLabelText("正在自动对齐…… 按原图锚点把每帧放回去")
+                QApplication.processEvents()
                 offsets = compute_source_anchor_offsets(
                     local_boxes, frame_sizes, content_in_frame, max_w, max_h, action.padding)
                 how = "精确：按「原图锚点 − 紧切框中心」把每帧放回它在原图里的位置"
                 tail = "锚点、padding、帧图像都没动 · Ctrl+Z 可退回"
             else:
                 if not self._confirm_estimate_align(reason):
+                    prog.close()             # 估算那条路用户点了取消：进度条必须收掉再退出
                     self.lbl_status.setText("自动对齐：已取消（只能估算的那条路）")
                     return
-                offsets = compute_align_offsets(action)
+                prog.setLabelText("正在自动对齐…… 按帧间重合度估算（逐帧量内容）")
+                QApplication.processEvents()
+                offsets = compute_align_offsets(action, progress=_align_tick)
                 how = f"估算（{reason}）：按帧间重合度对齐"
                 tail = "锚点、padding、帧图像都没动 —— 估的，建议手动核对那几帧 · Ctrl+Z 可退回"
+        prog.close()                        # 偏移算完了，进度条立刻收（写数据是瞬时的）
         if not offsets:
             self.lbl_status.setText("自动对齐：这些帧本来就在该在的位置上，偏移没变")
             return
@@ -4649,6 +5189,9 @@ class MainWindow(QMainWindow):
         # 按钮是一次点击、一锤子买卖，快照里必须带着"改之前的样子"，
         # 否则 Ctrl+Z 可能退到一个跟当前动作对不上的旧状态
         self._push_snapshot("自动对齐", current_only=True)
+        # 统计：只有"真的改了偏移"才算一次自动对齐（上面那些"本来就在该在的位置上"
+        # 的早退不算，否则计数会把"点了没事发生"也记进去）
+        telemetry.note("auto_align")
         action.frame_offsets = merged
         action.invalidate_transforms()
         self.preview.set_action(action)
@@ -4671,6 +5214,14 @@ class MainWindow(QMainWindow):
                 f"已完成元素检测：当前共检测到 {len(self.image_viewer._frames)} 个元素"
             )
         self._transform_history_state = self._capture_transform_state()
+        # 检测完成后原图元素变了：①「相似帧」的可用性刷一遍；② 开关还按着的话重算一次
+        # —— 用户要求「全图识别（有别的新图也要找）」，新加图的元素自动进来。
+        try:
+            self.preview.adjust_panel._sync_align_buttons()
+            if self.preview.adjust_panel.btn_similar_frames.isChecked():
+                self._on_similar_toggled(True)
+        except Exception as e:  # noqa: BLE001 — 标色出问题不能影响检测后的正常流程
+            print(f"[similar] 检测后重算相似帧失败: {e}", file=sys.stderr)
         # 检测完成后帧集合变了：快照基线跟着刷到最新，否则之后第一次动作内改动
         # 会拿"检测前"的旧状态当 before（增量算错，甚至整条记录被吞）
         self._last_snapshot_state = self._capture_snapshot()

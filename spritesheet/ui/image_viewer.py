@@ -449,6 +449,18 @@ class _Canvas(QWidget):
                 for i, (fx, fy, fw, fh) in enumerate(self._viewer._frames):
                     rect = QRectF(offset.x() + fx * zoom, offset.y() + fy * zoom,
                                   fw * zoom, fh * zoom)
+                    # 「相似帧」标色：同一组同一种颜色，画在元素框**右下角**（用户要求）。
+                    # 缩略图那边挪到右上角（右下角留给帧序号），这里右下角是空的。
+                    # 大小跟缩放走但夹在 11~22px，缩得很小时也看得见。
+                    _mark = self._viewer.similar_marks.get(i)
+                    if _mark is not None:
+                        _sq = 11.0 * max(1.0, min(2.0, zoom))
+                        p.setPen(Qt.PenStyle.NoPen)
+                        p.setBrush(_mark)
+                        p.drawRoundedRect(
+                            QRectF(rect.right() - _sq - 1.0, rect.bottom() - _sq - 1.0, _sq, _sq),
+                            2.0, 2.0)
+                        p.setBrush(Qt.BrushStyle.NoBrush)
                     # 收集所有选中该元素的动作（按动作列表顺序）
                     selected_actions = []
                     for act in self._viewer.actions:
@@ -2007,6 +2019,8 @@ class ImageViewer(QWidget):
         self._offset = QPointF(0, 0)
         self._bg_mode = "checker"
         self._frames: list[tuple[int, int, int, int]] = []  # 自动检测的元素辅助线
+        # 「相似帧」标色：{元素下标: QColor}。开关没按下时是空字典，画布上就一个色块都不画。
+        self.similar_marks: dict[int, "QColor"] = {}
         # 元素的「逻辑坐标」：仅用于计算元素之间的相对位置（合成帧拼接间距）。
         # 为空时逻辑坐标 = _frames 的左上角（正常手工流程）；
         # 从 JSON 导入时，图块被重新打包过，这里会填入 JSON 记录的元素原始坐标，
