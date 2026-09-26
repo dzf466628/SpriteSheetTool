@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QVBoxLayout, QWidget,
 )
 
+from spritesheet import telemetry
 from spritesheet.anim import is_animated_file, plan_frame_offsets
 from spritesheet.settings import (
     detect_min_area, guide_color, guide_selected_color, last_directory, pixel_grid_color,
@@ -3155,6 +3156,7 @@ class ImageViewer(QWidget):
         action = self.current_action
         if action is None or not action.frames:
             return
+        telemetry.track("导出选中PNG")
         folder = QFileDialog.getExistingDirectory(self, "导出选中帧 PNG 到文件夹")
         if not folder:
             return
@@ -4532,6 +4534,7 @@ class ImageViewer(QWidget):
                 if self._toolbar is not None and self._toolbar.btn_pixel_perfect.isChecked():
                     self._toolbar.btn_pixel_perfect.setChecked(False)
                 return
+            telemetry.track("完美像素")
             self._pp_prev = (self._zoom, QPointF(self._offset))
             self.pixel_perfect = True
             self.zoom_actual_pixel()

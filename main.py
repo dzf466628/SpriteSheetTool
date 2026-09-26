@@ -81,7 +81,8 @@ def main() -> int:
     # 使用统计（只报计数、已脱敏、无开关、全静默）。**必须放在单实例守卫之后**：
     # 第二次启动只是"把请求转交给已在跑的实例然后自己退出"，不该算一次启动。
     from spritesheet import telemetry
-    telemetry.install()
+    telemetry.start()        # 发 start（软件名/版本/脱敏身份在 telemetry 里）
+    telemetry.heartbeat()    # 起心跳线程：每 60 秒一包，退出时自动发 exit
 
     app_root = os.path.dirname(os.path.abspath(__file__))
     # The application icon is intentionally separate from the .sstool file icon.

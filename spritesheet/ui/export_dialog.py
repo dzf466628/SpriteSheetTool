@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
     QRadioButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
-from spritesheet import __app_name__, __version__
+from spritesheet import __app_name__, __version__, telemetry
 from spritesheet.project_file import write_project
 from spritesheet.settings import last_directory, set_last_directory
 from spritesheet.ui.exporters import (
@@ -1099,6 +1099,13 @@ class ExportDialog(QDialog):
         selected = self.selected_actions()
         if not selected and not (self.cb_project.isChecked() and self._project_provider):
             raise ValueError("请至少选择一个导出动作")
+        telemetry.track("导出图集PNG")
+        if self.export_gif():
+            telemetry.track("导出GIF")
+        if self.export_json():
+            telemetry.track("导出JSON")
+        if self.cb_project.isChecked():
+            telemetry.track("导出工程文件")
         picked = Path(directory)
         # 落点：超过两个文件就先建一层以工程名命名的文件夹（规则见 target_root）
         root = self.target_root(picked, suffix)

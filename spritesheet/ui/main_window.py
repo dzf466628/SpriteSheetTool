@@ -1947,6 +1947,11 @@ class MainWindow(QMainWindow):
     def _remember_dialog_path(self, path: str | Path | None) -> None:
         set_last_directory(path)
 
+    def _on_save_action(self) -> None:
+        """菜单「保存工程」：只在这一条入口计数（自动保存不走这里）。"""
+        telemetry.track("保存工程")
+        self._save_project()
+
     def _save_project_as(self) -> bool:
         path, _ = QFileDialog.getSaveFileName(
             self, "保存 SSTOOL 工程",
@@ -1957,6 +1962,7 @@ class MainWindow(QMainWindow):
             return False
         if not path.lower().endswith(".sstool"):
             path += ".sstool"
+        telemetry.track("工程另存为")
         self._remember_dialog_path(path)
         return self._save_project(path)
 
@@ -1965,12 +1971,14 @@ class MainWindow(QMainWindow):
 
         入口在 文件 → 新建工程（Ctrl+N），也可以双击标签栏空白处。
         """
+        telemetry.track("新建工程")
         self._new_tab()
 
     def _open_project_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "打开 SSTOOL 工程", self._dialog_start(), "SSTOOL 工程 (*.sstool)")
         if path:
+            telemetry.track("打开工程")
             self._remember_dialog_path(path)
             self._open_project(path)
 
@@ -2668,7 +2676,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(act_open_project)
         act_save = QAction("保存工程", self)
         act_save.setShortcut(QKeySequence.StandardKey.Save)
-        act_save.triggered.connect(lambda: self._save_project())
+        act_save.triggered.connect(self._on_save_action)
         file_menu.addAction(act_save)
         act_save_as = QAction("工程另存为…", self)
         act_save_as.triggered.connect(self._save_project_as)
@@ -2725,10 +2733,12 @@ class MainWindow(QMainWindow):
 
     def _check_update_manual(self):
         """手动检查：始终弹窗反馈结果（入口在 编辑 → 软件设置…）。"""
+        telemetry.track("检查更新")
         self._start_update_check(notify_no_update=True)
 
     def _open_settings(self) -> None:
         """编辑 → 软件设置…：工程缩略图开关 + 辅助线颜色/网格门槛 + 检查更新。"""
+        telemetry.track("打开设置")
         dialog = SettingsDialog(self, check_update=self._check_update_manual)
         # 辅助线颜色/网格门槛是"看着调"的东西：改完立刻重画，不用关弹窗再刷新
         dialog.view_colors_changed.connect(self._on_view_colors_changed)
@@ -2752,6 +2762,7 @@ class MainWindow(QMainWindow):
 
     def _open_history(self) -> None:
         """工具栏"历史"/编辑菜单：显示/隐藏历史记录卡片。"""
+        telemetry.track("历史记录面板")
         self._show_history(not self._history_shown())
 
     def _show_history(self, show: bool) -> None:
@@ -2855,6 +2866,9 @@ class MainWindow(QMainWindow):
             self._close_key_panel()
             self.lbl_status.setText(self._TOOL_NEEDS_IMAGE.get(name, "先添加图片，再用这个工具"))
             return
+        if name:
+            telemetry.track({"source": "原图选择", "key": "幕布取色", "brush": "画笔",
+                             "eraser": "橡皮擦", "pick": "吸管"}[name])
         bar.set_active_tool(name)
         viewer.set_source_tool(name == "source")
         viewer.set_paint_tool(name if name in ("brush", "eraser", "pick") else None)
@@ -3102,6 +3116,7 @@ class MainWindow(QMainWindow):
 
     def _apply_key_panel(self, keyed, stats: dict) -> None:
         """把抠好的结果换成原图：记一条全局撤销，Ctrl+Z 能整个撤回来。"""
+        telemetry.track("抠除背景")
         viewer = self.image_viewer
         if keyed is None or keyed.isNull():
             return
@@ -3485,6 +3500,7 @@ class MainWindow(QMainWindow):
             self, "导入 JSON 工程", self._dialog_start(), "精灵图 JSON (*.json)"
         )
         if path:
+            telemetry.track("导入JSON工程")
             self._remember_dialog_path(path)
             self._import_project(path)
 
@@ -3935,7 +3951,7 @@ class MainWindow(QMainWindow):
             prog.close()
         note = f"已导入 {ok} 张原图"
         if ok:
-            telemetry.note("import_files", ok)     # 统计：按"成功导入了几张"计
+            telemetry.track("导入图片", ok)         # 统计：按「成功导入了几张」计
         if skipped:
             note += f"（跳过 {skipped} 个不支持或读不出的）"
         self.lbl_status.setText(note)
@@ -4050,6 +4066,7 @@ class MainWindow(QMainWindow):
         if self.image_viewer._pixmap is None or self.image_viewer._pixmap.isNull():
             self._open_image()
         else:
+            telemetry.track("添加动作")
             self._create_action()
 
     def _append_action_card(self, action: Action) -> ActionCardWidget:
@@ -4205,8 +4222,10 @@ class MainWindow(QMainWindow):
     def _on_anim_doc_convert(self) -> None:
         """横条上那个转换按钮：按当前模式决定方向（动图文档 ⇄ 序列帧）。"""
         if self._anim_doc is not None:
+            telemetry.track("转为序列帧")
             self._convert_anim_doc_to_frames()
         elif self._anim_source is not None:
+            telemetry.track("转为动图文档")
             self._convert_frames_to_anim_doc()
 
     def _live_animation_durations(self) -> list[int]:
@@ -4681,6 +4700,7 @@ class MainWindow(QMainWindow):
         窗口只开一个、反复点就复用（跟预览一样，不叠一堆窗口）。非模态：开着窗口
         照样能操作主界面。选项按钮这版只占位、禁用并写明。
         """
+        telemetry.track("打开抽帧窗口")
         from spritesheet.ui.extract_dialog import ExtractDialog
         dialog = getattr(self, "_extract_dialog", None)
         if dialog is None:
@@ -4775,7 +4795,8 @@ class MainWindow(QMainWindow):
         marks = group_elements(pixmaps, tolerance=int(tolerance), progress=progress)
         # 统计：抽帧四档分开计数。放在这一步（真开始抽了）而不是函数入口 ——
         # 被"有合成帧/帧太少"拦住的点击不该算成一次抽帧。
-        telemetry.note(f"decimate_{mode}")
+        telemetry.track({"keep_3_5": "抽帧3/5", "keep_1_2": "抽帧1/2",
+                         "keep_1_4": "抽帧1/4", "dedupe": "抽帧强力去重"}.get(mode, "抽帧"))
         keep = decimate_indices(pixmaps, marks, mode)
         plan = plan_decimate(len(pixmaps), list(action.selected_indices),
                              list(action.composite_groups or []), action.frame_layouts,
@@ -5001,7 +5022,7 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
         groups = group_elements(pixmaps, tolerance, progress=_tick)
-        telemetry.note("similar_frames")       # 统计：相似帧算了一次
+        telemetry.track("相似帧")                # 统计：相似帧算了一次
         progress.close()
         QApplication.processEvents()
         self._similar_index_of = {(int(r[0]), int(r[1]), int(r[2]), int(r[3])): i
@@ -5217,7 +5238,7 @@ class MainWindow(QMainWindow):
         self._push_snapshot("自动对齐", current_only=True)
         # 统计：只有"真的改了偏移"才算一次自动对齐（上面那些"本来就在该在的位置上"
         # 的早退不算，否则计数会把"点了没事发生"也记进去）
-        telemetry.note("auto_align")
+        telemetry.track("自动对齐")
         action.frame_offsets = merged
         action.invalidate_transforms()
         self.preview.set_action(action)
