@@ -4916,6 +4916,68 @@ class MainWindow(QMainWindow):
         self.preview.set_action(action) if hasattr(self.preview, "set_action") else None
         return (len(action.frames), "已撤回这次抽帧")
 
+    def _delete_action_frame(self, action, index: int) -> bool:
+        """删除动作里的第 index 帧（预览/抽帧缩略图右键共用）。
+
+        帧是从选中元素 / 合成组 / 帧布局**派生**的（元素编号全局、绝不重排），
+        所以不能直接 pop action.frames —— 否则派生源与帧表错位。这里走抽帧的
+        同一套删帧管道（plan_decimate + 每帧字典重排 + 重建帧 + 偏移补偿）：
+        行为与抽帧一致 —— 只在这一帧出现、别的帧不用的元素会一并删掉；
+        删后每帧落点逐帧不变（补偿那一套）。推一条撤销快照，Ctrl+Z 可撤回。
+        帧数唯一时拒绝删除（动作空帧会让预览/导出无意义）。
+        """
+        if action is None or index < 0 or index >= len(action.frames):
+            return False
+        if len(action.frames) <= 1:
+            return False
+        from spritesheet.ui.similar import (compensate_offsets, plan_decimate,
+                                            remap_frame_dict, remap_frame_set)
+        from spritesheet.ui.transform import action_frame_size
+        keep = [i for i in range(len(action.frames)) if i != index]
+        # 落点补偿基准：删除前的尺寸/偏移（同抽帧，见 _on_extract_decimate）
+        sizes_old = {i: action_frame_size(action, i) for i in range(len(action.frames))}
+        offsets_old = dict(action.frame_offsets)
+        plan = plan_decimate(len(action.frames), list(action.selected_indices),
+                             list(action.composite_groups or []), action.frame_layouts,
+                             action.frame_layouts_base, keep,
+                             # 元素总数要传：frame_source_table 必须跟 crop_frames_for_action
+                             # 一样把"索引越界"的部件跳过，否则帧号会整体错位
+                             n_elements=len(self.image_viewer._frames))
+        if not plan["removed_frames"]:
+            return False
+        telemetry.track("删除此帧")
+        # 快照记删除前状态（必须在改动之前推）
+        self._push_snapshot("删除帧", current_only=True)
+        action.selected_indices = plan["keep_selected"]
+        if action.composite_groups:
+            action.composite_groups = plan["keep_composite"]
+        if action.frame_layouts is not None:
+            action.frame_layouts = plan["keep_layouts"] or None
+        action.frame_layouts_base = plan["base_after"]
+        frame_map = plan["frame_map"]
+        action.frame_offsets = remap_frame_dict(action.frame_offsets, frame_map)
+        action.frame_durations = remap_frame_dict(action.frame_durations, frame_map)
+        action.frame_rotations = remap_frame_dict(action.frame_rotations, frame_map)
+        action.frame_rotation_pivots = remap_frame_dict(action.frame_rotation_pivots, frame_map)
+        action.frame_quads = remap_frame_dict(action.frame_quads, frame_map)
+        action.frame_mirror_h = remap_frame_set(action.frame_mirror_h, frame_map)
+        action.frame_mirror_v = remap_frame_set(action.frame_mirror_v, frame_map)
+        # 参照帧（洋葱皮）也是按帧号记的：跟着重排，被删掉就清掉（同抽帧的处理）
+        _ref = int(getattr(action, "ref_frame", -1) or -1)
+        action.ref_frame = frame_map.get(_ref, -1) if _ref >= 0 else -1
+        if getattr(action, "frame_transform_modes", None):
+            action.frame_transform_modes = remap_frame_dict(action.frame_transform_modes, frame_map)
+        # 帧重建 + 缓存清掉（尺寸/变换缓存按旧帧号算的，留着会错位）
+        action._transform_cache = {}
+        action._base_size_cache = {}
+        action._pivot_out_cache = {}
+        self.image_viewer.crop_frames_for_action(action)
+        # 补偿：让每个保留帧的内容落点跟删除前**一模一样**
+        sizes_new = {i: action_frame_size(action, i) for i in range(len(action.frames))}
+        action.frame_offsets = compensate_offsets(sizes_old, offsets_old, sizes_new, frame_map)
+        self._push_snapshot_done()
+        return True
+
     def _space_pan_targets(self):
         """空格要喂「正在拖」状态的预览控件：右侧预览画布 + 抽帧窗口的预览（开着才有）。
 

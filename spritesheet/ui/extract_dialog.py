@@ -31,7 +31,7 @@ import sys
 from PyQt6.QtCore import QPointF, QSize, Qt, QTimer
 from PyQt6.QtGui import QColor, QCursor, QIcon, QPainter
 from PyQt6.QtWidgets import (QApplication, QButtonGroup, QDialog, QFrame, QHBoxLayout,
-                             QLabel, QListWidget, QListWidgetItem, QProgressDialog,
+                             QLabel, QListWidget, QListWidgetItem, QMenu, QProgressDialog,
                              QPushButton, QSizeGrip, QSlider, QVBoxLayout, QWidget)
 
 from .models import Action
@@ -241,6 +241,8 @@ class ExtractDialog(QDialog):
             "QListWidget::item:selected { background: rgba(233,30,99,0.25);"
             " border: 1px solid #E91E63; }")
         self.thumb_list.currentRowChanged.connect(self._on_thumb_row)
+        self.thumb_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.thumb_list.customContextMenuRequested.connect(self._on_thumb_context_menu)
         layout.addWidget(self.thumb_list)
 
         layout.addWidget(self.title)      # 「预览 · 动作名（N 帧）」在缩略图下面（用户指定位置）
@@ -434,6 +436,51 @@ class ExtractDialog(QDialog):
     def _on_thumb_row(self, row: int) -> None:
         if row >= 0 and row != self._frame:
             self._set_frame(row)
+
+    # ---- 缩略图右键：删除此帧 ----
+
+    def _on_thumb_context_menu(self, pos) -> None:
+        """缩略图右键菜单：「删除此帧」—— 这一帧从当前动作里消失。
+
+        删除落在窗口的 `_extract_origin` 罩子里：点「取消」这一帧还原回来，
+        点「确定」/直接关窗就定案（与抽帧同一套打开窗口 + 取消/确定的语义）。
+        """
+        built = self._build_thumb_menu(pos)
+        if built is None:
+            return
+        menu, act_del, row, can_del = built
+        if menu.exec(self.thumb_list.mapToGlobal(pos)) is act_del and can_del:
+            self._delete_thumb_frame(row)
+
+    def _build_thumb_menu(self, pos):
+        """只建菜单不弹（为了能测）：返回 (menu, 删除动作, 行号, 可否删除)。"""
+        item = self.thumb_list.itemAt(pos)
+        if item is None or self._action is None:
+            return None
+        row = self.thumb_list.row(item)
+        menu = QMenu(self.thumb_list)
+        act_del = menu.addAction("删除此帧")
+        can_del = len(self._action.frames) > 1
+        act_del.setEnabled(can_del)
+        if not can_del:
+            act_del.setToolTip("动作至少要保留一帧")
+        return menu, act_del, row, can_del
+
+    def _delete_thumb_frame(self, row: int) -> None:
+        win = self._main_window()
+        action = self._action
+        if win is None or action is None:
+            return
+        if not (0 <= row < len(action.frames)) or len(action.frames) <= 1:
+            return
+        # 先抓住原始状态：保证「取消」能把这帧还原回来（与第一次抽帧同条件 ——
+        # 只右键删帧不点档位时，origin 还没有，必须先补上）
+        if getattr(win, "_extract_origin", None) is None:
+            win._extract_origin = (action, win._capture_extract_state(action))
+        if win._delete_action_frame(action, row):
+            # set_action 会重建预览 + 缩略图 + 帧数标题，并对同一 action 保留
+            # 当前帧号（夹紧到新长度）、重标相似彩块（_recalc_marks）
+            self.set_action(action)
 
     def _set_frame(self, index: int) -> None:
         self._frame = index

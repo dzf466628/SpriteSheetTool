@@ -12,6 +12,7 @@
 - ``CompactComboBox`` / ``CompactSpinBox`` / ``EditableNumberLabel`` / ``SwitchWidget``：
   深色紧凑控件（覆盖系统原生白底箭头/上下按钮）；
 - ``ActionThumbPlayer``：动作缩略循环播放器；
+- ``HoverHScrollBar``：缩略图条的水平滚动条（轨道加高 + hover 滑块渐亮放大动画）；
 - ``_SLIDER_QSS`` / ``_GROUP_QSS``：面板级 QSS 常量。
 
 依赖方向：models ← transform ← widgets（本模块不依赖 main_window，避免循环 import）。
@@ -22,8 +23,8 @@ import math
 from pathlib import Path
 
 from PyQt6.QtCore import (
-    QEasingCurve, QEvent, QPointF, QRect, QRectF, QSize, QTimer, Qt, QVariantAnimation,
-    pyqtSignal,
+    QEasingCurve, QEvent, QPointF, QPropertyAnimation, QRect, QRectF, QSize, QTimer, Qt,
+    QVariantAnimation, pyqtProperty, pyqtSignal,
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QFont, QFontMetricsF, QIcon, QPainter, QPen, QPixmap, QPolygonF,
@@ -31,7 +32,8 @@ from PyQt6.QtGui import (
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QSizePolicy, QSpinBox, QStyledItemDelegate, QStyle, QWidget,
+    QScrollBar, QSizePolicy, QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionSlider,
+    QWidget,
 )
 
 from .models import MACARON_COLORS
@@ -1597,3 +1599,100 @@ def paint_checkerboard(painter: QPainter, rect: QRect, cell: int,
         return
     cell = max(1, int(cell))
     painter.drawTiledPixmap(rect, checker_tile(cell, color_a, color_b))
+
+
+# ---------------- 带悬浮动画的横向滚动条 ----------------
+
+class HoverHScrollBar(QScrollBar):
+    """缩略图条的水平滚动条：轨道加高到 16px + hover 滑块渐亮放大（150ms 过渡）。
+
+    QSS 的尺寸/颜色切换是瞬变的，做不出过渡 —— 所以自绘：``paintEvent`` 按
+    ``hover_t``（QPropertyAnimation 驱动，0→1）插值滑块高度、颜色与描边。
+    滚动行为（拖滑块 / 点轨道 / 滚轮）全部交给基类，这里只画、不碰行为。
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        # 条带 8px = 滑块尺寸：黑底与缩略图贴合，不再多出 16px 高的黑色块
+        self.setFixedHeight(8)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+        self._hover_t = 0.0
+        self._anim = QPropertyAnimation(self, b"hover_t", self)
+        self._anim.setDuration(150)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    # ---- hover 进度（QPropertyAnimation 驱动）----
+    def _get_hover_t(self) -> float:
+        return self._hover_t
+
+    def _set_hover_t(self, value: float) -> None:
+        self._hover_t = float(value)
+        self.update()
+
+    hover_t = pyqtProperty(float, _get_hover_t, _set_hover_t)
+
+    def sizeHint(self) -> QSize:
+        """滚动条在视口布局里占的实际高度。
+
+        QAbstractScrollArea 给滚动条分配的空间按 sizeHint 算（Fusion 默认 14px），
+        不重写的话条带会悄悄吃掉 6px 视口 —— 黑底又冒出来。钉死成 8px。
+        """
+        sh = super().sizeHint()
+        return QSize(sh.width(), 8)
+
+    def _slider_rect(self) -> QRect:
+        """基类按当前 value/range/pageStep 算出的滑块矩形（含 min 宽）。"""
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        return self.style().subControlRect(
+            QStyle.ComplexControl.CC_ScrollBar, opt,
+            QStyle.SubControl.SC_ScrollBarSlider, self,
+        )
+
+    def event(self, event) -> bool:  # noqa: N802 - Qt 签名
+        t = event.type()
+        if t == QEvent.Type.HoverEnter or t == QEvent.Type.HoverMove:
+            # 只有悬停在滑块上才放大；趴在轨道上不触发（省得手到处晃一直闪）
+            target = 1.0 if self._slider_rect().contains(event.position().toPoint()) else 0.0
+        elif t == QEvent.Type.HoverLeave:
+            target = 0.0
+        else:
+            return super().event(event)
+        if target != self._anim.endValue():
+            self._anim.stop()
+            self._anim.setEndValue(target)
+            self._anim.start()
+        return super().event(event)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        h = self.height()
+        t = self._hover_t
+        sr = self._slider_rect()
+        if sr.width() > 0:
+            # 轨道槽线：2px 细深灰（条带矮，槽线只做底色参照）
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#2d2d2d"))
+            p.drawRoundedRect(0, (h - 2) // 2, self.width(), 2, 1, 1)
+            # 滑块 = 条带全高（8px，填满 => 黑底=滑块，不露多余黑块）；
+            # hover 动画只做颜色渐亮 + 白描边（条带内放不下尺寸变化）
+            handle_h = h
+            handle_y = 0
+            base = QColor(102, 102, 102)
+            lit = QColor(240, 98, 146)
+            col = QColor(
+                int(base.red() + (lit.red() - base.red()) * t),
+                int(base.green() + (lit.green() - base.green()) * t),
+                int(base.blue() + (lit.blue() - base.blue()) * t),
+            )
+            p.setBrush(col)
+            p.drawRoundedRect(sr.x(), handle_y, sr.width(), handle_h,
+                              handle_h // 2, handle_h // 2)
+            if t > 0.3:
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(QColor(255, 255, 255, int(110 * t)), 1))
+                p.drawRoundedRect(sr.x() + 1, handle_y + 1, sr.width() - 2, handle_h - 2,
+                                  (handle_h - 2) // 2, (handle_h - 2) // 2)
+        p.end()

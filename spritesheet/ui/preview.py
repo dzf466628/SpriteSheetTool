@@ -23,7 +23,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-    QListWidget, QListWidgetItem, QPushButton, QScrollArea, QSizePolicy, QSlider,
+    QListWidget, QListWidgetItem, QMenu, QPushButton, QScrollArea, QSizePolicy, QSlider,
     QSplitter, QVBoxLayout, QWidget,
 )
 
@@ -36,9 +36,9 @@ from .transform import (
     frame_pivot_in_pixmap, frame_pivot_output, transform_ratio_limit, whole_reference,
 )
 from .widgets import (
-    CompactComboBox, CompactSpinBox, EditableNumberLabel, HintToast, HoverIconButton,
-    ResponsiveButtonGrid, _BIPOLAR_SLIDER_QSS, _GROUP_QSS, _SLIDER_QSS, make_tool_icon,
-    paint_checkerboard,
+    CompactComboBox, CompactSpinBox, EditableNumberLabel, HintToast, HoverHScrollBar,
+    HoverIconButton, ResponsiveButtonGrid, _BIPOLAR_SLIDER_QSS, _GROUP_QSS, _SLIDER_QSS,
+    make_tool_icon, paint_checkerboard,
 )
 
 # 无动作时点控件的统一提示（四处入口共用一句，避免文案漂移）
@@ -2695,8 +2695,9 @@ class ActionPreviewWidget(QWidget):
         self.edit_layout.setSpacing(4)
 
         self.preview_splitter = QSplitter(Qt.Orientation.Vertical)
-        # handleWidth 必须 >0，否则分隔线拖不动（用户要求"可以独立拖动"）
-        self.preview_splitter.setHandleWidth(6)
+        # handleWidth 必须 >0，否则分隔线拖不动（用户要求"可以独立拖动"）；
+        # 用户把线调细到 2px（再细就不好拖了）
+        self.preview_splitter.setHandleWidth(2)
         self.preview_splitter.setChildrenCollapsible(False)
         self.preview_splitter.setStyleSheet(
             "QSplitter::handle { background: #3d3d3d; }"
@@ -2714,16 +2715,19 @@ class ActionPreviewWidget(QWidget):
         layout.addWidget(self.preview_splitter, 1)
 
         # 控制栏：播放/暂停 + 进度条 + 帧序号（带背景）
+        # 用户口径：黑色容器压到 15px 高（播放按钮/进度条一起缩小），
+        # 省出的垂直空间让缩略图区更突出。
         self.ctrl_widget = QWidget()
+        self.ctrl_widget.setFixedHeight(15)
         self.ctrl_widget.setStyleSheet("background-color: #1a1a1a; border: none; border-radius: 4px;")
         ctrl = QHBoxLayout(self.ctrl_widget)
-        ctrl.setContentsMargins(6, 4, 6, 4)
+        ctrl.setContentsMargins(6, 1, 6, 1)
         ctrl.setSpacing(6)
 
         self.btn_play = QPushButton()
-        self.btn_play.setFixedSize(24, 24)
-        self.btn_play.setIcon(make_tool_icon("play", 16))
-        self.btn_play.setIconSize(QSize(16, 16))
+        self.btn_play.setFixedSize(13, 13)
+        self.btn_play.setIcon(make_tool_icon("play", 10))
+        self.btn_play.setIconSize(QSize(10, 10))
         self.btn_play.setToolTip("播放/暂停")
         self.btn_play.setStyleSheet(
             "QPushButton { background: transparent; border: none; border-radius: 3px; }"
@@ -2735,7 +2739,7 @@ class ActionPreviewWidget(QWidget):
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, 0)
         self.slider.setValue(0)
-        self.slider.setFixedHeight(10)
+        self.slider.setFixedHeight(9)
         self.slider.setStyleSheet(
             "QSlider::groove:horizontal { height: 1px; background: #3d3d3d; border-radius: 1px;}"
             "QSlider::handle:horizontal { width: 6px; height: 6px; margin: -2px 0; background: #E91E63; border-radius: 3px;}"
@@ -2745,7 +2749,8 @@ class ActionPreviewWidget(QWidget):
         ctrl.addWidget(self.slider, 1)
 
         self.lbl_frame = QLabel("0/0")
-        self.lbl_frame.setStyleSheet("color: #bdbdbd; font-size: 11px; background: transparent; border: none;")
+        self.lbl_frame.setStyleSheet("color: #bdbdbd; font-size: 10px; background: transparent; border: none;")
+        self.lbl_frame.setFixedHeight(13)
         self.lbl_frame.setMinimumWidth(40)
         ctrl.addWidget(self.lbl_frame)
 
@@ -2754,10 +2759,11 @@ class ActionPreviewWidget(QWidget):
 
         # 帧缩略图
         self.thumb_list = QListWidget()
-        self.thumb_list.setFixedHeight(52)
+        # 56 = 48 图标格 + 8 滚动条条带：黑底贴合缩略图，不再多出一截黑色块
+        self.thumb_list.setFixedHeight(56)
         # IconMode + 固定 gridSize + item.setSizeHint，点击区域与格子完全一致
         self.thumb_list.setViewMode(QListWidget.ViewMode.IconMode)
-        self.thumb_list.setIconSize(QSize(36, 36))
+        self.thumb_list.setIconSize(QSize(44, 44))
         self.thumb_list.setResizeMode(QListWidget.ResizeMode.Fixed)
         self.thumb_list.setMovement(QListWidget.Movement.Static)
         self.thumb_list.setFlow(QListWidget.Flow.LeftToRight)
@@ -2766,12 +2772,16 @@ class ActionPreviewWidget(QWidget):
         self.thumb_list.setGridSize(QSize(48, 48))
         self.thumb_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.thumb_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 横向滚动条自绘：条带 8px 贴合缩略图 + hover 滑块渐亮动画
+        self.thumb_list.setHorizontalScrollBar(HoverHScrollBar(self.thumb_list))
         self.thumb_list.setStyleSheet(
-            "QListWidget { background: #1a1a1a; border: none; border-radius: 4px; padding: 2px; }"
+            "QListWidget { background: #1a1a1a; border: none; border-radius: 4px; padding: 0px; }"
             "QListWidget::item { border: 1px solid #555555; border-radius: 3px; background: transparent; }"
             "QListWidget::item:selected { background: rgba(233,30,99,0.25); border: 1px solid #E91E63; }"
         )
         self.thumb_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.thumb_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.thumb_list.customContextMenuRequested.connect(self._on_thumb_context_menu)
         self.thumb_list.currentRowChanged.connect(self._on_thumb_changed)
         self.thumb_list.itemSelectionChanged.connect(self._on_thumb_selection_changed)
         preview_box_layout.addWidget(self.thumb_list)
@@ -2888,7 +2898,9 @@ class ActionPreviewWidget(QWidget):
             return
         ctrl_h = self.ctrl_widget.sizeHint().height()
         thumb_h = self.thumb_list.height() or self.thumb_list.sizeHint().height()
-        top = min(self.PREVIEW_CANVAS_H + ctrl_h + thumb_h + 8, max(120, total - 160))
+        # 分隔线默认位置再往下沉 3px（用户口径「向下移动3像素」）：
+        # +3 加在上半块（预览）的基准里，线就跟着下移
+        top = min(self.PREVIEW_CANVAS_H + ctrl_h + thumb_h + 8 + 3, max(120, total - 160))
         bottom = max(self.edit_box.minimumHeight(), total - top)
         self.preview_splitter.setSizes([int(top), int(bottom)])
 
@@ -2973,7 +2985,7 @@ class ActionPreviewWidget(QWidget):
                     _mark = self.similar_color_provider(self._action, i)
                 except Exception:  # noqa: BLE001 — 标色失败绝不能影响缩略图重建
                     _mark = None
-            item.setIcon(QIcon(build_frame_thumb(self._action, i, _mark)))
+            item.setIcon(QIcon(build_frame_thumb(self._action, i, _mark, size=44)))
             item.setSizeHint(QSize(48, 48))
             self.thumb_list.addItem(item)
         # 重建后默认行 0；blockSignals 避免触发 currentRowChanged → _on_thumb_changed
@@ -3139,6 +3151,59 @@ class ActionPreviewWidget(QWidget):
             self.canvas.set_transform_mode(None)
         self._frame_index = row
         self._sync_frame()
+
+    # ---- 缩略图右键：删除此帧 ----
+
+    def _on_thumb_context_menu(self, pos) -> None:
+        """缩略图右键菜单。当前只有「删除此帧」：点它这一帧就从动作里消失。
+
+        主界面的删除推了撤销快照（Ctrl+Z 可撤回，与抽帧同一管道）。帧数唯一时
+        禁用并说明原因 —— 动作空帧会让预览/导出无意义。
+        """
+        built = self._build_thumb_menu(pos)
+        if built is None:
+            return
+        menu, act_del, row, can_del = built
+        if menu.exec(self.thumb_list.mapToGlobal(pos)) is act_del and can_del:
+            self._delete_thumb_frame(row)
+
+    def _build_thumb_menu(self, pos):
+        """只建菜单不弹（为了能测）：返回 (menu, 删除动作, 行号, 可否删除)。"""
+        item = self.thumb_list.itemAt(pos)
+        if item is None or self._action is None:
+            return None
+        row = self.thumb_list.row(item)
+        menu = QMenu(self.thumb_list)
+        act_del = menu.addAction("删除此帧")
+        can_del = len(self._action.frames) > 1
+        act_del.setEnabled(can_del)
+        if not can_del:
+            act_del.setToolTip("动作至少要保留一帧")
+        return menu, act_del, row, can_del
+
+    def _delete_thumb_frame(self, row: int) -> None:
+        """删掉第 row 帧；若删的是当前帧，自动选中删后的同位帧。"""
+        action = self._action
+        if action is None or not (0 <= row < len(action.frames)) or len(action.frames) <= 1:
+            return
+        win = self.window()
+        deleter = getattr(win, "_delete_action_frame", None)
+        if deleter is None:
+            return
+        old_index = self._frame_index
+        if not deleter(action, row):
+            return
+        n = len(action.frames)
+        # set_action 会把播放指针归 0，这里手动落回"删后同位帧"（min 夹紧）
+        self.set_action(action)
+        if n > 0:
+            keep = min(old_index, n - 1)
+            self._frame_index = keep
+            self.slider.setValue(keep)
+            self.thumb_list.blockSignals(True)
+            self.thumb_list.setCurrentRow(keep)
+            self.thumb_list.blockSignals(False)
+            self._update_frame_label()
 
     # ---- 浮动工具条槽 ----
     def _on_bg_changed(self, mode: str):
