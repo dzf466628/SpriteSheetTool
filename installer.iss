@@ -1,6 +1,6 @@
 ; SpriteSheetTool 传统 Windows 安装向导（与 HTBCC 同样使用 Inno Setup 6）
 #define MyAppName "SpriteSheetTool"
-#define MyAppVersion "1.1.43"
+#define MyAppVersion "1.1.44"
 #define MyAppPublisher "SpriteSheetTool"
 #define MyAppExeName "SpriteSheetTool.exe"
 

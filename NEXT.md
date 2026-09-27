@@ -1020,3 +1020,48 @@ AUTO ALIGN 45/45 · DECIMATE 42/42 · SIMILAR 21/21 · SMOKE OK · 导入探针 
 - 统计链路实测：`versions = {"1.1.38":0,"1.1.40":1}`，`machines_detail` 里 `hm: DESKT***`、`v: 1.1.40`、在线；
   更新链路实测 `verify_updater.py 1.1.38` → 「服务器最高 1.1.40 > 本地 1.1.38，客户端会提示更新」，
   目录里 7 个包、证书严格校验通过。
+
+## 2026-09-27 · v1.1.44（已打包）
+
+### 1. 缩略图条（预览区底部）焕新
+- 自绘滚动条 `HoverHScrollBar`（widgets.py）：条带 16→**8px**、滑块填满条带、悬停用 `pyqtProperty
+  hover_t` + QPropertyAnimation（150ms OutCubic）做**渐亮 #666→#F06292 + 白描边**动画，命中区用
+  `_slider_rect()`（subControlRect 同口径，不点不着）。
+- 黑底贴合：`thumb_list` 高度 64→**56**（48 图标格 + 8 条带）、`iconSize` 44、grid 48×48、
+  QSS `padding: 0`（`padding: 2px` 会把 NoFrame 顶回 frameWidth=2，黑底上下零多余）；
+  **QAbstractScrollArea 按 `sizeHint()`（Fusion 14px）给滚动条占位**——只 `setFixedHeight` 无效，
+  必须重写 `sizeHint()` 返回高 8，viewport 才是完整的 48。
+- 控制条 15px：播放 / 进度条 / 帧号同步缩小（margins (6,1,6,1)、按钮 13×13 图标 10、slider 高 9、
+  帧号 10px）；分隔线 `handleWidth` 6→**2**、默认分隔线落点下移 3px。
+
+### 2. 缩略图右键「删除此帧」
+- 预览（preview.py）与抽帧窗口（extract_dialog.py）都加：`_on_thumb_context_menu` +
+  `_build_thumb_menu(返回 (menu, act_del, row, can_del))` + `_delete_thumb_frame`；
+  主入口 `main_window._delete_action_frame(action, index)`（**唯一帧拒绝**"动作至少要保留一帧"）。
+- **管道与抽帧完全一致**：`plan_decimate(keep=除 i 外全部)` + `remap_frame_dict/remap_frame_set`
+  （frame_offsets/durations/rotations/rotation_pivots/quads/transform_modes 按 str 键、
+  mirror_h/v 按 int 列表、frame_sections/rects/parts 按列表、ref_frame 重排）+ `compensate_offsets`
+  （画布落点补偿）+ `_push_snapshot("删除帧", current_only=True)` → Ctrl+Z 一步退回；
+  删完手动落回 `min(old_index, n-1)` 同位帧。
+- **抽帧窗口语义**：删前确保 `_extract_origin` 已捕获（`(action, _capture_extract_state(action))`），
+  「取消」= `_cancel_extract_state` 整轮还原（含已删帧）、「确定/关窗」= 定案。
+
+### 3. MCP 服务端大扩编（v1.1.43 只有 6 个只读工具 → v1.1.44 共 14 个）
+- **只读侧（+5）**：`project_overview`（动作清单 + 各动作首帧拼一张总览图 base64）、
+  `extract_action_frames_png`（全部帧逐帧 base64 + 每行 16 帧网格图）、`validate_project`
+  （空动作/缺帧图/rect 数不符/rect 越界 → error/warning 清单）、`find_similar_frames`
+  （按 `frame_parts` rect 集合分组 = 软件相似彩块同口径）、`trace_motion`（逐帧中心 + 位移 +
+  包围盒；**注意口径**：中心 = 画布居中 + 逐帧偏移，与软件预览一致，**不含**图集 rect 位置）。
+- **写回侧（+3）**：`update_action_meta`（fps 1~60 / loop_mode 三档 / padding 0~64 / anchor 两数
+  -1~2 / action_type / move_direction / move_speed / new_name 拒绝重名）、`delete_action`（删动作
+  含帧图段）、`remove_frames`（**只允许无合成帧/无布局的普通序列**，否则报错引导回 GUI；
+  至少保留 1 帧；重排同 GUI 删帧口径 + 清理被删帧 PNG 段）。
+- **安全**：`_backup_then_write` 写回前自动复制 `<名>.sstool.bak-<时间戳>`；**演示时抓到**
+  同秒两次写回备份互相覆盖 → 加 `-1/-2` 唯一后缀（同一文件绝不覆盖上个备份）。
+- TOOL_DEFS 单一注册源（MCP 注册 + 「MCP 设置…」对话框同步，无硬编码）。
+- **回归**：verify_mcp_server **76/76**（真机 stdio 握手 14 工具一致；变异一轮：删「全删保护」红
+  → 还原绿）；45 个 verify 脚本全量跑完 43 个自包含通过（class_members/move 是参数化工具脚本
+  本就退出 1；guides_clear/no_action_hint 两条已知红阈值 30 未动）；真猫工程（4 动作 296 帧）
+  只读冒烟全过。
+- 打包：PyInstaller onedir（spec 已带 MCP 依赖 collect_all 全家桶）+ Inno Setup
+  `installer\SpriteSheetTool_v.1.1.44.exe`。
