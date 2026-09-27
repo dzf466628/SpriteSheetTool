@@ -58,6 +58,14 @@ def _project_arg(argv: list[str]) -> str | None:
 
 
 def main() -> int:
+    # ---- MCP headless 模式：不建窗口、不建 QApplication、不进单实例守卫 ----
+    # 打包后 MCP 客户端通过 `SpriteSheetTool.exe --mcp` 启动（开发环境用
+    # `python -m spritesheet.mcp_server`，两者落到同一个 run()）。
+    # 必须放在 QApplication 创建之前：scrolled stdio 服务器只需要一个干净进程。
+    if "--mcp" in sys.argv[1:]:
+        from spritesheet.mcp_server import run
+        return run()
+
     _install_crash_logging()
     app = QApplication(sys.argv)
     # Qt 6 图片解码默认配额 256MB：超大序列帧工程（几百帧拼出的合成大图解压后

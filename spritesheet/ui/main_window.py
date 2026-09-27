@@ -2721,6 +2721,10 @@ class MainWindow(QMainWindow):
         act_settings.triggered.connect(self._open_settings)
         edit_menu.addAction(act_settings)
 
+        act_mcp = QAction("MCP 设置…", self)
+        act_mcp.triggered.connect(self._open_mcp_settings)
+        edit_menu.addAction(act_mcp)
+
         # 帮助菜单：关于（GPL 声明 + 第三方组件）
         help_menu = menubar.addMenu("帮助")
         act_about = QAction("关于 SpriteSheetTool", self)
@@ -2748,6 +2752,16 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self, check_update=self._check_update_manual)
         # 辅助线颜色/网格门槛是"看着调"的东西：改完立刻重画，不用关弹窗再刷新
         dialog.view_colors_changed.connect(self._on_view_colors_changed)
+        dialog.exec()
+
+    def _open_mcp_settings(self) -> None:
+        """编辑 → MCP 设置…：启用开关、启动命令、已注册工具、客户端配置、测试连接。
+
+        对话框 import 放在方法内：懒加载 mcp SDK 链，装没装都不影响启动速度。
+        """
+        telemetry.track("打开MCP设置")
+        from spritesheet.ui.mcp_settings_dialog import McpSettingsDialog
+        dialog = McpSettingsDialog(self)
         dialog.exec()
 
     def _on_view_colors_changed(self) -> None:

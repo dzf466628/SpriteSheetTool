@@ -46,6 +46,25 @@ def _settings() -> QSettings:
     return QSettings(ORG_NAME, APP_NAME)
 
 
+def mcp_enabled() -> bool:
+    """MCP Server 是否启用（编辑 → MCP 设置… 里的开关）。默认 True。"""
+    try:
+        value = _settings().value(KEY_MCP_ENABLED, True)
+    except Exception as e:  # noqa: BLE001 - 读不到就按默认值走
+        print(f"[settings] 读取 {KEY_MCP_ENABLED} 失败: {e}", file=sys.stderr)
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() not in ("0", "false", "no", "")
+    return bool(value)
+
+
+def set_mcp_enabled(enabled: bool) -> None:
+    try:
+        _settings().setValue(KEY_MCP_ENABLED, bool(enabled))
+    except Exception as e:  # noqa: BLE001
+        print(f"[settings] 写入 {KEY_MCP_ENABLED} 失败: {e}", file=sys.stderr)
+
+
 def show_project_thumbnail() -> bool:
     """工程文件是否内嵌缩略图。默认 True。"""
     try:

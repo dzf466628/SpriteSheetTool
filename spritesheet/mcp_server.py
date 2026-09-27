@@ -545,7 +545,7 @@ def get_action_detail(project_path: str, action_name: str) -> dict:
     返回 dict：
       {
         "name": str,
-        "frames": int,
+        "frame_count": int,
         "fps": int,
         "loop_mode": str,
         "anchor": [x, y],
@@ -607,7 +607,7 @@ def get_action_detail(project_path: str, action_name: str) -> dict:
         })
     return {
         "name": action.get("name"),
-        "frames": len(frames),
+        "frame_count": len(frames),
         "fps": fps,
         "loop_mode": action.get("loop_mode"),
         "anchor": [round(float(v), 6) for v in (action.get("anchor") or [0.5, 0.5])],
