@@ -2758,9 +2758,21 @@ class MainWindow(QMainWindow):
         """编辑 → MCP 设置…：启用开关、启动命令、已注册工具、客户端配置、测试连接。
 
         对话框 import 放在方法内：懒加载 mcp SDK 链，装没装都不影响启动速度。
+        mcp SDK 缺失（本机没执行过 pip install mcp）时给出可行动的提示，不崩溃。
         """
         telemetry.track("打开MCP设置")
-        from spritesheet.ui.mcp_settings_dialog import McpSettingsDialog
+        try:
+            from spritesheet.ui.mcp_settings_dialog import McpSettingsDialog
+        except ImportError as exc:  # noqa: BLE001 - 缺 mcp 只可能是 SDK 未安装
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self, "MCP 设置不可用",
+                "MCP 功能需要 mcp SDK，当前环境没有安装。\n\n"
+                "请在命令行执行：\n"
+                "  pip install \"mcp>=1.0\"\n\n"
+                f"（详细原因：{exc}）",
+            )
+            return
         dialog = McpSettingsDialog(self)
         dialog.exec()
 
