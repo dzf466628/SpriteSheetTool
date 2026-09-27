@@ -25,7 +25,9 @@
 from __future__ import annotations
 
 import base64
+import shutil
 import sys
+import time
 from pathlib import Path
 
 from PIL import Image
@@ -38,7 +40,9 @@ Image.MAX_IMAGE_PIXELS = None
 
 from spritesheet import __app_name__, __version__
 from spritesheet.importer import load_project
-from spritesheet.project_file import png_bytes, png_from_bytes, read_project
+from spritesheet.project_file import (  # noqa: E501
+    png_bytes, png_from_bytes, read_project, write_project,
+)
 from spritesheet.ui import exporters
 
 # ---------------------------------------------------------------------------
@@ -81,6 +85,16 @@ TOOL_DEFS = [
      "一次提取动作的全部帧：逐帧 base64 列表 + 网格总览图（看整条动画序列）"),
     ("validate_project",
      "工程健康检查：空动作、缺帧图、孤儿引用、rect 越界等，返回 error/warning 清单"),
+    ("find_similar_frames",
+     "相似帧分组：按每帧用到的元素组合分组（与软件相似帧彩块同口径），找重复帧候选"),
+    ("trace_motion",
+     "逐帧运动轨迹：内容中心点序列 + 相邻帧位移，判断动作循环是否平滑"),
+    ("update_action_meta",
+     "修改动作属性并写回工程（fps/loop/padding/锚点/类型/移动参数/重命名，写前自动备份）"),
+    ("delete_action",
+     "删除动作（含其全部帧图）并写回工程，写前自动备份"),
+    ("remove_frames",
+     "删除动作的若干帧并写回工程（同软件删帧口径重排，写前自动备份；含合成帧的动作拒绝）"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -386,7 +400,7 @@ def _paste_baked(atlas: Image.Image, bake, records: dict) -> Image.Image:
 
 
 # ---------------------------------------------------------------------------
-# 九个工具
+# 十四个工具
 # ---------------------------------------------------------------------------
 @mcp.tool(annotations={
     "title": "导入精灵图 JSON",
@@ -994,6 +1008,395 @@ def validate_project(project_path: str) -> dict:
         "action_count": len(actions),
         "summary": {"errors": error_count, "warnings": warning_count},
         "issues": issues,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 分析工具（相似分组 / 运动轨迹）——纯只读
+# ---------------------------------------------------------------------------
+def _frame_elements(action: dict, index: int):
+    """一帧用到的元素组合（规范化后做分组键）：优先 frame_parts 的 rect 集合，
+    老工程退回 frame_rects。与软件里"相似彩块按元素组合分组"是同一口径。"""
+    parts = action.get("frame_parts") or []
+    if 0 <= index < len(parts):
+        keys = sorted(tuple(int(v) for v in p[0]) for p in (parts[index] or []))
+        return tuple(keys)
+    rects = action.get("frame_rects") or []
+    if 0 <= index < len(rects):
+        return (tuple(int(v) for v in rects[index]),)
+    return None
+
+
+@mcp.tool(annotations={
+    "title": "相似帧分组",
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": False,
+})
+def find_similar_frames(project_path: str, action_name: str) -> dict:
+    """把动作的帧按「用到的元素组合」分组 —— 与软件的相似帧彩块同一口径。
+
+    同一组里的帧在软件里会标成同一种彩块颜色：它们用同一套精灵元素（rect
+    集合相同，可视为重复帧的候选）。AI 可以据此建议抽帧 / 删除重复帧。
+    注意：这里比的是"用了哪些元素"，不是像素级相似；元素相同但位置略有
+    不同的帧会进同一组（这正是软件彩块的含义）。
+
+    参数：
+      - project_path (str)：.sstool 工程的本地绝对路径；
+      - action_name (str)：动作名称（用 list_actions 查可用名称）。
+
+    返回 dict：
+      {
+        "ok": true,
+        "action": str,
+        "frame_count": int,
+        "group_count": int,
+        "groups": [
+          { "group_id": int, "frame_count": int,
+            "frames": [int, ...],      # 组内帧号（升序）
+            "rects": [[x, y, w, h], ...] }   # 该组共用的元素 rect 集合
+        ]
+      }
+
+    找不到动作时抛错误（含可用的动作名）。
+    """
+    manifest, sections = _read_checked(project_path)
+    action = _find_action(manifest, action_name)
+    count = _frame_count(action)
+    by_key: dict[tuple, list[int]] = {}
+    for index in range(count):
+        key = _frame_elements(action, index)
+        by_key.setdefault(key, []).append(index)
+    groups = []
+    for group_id, (key, frames) in enumerate(sorted(
+            by_key.items(),
+            key=lambda kv: (kv[1][0], kv[0] is None))):
+        groups.append({
+            "group_id": group_id,
+            "frame_count": len(frames),
+            "frames": frames,
+            "rects": [list(r) for r in key] if key else None,
+        })
+    return {
+        "ok": True,
+        "action": action.get("name"),
+        "frame_count": count,
+        "group_count": len(groups),
+        "groups": groups,
+    }
+
+
+@mcp.tool(annotations={
+    "title": "逐帧运动轨迹",
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": False,
+})
+def trace_motion(project_path: str, action_name: str) -> dict:
+    """逐帧内容中心点轨迹：看动作是不是位移平滑（走路/跳跃循环质量）。
+
+    每帧取内容在画布上的中心（居中摆放 + 逐帧偏移后的实际位置），返回
+    中心点序列、相邻帧位移、总位移与包围盒 —— AI 可直接判断循环是否平滑、
+    是否有跳变帧。
+
+    参数：
+      - project_path (str)：.sstool 工程的本地绝对路径；
+      - action_name (str)：动作名称（用 list_actions 查可用名称）。
+
+    返回 dict：
+      {
+        "ok": true,
+        "action": str,
+        "frame_count": int,
+        "centers": [[cx, cy], ...],          # 逐帧中心（画布坐标，含 float 中点）
+        "deltas": [[dx, dy], ...],           # 相邻帧位移（第 0 帧为 [0, 0]）
+        "bbox": [min_x, min_y, max_x, max_y],  # 中心点包围盒
+        "total_displacement": [dx, dy],      # 首帧到末帧中心位移
+      }
+
+    找不到动作时抛错误（含可用的动作名）。
+    """
+    manifest, sections = _read_checked(project_path)
+    action = _find_action(manifest, action_name)
+    count = _frame_count(action)
+    rects = action.get("frame_rects") or []
+    rotations = action.get("frame_rotations") or {}
+    offsets = action.get("frame_offsets") or {}
+    canvas = _action_canvas(action, sections)
+    max_w, max_h = canvas["max_frame"]
+    pad = int(action.get("padding") or 0)
+
+    centers: list[list[float]] = []
+    for index in range(count):
+        rect = tuple(int(v) for v in rects[index]) if index < len(rects) else (0, 0, 0, 0)
+        w, h = _rotated_size(rect[2], rect[3],
+                             int((rotations.get(str(index), 0) or 0)))
+        dx, dy = (offsets.get(str(index)) or [0, 0])
+        px = pad + (max_w - w) // 2 + int(dx or 0)
+        py = pad + (max_h - h) // 2 + int(dy or 0)
+        centers.append([px + w / 2, py + h / 2])
+    deltas: list[list[int]] = [[0, 0]]
+    for i in range(1, count):
+        deltas.append([round(centers[i][0] - centers[i - 1][0]),
+                       round(centers[i][1] - centers[i - 1][1])])
+    xs = [c[0] for c in centers]
+    ys = [c[1] for c in centers]
+    bbox = [round(min(xs or [0])), round(min(ys or [0])),
+            round(max(xs or [0])), round(max(ys or [0]))] if centers else [0, 0, 0, 0]
+    total = [round(centers[-1][0] - centers[0][0]),
+             round(centers[-1][1] - centers[0][1])] if count > 1 else [0, 0]
+    return {
+        "ok": True,
+        "action": action.get("name"),
+        "frame_count": count,
+        "centers": centers,
+        "deltas": deltas,
+        "bbox": bbox,
+        "total_displacement": total,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 写回编辑工具（改工程文件 = 破坏性操作：每次都先自动备份原文件）
+#    备份：原文件同目录生成 <名>.sstool.bak-<时间戳>，改坏了随时可回退。
+# ---------------------------------------------------------------------------
+def _backup_then_write(project_path: str, manifest: dict, sections: dict) -> str:
+    """写回前把原工程复制成带时间戳的 .bak 备份，再写回；返回备份路径。"""
+    path = Path(project_path)
+    bak = path.parent / f"{path.name}.bak-{time.strftime('%Y%m%d%H%M%S')}"
+    if path.exists():
+        shutil.copy2(path, bak)
+    write_project(path, manifest, sections)
+    return str(bak)
+
+
+def _remap_frame_fields(action: dict, keep: list[int]) -> None:
+    """按帧号重排（删除帧后）：dict 字段按 str(旧号)→str(新号) 重映射，
+    列表字段（frame_sections / frame_rects / frame_parts）只留保留帧；
+    ref_frame（洋葱皮参照帧）跟着重排、被删则清掉。与软件删帧管道同口径。"""
+    new_idx = {old: new for new, old in enumerate(keep)}
+    for key in ("frame_offsets", "frame_durations", "frame_rotations",
+                "frame_rotation_pivots", "frame_quads", "frame_transform_modes"):
+        src = action.get(key) or {}
+        remapped = {}
+        for k, v in src.items():
+            try:
+                old = int(k)
+            except (TypeError, ValueError):
+                continue
+            if old in new_idx:
+                remapped[str(new_idx[old])] = v
+        action[key] = remapped
+    for key in ("frame_mirror_h", "frame_mirror_v"):
+        src = action.get(key) or []
+        action[key] = [new_idx[i] for i in src if i in new_idx]
+    for key in ("frame_sections", "frame_rects", "frame_parts"):
+        src = action.get(key) or []
+        action[key] = [src[old] for old in keep if old < len(src)]
+    ref = action.get("ref_frame")
+    if isinstance(ref, int) and ref in new_idx:
+        action["ref_frame"] = new_idx[ref]
+    elif ref is not None:
+        action["ref_frame"] = -1
+
+
+@mcp.tool(annotations={
+    "title": "修改动作属性",
+    "readOnlyHint": False,
+    "destructiveHint": True,
+    "idempotentHint": False,
+    "openWorldHint": False,
+})
+def update_action_meta(
+    project_path: str, action_name: str,
+    new_name: str | None = None,
+    fps: int | None = None,
+    loop_mode: str | None = None,
+    padding: int | None = None,
+    anchor: list | None = None,
+    action_type: str | None = None,
+    move_direction: str | None = None,
+    move_speed: int | None = None,
+) -> dict:
+    """修改动作的属性并写回工程（自动备份原文件，改错可回退）。
+
+    只改你传了的字段；没传的保持原样。合法值：
+      - fps: 1~60（整数）；
+      - loop_mode: "loop"（循环）/ "once"（单次）/ "pingpong"（往返）；
+      - padding: 0~64（整数）；
+      - anchor: 两个数字的列表，如 [0.5, 0.5]（值域 -1~2）；
+      - action_type: 字符串（如 walk / run / jump / idle，不强制白名单）；
+      - move_direction: "left" / "right" / "up" / "down"；
+      - move_speed: 1~998（整数，移动速度，像素/帧）；
+      - new_name: 新的动作名（不能与其它动作重名）。
+
+    参数：
+      - project_path (str)：.sstool 工程的本地绝对路径；
+      - action_name (str)：要改的动作名；
+      - 其余参数均为可选；传了才改。
+
+    返回 dict：{ "ok", "action", "backup_path", "changed": {字段: 旧值→新值} }
+
+    找不到动作 / 参数非法时抛错误（含原因）；写入前已备份原文件。
+    """
+    manifest, sections = _read_checked(project_path)
+    action = _find_action(manifest, action_name)
+    changed: dict[str, list] = {}
+
+    def _set(field: str, value) -> None:
+        old = action.get(field)
+        if old != value:
+            changed[field] = [old, value]
+            action[field] = value
+
+    if fps is not None:
+        if not (1 <= int(fps) <= 60):
+            raise ValueError(f"fps 必须在 1~60 之间，收到 {fps}。")
+        _set("fps", int(fps))
+    if loop_mode is not None:
+        if loop_mode not in ("loop", "once", "pingpong"):
+            raise ValueError(
+                f"loop_mode 必须是 loop / once / pingpong，收到「{loop_mode}」。")
+        _set("loop_mode", loop_mode)
+    if padding is not None:
+        if not (0 <= int(padding) <= 64):
+            raise ValueError(f"padding 必须在 0~64 之间，收到 {padding}。")
+        _set("padding", int(padding))
+    if anchor is not None:
+        if (not isinstance(anchor, (list, tuple)) or len(anchor) != 2
+                or not all(isinstance(v, (int, float)) and -1 <= float(v) <= 2
+                           for v in anchor)):
+            raise ValueError(f"anchor 需要两个数字（-1~2），收到 {anchor!r}。")
+        _set("anchor", [round(float(v), 6) for v in anchor])
+    if action_type is not None:
+        if not str(action_type).strip():
+            raise ValueError("action_type 不能为空。")
+        _set("action_type", str(action_type).strip())
+    if move_direction is not None:
+        if move_direction not in ("left", "right", "up", "down"):
+            raise ValueError(
+                f"move_direction 必须是 left/right/up/down，收到「{move_direction}」。")
+        _set("move_direction", move_direction)
+    if move_speed is not None:
+        if not (1 <= int(move_speed) <= 998):
+            raise ValueError(f"move_speed 必须在 1~998 之间，收到 {move_speed}。")
+        _set("move_speed", int(move_speed))
+    if new_name is not None:
+        if not str(new_name).strip():
+            raise ValueError("new_name 不能为空。")
+        if (str(new_name).strip() != action_name
+                and any((a.get("name") or "") == str(new_name).strip()
+                        for a in _actions_of(manifest))):
+            raise ValueError(f"已有同名动作「{new_name}」。")
+        _set("name", str(new_name).strip())
+
+    backup = _backup_then_write(project_path, manifest, sections)
+    return {
+        "ok": True,
+        "action": action.get("name"),
+        "backup_path": backup,
+        "changed": changed,
+    }
+
+
+@mcp.tool(annotations={
+    "title": "删除动作",
+    "readOnlyHint": False,
+    "destructiveHint": True,
+    "idempotentHint": False,
+    "openWorldHint": False,
+})
+def delete_action(project_path: str, action_name: str) -> dict:
+    """从工程里删除一个动作（含它的全部帧图），并写回工程。
+
+    破坏性操作：写入前会先把原工程备份成 <名>.sstool.bak-<时间戳>，
+    改错可以直接用备份文件恢复。合成的合成大图（combined_image）不动，
+    其它动作不受影响。
+
+    参数：
+      - project_path (str)：.sstool 工程的本地绝对路径；
+      - action_name (str)：要删除的动作名（用 list_actions 查可用名称）。
+
+    返回 dict：{ "ok", "deleted": str, "remaining_actions": int,
+                 "backup_path": str }
+
+    找不到动作时抛错误（含可用的动作名）。
+    """
+    manifest, sections = _read_checked(project_path)
+    action = _find_action(manifest, action_name)
+    for section in (action.get("frame_sections") or []):
+        sections.pop(section, None)
+    manifest["actions"] = [a for a in _actions_of(manifest)
+                           if (a.get("name") or "") != action_name]
+    backup = _backup_then_write(project_path, manifest, sections)
+    return {
+        "ok": True,
+        "deleted": action_name,
+        "remaining_actions": len(manifest["actions"]),
+        "backup_path": backup,
+    }
+
+
+@mcp.tool(annotations={
+    "title": "删除动作的若干帧",
+    "readOnlyHint": False,
+    "destructiveHint": True,
+    "idempotentHint": False,
+    "openWorldHint": False,
+})
+def remove_frames(project_path: str, action_name: str, frames: list) -> dict:
+    """从动作里删除指定帧并写回工程（自动备份原文件）。
+
+    与软件里「删除此帧 / 抽帧」同一套重排口径：frame_sections / frame_rects /
+    frame_parts 与所有按帧号的字典（偏移 / 时长 / 旋转 / 镜像 / 透视）同步
+    重排，被删帧的帧图 PNG 从工程里清除；至少保留一帧。
+    **限制**：动作含合成帧（composite_groups）或帧布局（frame_layouts）时
+    拒绝删除 —— 那种结构只能在 SpriteSheetTool 里删，避免 headless 重排失真。
+
+    参数：
+      - project_path (str)：.sstool 工程的本地绝对路径；
+      - action_name (str)：动作名；
+      - frames (list[int])：要删除的帧号（从 0 开始，重复/越界会报错）。
+
+    返回 dict：{ "ok", "action", "old_count", "new_count",
+                 "removed": [..], "backup_path": str }
+
+    找不到动作 / 帧号非法 / 含合成帧时抛错误（含原因）。
+    """
+    manifest, sections = _read_checked(project_path)
+    action = _find_action(manifest, action_name)
+    count = _frame_count(action)
+    if action.get("composite_groups"):
+        raise ValueError(
+            "该动作含合成帧（composite_groups），删除帧请在 SpriteSheetTool 里操作。")
+    if action.get("frame_layouts"):
+        raise ValueError(
+            "该动作含帧布局（frame_layouts），删除帧请在 SpriteSheetTool 里操作。")
+    drop = sorted(set(int(f) for f in (frames or [])))
+    if drop != sorted(int(f) for f in (frames or [])):
+        raise ValueError(f"frames 里有重复项：{frames!r}")
+    for index in drop:
+        if not (0 <= index < count):
+            raise ValueError(
+                f"帧号越界：{index}（动作「{action_name}」共 {count} 帧，从 0 开始）。")
+    if len(drop) >= count:
+        raise ValueError(f"至少要保留 1 帧（动作共 {count} 帧）。")
+    keep = [i for i in range(count) if i not in set(drop)]
+    for index in drop:
+        sections_list = action.get("frame_sections") or []
+        if index < len(sections_list):
+            sections.pop(sections_list[index], None)
+    _remap_frame_fields(action, keep)
+    backup = _backup_then_write(project_path, manifest, sections)
+    return {
+        "ok": True,
+        "action": action.get("name"),
+        "old_count": count,
+        "new_count": len(keep),
+        "removed": drop,
+        "backup_path": backup,
     }
 
 

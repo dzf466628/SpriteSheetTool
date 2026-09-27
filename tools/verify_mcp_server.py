@@ -5,7 +5,7 @@
      与假精灵图 JSON，逐一真调用（不经 stdio，直接函数级调用来断言结构）；
   2) 错误路径：帧越界 / 找不到动作 / 未知导出格式 / anim_doc（动图文档）工程；
   3) 真实 stdio 握手：起子进程 `python -m spritesheet.mcp_server`，
-     initialize + list_tools，断言已注册工具与 TOOL_DEFS 完全一致（九个工具）。
+     initialize + list_tools，断言已注册工具与 TOOL_DEFS 完全一致（十四个工具）。
 
 用法：.venv\\Scripts\\python.exe tools\\verify_mcp_server.py
 """
@@ -26,9 +26,10 @@ sys.path.insert(0, str(ROOT))
 from PIL import Image, ImageDraw  # noqa: E402
 
 from spritesheet.mcp_server import (  # noqa: E402
-    TOOL_DEFS, export_to_engine_json, extract_action_frames_png, extract_frame_png,
-    get_action_detail, import_spritesheet_json, list_actions, project_overview,
-    read_sstool_project, validate_project,
+    TOOL_DEFS, delete_action, export_to_engine_json, extract_action_frames_png,
+    extract_frame_png, find_similar_frames, get_action_detail,
+    import_spritesheet_json, list_actions, project_overview, read_sstool_project,
+    remove_frames, trace_motion, update_action_meta, validate_project,
 )
 from spritesheet.project_file import png_bytes, read_project, write_project  # noqa: E402
 
@@ -250,6 +251,41 @@ def test_tools(project_path: Path, manifest: dict) -> None:
           any(i["action"] == "跑" and "帧图缺失" in i["message"]
               for i in vb["issues"]), str(vb["issues"])[:120])
 
+    # ---- find_similar_frames ----
+    sim = find_similar_frames(proj, "跑")
+    check("similar: 全组互异 rect → 3 组", sim["group_count"] == 3
+          and all(g["frame_count"] == 1 for g in sim["groups"]),
+          f"groups={sim['group_count']}")
+    check("similar: 各组帧号升序", sim["groups"][0]["frames"] == [0]
+          and sim["groups"][2]["frames"] == [2])
+    m3, s3 = read_project(project_path)
+    run3 = next(a for a in m3["actions"] if a["name"] == "跑")
+    run3["frame_parts"][2] = run3["frame_parts"][0]   # 帧 2 元素组合改成与帧 0 相同
+    sim_path = OUT / "fake_similar.sstool"
+    write_project(sim_path, m3, s3)
+    sim2 = find_similar_frames(str(sim_path), "跑")
+    merged = [g["frames"] for g in sim2["groups"]]
+    check("similar: 帧 0/2 合并为一组", len(sim2["groups"]) == 2
+          and any(f == [0, 2] for f in merged),
+          f"groups={merged}")
+
+    # ---- trace_motion ----
+    # 中心点口径 = 画布居中 + 逐帧偏移（与软件预览一致，与图集 rect 无关），
+    # 所以用 frame_offsets 驱动位移来断言
+    m4, s4 = read_project(project_path)
+    run4 = next(a for a in m4["actions"] if a["name"] == "跑")
+    run4["frame_offsets"] = {"0": [0, 0], "1": [8, 0], "2": [16, 0]}
+    trace_path = OUT / "fake_trace.sstool"
+    write_project(trace_path, m4, s4)
+    tr = trace_motion(str(trace_path), "跑")
+    check("trace: 3 帧中心点", len(tr["centers"]) == 3, str(tr["centers"]))
+    check("trace: 偏移驱动 x 位移 8",
+          tr["deltas"] == [[0, 0], [8, 0], [8, 0]], str(tr["deltas"]))
+    check("trace: 首末位移 16", tr["total_displacement"] == [16, 0],
+          str(tr["total_displacement"]))
+    check("trace: 包围盒覆盖首末中心", tr["bbox"] == [5, 5, 21, 5],
+          str(tr["bbox"]))
+
     # ---- import_spritesheet_json（TP Hash 样本）----
     sample_dir = OUT / "sample_json"
     sample_dir.mkdir(exist_ok=True)
@@ -285,8 +321,65 @@ def test_tools(project_path: Path, manifest: dict) -> None:
                  lambda: extract_frame_png(proj, "跑", 99))
     expect_error("err: 找不到动作",
                  lambda: get_action_detail(proj, "不存在"))
+    expect_error("err: 相似分组找不到动作",
+                 lambda: find_similar_frames(proj, "不存在"))
+    expect_error("err: 轨迹找不到动作",
+                 lambda: trace_motion(proj, "不存在"))
     expect_error("err: 未知导出格式",
                  lambda: export_to_engine_json(proj, "png", str(OUT)))
+
+    # ---- 写回编辑：update_action_meta / delete_action / remove_frames ----
+    # （全部在副本上操作，不污染源；每个写回工具都必须自动备份）
+    ed = OUT / "fake_edit.sstool"
+    shutil.copy2(project_path, ed)
+    upd = update_action_meta(str(ed), "跑", fps=24, loop_mode="once", padding=4,
+                             anchor=[0.3, 0.7], move_direction="left",
+                             move_speed=90, new_name="快跑")
+    check("update: 7 个字段全部变更", upd["ok"] is True and
+          set(upd["changed"]) == {"fps", "loop_mode", "padding", "anchor",
+                                  "move_direction", "move_speed", "name"},
+          str(upd["changed"]))
+    check("update: 自动备份已生成", Path(upd["backup_path"]).exists())
+    run_upd = next(a for a in list_actions(str(ed)) if a["name"] == "快跑")
+    check("update: 字段落盘",
+          (run_upd["fps"], run_upd["loop_mode"], run_upd["padding"],
+           run_upd["move_direction"], run_upd["move_speed"]) ==
+          (24, "once", 4, "left", 90),
+          str(run_upd))
+    expect_error("err: update fps 越界",
+                 lambda: update_action_meta(str(ed), "快跑", fps=0))
+    expect_error("err: update 重名",
+                 lambda: update_action_meta(str(ed), "快跑", new_name="跳"))
+    expect_error("err: update loop_mode 非法",
+                 lambda: update_action_meta(str(ed), "快跑", loop_mode="nope"))
+
+    del_out = delete_action(str(ed), "跳")
+    check("delete: 剩 1 个动作", del_out["remaining_actions"] == 1,
+          str(del_out["remaining_actions"]))
+    check("delete: 动作从清单消失",
+          [a["name"] for a in list_actions(str(ed))] == ["快跑"])
+    expect_error("err: delete 找不到动作",
+                 lambda: delete_action(str(ed), "不存在"))
+
+    rm = remove_frames(str(ed), "快跑", [1])
+    check("remove: 3→2 帧", rm["old_count"] == 3 and rm["new_count"] == 2,
+          str(rm))
+    m_rm, s_rm = read_project(ed)
+    run_rm = next(a for a in m_rm["actions"] if a["name"] == "快跑")
+    check("remove: frame_sections 重排（0001 移除）",
+          run_rm["frame_sections"] == ["actions/0000/frame_0000.png",
+                                       "actions/0000/frame_0002.png"],
+          str(run_rm["frame_sections"]))
+    check("remove: 被删帧图段已从工程清理",
+          "actions/0000/frame_0001.png" not in s_rm, "段还在")
+    check("remove: 保留帧图段齐全",
+          all(s in s_rm for s in run_rm["frame_sections"]))
+    expect_error("err: remove 全删",
+                 lambda: remove_frames(str(ed), "快跑", [0, 1]))
+    expect_error("err: remove 越界",
+                 lambda: remove_frames(str(ed), "快跑", [9]))
+    expect_error("err: remove 重复帧号",
+                 lambda: remove_frames(str(ed), "快跑", [0, 0]))
     expect_error("err: 文件不存在",
                  lambda: read_sstool_project(str(OUT / "没有这个文件.sstool")))
 
