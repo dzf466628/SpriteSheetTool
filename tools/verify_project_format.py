@@ -13,6 +13,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
 from PyQt6.QtGui import QColor, QPixmap
 from PyQt6.QtWidgets import QApplication
 
@@ -31,11 +32,13 @@ def check(name, ok, detail=""):
 
 
 def make_png(w=64, h=48, color="#E91E63"):
+    # project_file 已 Pillow 化（headless 可导入），不再暴露 Qt 类型；
+    # 本脚本是 GUI 回归，Qt 类型直接从这里取。
     pm = QPixmap(w, h)
     pm.fill(QColor(color))
-    buf = PF.QByteArray()
-    b = PF.QBuffer(buf)
-    b.open(PF.QIODevice.OpenModeFlag.WriteOnly)
+    buf = QByteArray()
+    b = QBuffer(buf)
+    b.open(QIODevice.OpenModeFlag.WriteOnly)
     pm.save(b, "PNG")
     b.close()
     return bytes(buf)
@@ -56,7 +59,7 @@ def build_v1_bytes(manifest, sections):
 
 
 def main() -> int:
-    app = QApplication(sys.argv)
+    _ = QApplication(sys.argv)  # 必须持有实例防 GC（offscreen 下也要）
     tmp = Path(tempfile.mkdtemp(prefix="sstool_fmt_"))
     thumb = make_png()
     frame = make_png(32, 32, "#1565C0")

@@ -114,8 +114,8 @@ def main() -> int:
     check("底部横条全部帧微调控件存在",
           hasattr(bar, "btn_all_right") and hasattr(bar, "spin_all_off_x")
           and hasattr(bar, "slider_all_off_y"))
-    check("浮动条瘦身为 136 宽", win.preview.toolbar.width() == 136,
-          f"w={win.preview.toolbar.width()}")
+    check("浮动条瘦身为 86 宽", win.preview.toolbar.width() == 86,
+          f"w={win.preview.toolbar.width()}")  # setFixedSize(86, 32)：撤放大/缩小后单按钮时代
 
     # ---- 2. 横条控件写入当前动作（帧速=全部帧统一，右侧单帧覆盖）----
     bar.spin_padding.setValue(8)
