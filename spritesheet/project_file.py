@@ -12,6 +12,11 @@ an editor document with embedded assets.
 
 系统图片解码器读到 IEND 即停，尾部数据被忽略；本程序从 PNG 结束处开始解析容器。
 旧版（v1，容器在最前）仍可正常读取，只是那种文件没有可显示的缩略图。
+
+**headless 兼容**：本模块顶层不依赖 PyQt6（Qt 只在 `_pixmap_*` 内部惰性导入）——
+MCP server 等无 GUI 进程可以直接 import 本模块，用 Pillow 的 ``png_from_bytes`` /
+``png_bytes`` 做 PNG 编解码；GUI 侧继续用现成的 ``_pixmap_from_bytes`` /
+``_pixmap_bytes``（返回值行为完全不变）。
 """
 from __future__ import annotations
 
@@ -19,8 +24,7 @@ import json
 import struct
 from pathlib import Path
 
-from PyQt6.QtCore import QByteArray, QBuffer, QIODevice
-from PyQt6.QtGui import QPixmap
+from PIL import Image
 
 MAGIC = b"SSTOOL\x00\x01"
 VERSION = 1
@@ -142,15 +146,19 @@ def read_project(path: str | Path) -> tuple[dict, dict[str, bytes]]:
 
 # ---------------- QPixmap / JSON 片段辅助 ----------------
 # 原 main_window.py 顶部的工程序列化工具函数（按 SPLIT_GUIDE §5.3 归到本模块）。
+# 注意：下面两个 QPixmap 版本只在 GUI 进程用（需要 QApplication），Qt 在函数内惰性导入；
+# headless（MCP server）请用本模块的 Pillow 版本 png_from_bytes / png_bytes。
 def _rect_from_dict(d: dict) -> tuple[int, int, int, int]:
     """把 JSON 里的 rect 字典转成 (x, y, w, h) 元组。"""
     return (int(d.get("x", 0)), int(d.get("y", 0)),
             int(d.get("width", d.get("w", 0))), int(d.get("height", d.get("h", 0))))
 
 
-def _pixmap_bytes(pm: QPixmap | None) -> bytes:
+def _pixmap_bytes(pm) -> bytes:
+    """QPixmap → PNG bytes（GUI 专用）；空图返回 b""。headless 请用 png_bytes()。"""
     if pm is None or pm.isNull():
         return b""
+    from PyQt6.QtCore import QByteArray, QBuffer, QIODevice
     data = QByteArray()
     buffer = QBuffer(data)
     buffer.open(QIODevice.OpenModeFlag.WriteOnly)
@@ -159,8 +167,36 @@ def _pixmap_bytes(pm: QPixmap | None) -> bytes:
     return bytes(data)
 
 
-def _pixmap_from_bytes(data: bytes) -> QPixmap:
+def _pixmap_from_bytes(data: bytes):
+    """PNG bytes → QPixmap（GUI 专用）；无效数据返回空 QPixmap。headless 请用 png_from_bytes()。"""
+    from PyQt6.QtGui import QPixmap
     pm = QPixmap()
     if data:
         pm.loadFromData(data, "PNG")
     return pm
+
+
+# ---------------- Pillow PNG 编解码（headless / MCP server 用） ----------------
+def png_from_bytes(data: bytes):
+    """Pillow 解码 PNG → PIL.Image；不是合法 PNG（或空数据）返回 None。
+
+    返回的是懒加载 Image：只读文件头（.size/.mode 立即可用），调用方真正读像素
+    （.load() / 转换）时才解码 —— 读超大合成图的尺寸判定不会一口气吃几百 MB。
+    """
+    if not data:
+        return None
+    try:
+        from io import BytesIO
+        return Image.open(BytesIO(data))
+    except Exception:                     # noqa: BLE001 - 不是 PNG 就返回 None
+        return None
+
+
+def png_bytes(image) -> bytes:
+    """PIL.Image → PNG bytes；None 返回 b""。"""
+    if image is None:
+        return b""
+    from io import BytesIO
+    buf = BytesIO()
+    image.save(buf, "PNG")
+    return buf.getvalue()

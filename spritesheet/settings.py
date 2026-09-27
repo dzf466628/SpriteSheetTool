@@ -25,6 +25,7 @@ KEY_LAST_DIR = "files/last_directory"
 KEY_DETECT_MIN_AREA = "detect/min_area"
 KEY_SIMILAR_TOLERANCE = "similar/tolerance"
 KEY_UNDO_LIMIT = "history/undo_limit"
+KEY_MCP_ENABLED = "mcp/enabled"
 
 # ---- 视图辅助线（标线 / 每像素网格）的颜色与显示门槛 ----
 # 这些线是**看图和量尺寸**用的，颜色按人眼习惯（和素材底色）来定，所以放到设置里能改。
