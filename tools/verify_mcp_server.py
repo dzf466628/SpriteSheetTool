@@ -5,7 +5,7 @@
      与假精灵图 JSON，逐一真调用（不经 stdio，直接函数级调用来断言结构）；
   2) 错误路径：帧越界 / 找不到动作 / 未知导出格式 / anim_doc（动图文档）工程；
   3) 真实 stdio 握手：起子进程 `python -m spritesheet.mcp_server`，
-     initialize + list_tools，断言已注册工具与 TOOL_DEFS 完全一致。
+     initialize + list_tools，断言已注册工具与 TOOL_DEFS 完全一致（九个工具）。
 
 用法：.venv\\Scripts\\python.exe tools\\verify_mcp_server.py
 """
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import shutil
 import sys
@@ -25,10 +26,11 @@ sys.path.insert(0, str(ROOT))
 from PIL import Image, ImageDraw  # noqa: E402
 
 from spritesheet.mcp_server import (  # noqa: E402
-    TOOL_DEFS, export_to_engine_json, extract_frame_png, get_action_detail,
-    import_spritesheet_json, list_actions, read_sstool_project,
+    TOOL_DEFS, export_to_engine_json, extract_action_frames_png, extract_frame_png,
+    get_action_detail, import_spritesheet_json, list_actions, project_overview,
+    read_sstool_project, validate_project,
 )
-from spritesheet.project_file import png_bytes, write_project  # noqa: E402
+from spritesheet.project_file import png_bytes, read_project, write_project  # noqa: E402
 
 # 输出目录固定在仓库内（避免系统临时目录权限问题），结束时清掉
 OUT = ROOT / "build" / "verify_mcp_out"
@@ -206,6 +208,48 @@ def test_tools(project_path: Path, manifest: dict) -> None:
           f"got=({out2['width']},{out2['height']})")
     check("extract: 来源为已存帧图", out2["source"] == "saved_frame_png")
 
+    # ---- project_overview ----
+    ov = project_overview(proj)
+    check("overview: ok", ov["ok"] is True)
+    check("overview: 2 动作 5 总帧",
+          ov["action_count"] == 2 and ov["total_frames"] == 5,
+          f"{ov['action_count']}/{ov['total_frames']}")
+    check("overview: 动作清单含帧数",
+          len(ov["actions"]) == 2 and ov["actions"][0]["frames"] == 3)
+    ov_raw = base64.b64decode(ov["overview_png"])
+    check("overview: 总览图可解码 PNG", ov_raw[:8] == b"\x89PNG\r\n\x1a\n")
+    ov_img = Image.open(io.BytesIO(ov_raw))
+    check("overview: 两格缩略图横排（40x96）",
+          (ov_img.width, ov_img.height) == (40, 96),
+          f"{ov_img.width}x{ov_img.height}")
+
+    # ---- extract_action_frames_png ----
+    af = extract_action_frames_png(proj, "跑")
+    check("frames: 抓全部 3 帧", af["frame_count"] == 3, str(af["frame_count"]))
+    check("frames: 每帧 base64 非空",
+          all(f["base64_png"] for f in af["frames"]))
+    grid_raw = base64.b64decode(af["contact_sheet_png"])
+    check("frames: 网格图可解码 PNG", grid_raw[:8] == b"\x89PNG\r\n\x1a\n")
+    gimg = Image.open(io.BytesIO(grid_raw))
+    check("frames: 3 帧排一行（宽 192）", gimg.width == 3 * 64, f"w={gimg.width}")
+
+    # ---- validate_project ----
+    vp = validate_project(proj)
+    check("validate: 健康工程无 error/warning",
+          vp["ok"] is True and vp["summary"] == {"errors": 0, "warnings": 0},
+          str(vp["summary"]))
+    m2, s2 = read_project(project_path)
+    run_action = next(a for a in m2["actions"] if a["name"] == "跑")
+    del s2[run_action["frame_sections"][1]]          # 故意弄丢第 2 帧图
+    broken = OUT / "fake_broken.sstool"
+    write_project(broken, m2, s2)
+    vb = validate_project(str(broken))
+    check("validate: 缺帧图报 error 且 ok=False",
+          not vb["ok"] and vb["summary"]["errors"] >= 1, str(vb["summary"]))
+    check("validate: 错误消息指向「跑」缺帧图",
+          any(i["action"] == "跑" and "帧图缺失" in i["message"]
+              for i in vb["issues"]), str(vb["issues"])[:120])
+
     # ---- import_spritesheet_json（TP Hash 样本）----
     sample_dir = OUT / "sample_json"
     sample_dir.mkdir(exist_ok=True)
@@ -272,7 +316,7 @@ async def test_handshake() -> None:
         elapsed = time.perf_counter() - t0
         check("握手: initialize 成功", getattr(info, "protocolVersion", None) is not None)
         expected = sorted(name for name, _ in TOOL_DEFS)
-        check(f"握手: 6 个工具与 TOOL_DEFS 一致 ({elapsed:.1f}s)",
+        check(f"握手: {len(expected)} 个工具与 TOOL_DEFS 一致 ({elapsed:.1f}s)",
               names == expected, f"got={names}")
     except Exception as exc:  # noqa: BLE001
         check("握手: 子进程可启动", False, f"{type(exc).__name__}: {exc}")

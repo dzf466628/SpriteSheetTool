@@ -75,6 +75,12 @@ TOOL_DEFS = [
      "把 .sstool 工程导出为引擎 JSON（tp_hash / tp_array / aseprite_array），同时写出配套图集 PNG"),
     ("extract_frame_png",
      "合成指定动作的指定帧画面，返回 PNG 的 base64 字符串（AI 可直接看图）"),
+    ("project_overview",
+     "工程总览：全部动作清单 + 各动作首帧拼成一张总览图（base64），一眼看清整个工程"),
+    ("extract_action_frames_png",
+     "一次提取动作的全部帧：逐帧 base64 列表 + 网格总览图（看整条动画序列）"),
+    ("validate_project",
+     "工程健康检查：空动作、缺帧图、孤儿引用、rect 越界等，返回 error/warning 清单"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -380,7 +386,7 @@ def _paste_baked(atlas: Image.Image, bake, records: dict) -> Image.Image:
 
 
 # ---------------------------------------------------------------------------
-# 六个工具
+# 九个工具
 # ---------------------------------------------------------------------------
 @mcp.tool(annotations={
     "title": "导入精灵图 JSON",
@@ -745,6 +751,249 @@ def extract_frame_png(project_path: str, action_name: str, frame_index: int) -> 
         "format": "png",
         "base64_png": base64.b64encode(raw).decode("ascii"),
         "source": source,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 批量查看工具（总览 / 全部帧 / 健康检查）——纯只读
+# ---------------------------------------------------------------------------
+def _fit_thumb(img, target_h: int, max_w: int) -> "Image.Image":
+    """等比缩到不超过 target_h × max_w（宽高比极端也不撑爆拼图），返回 RGBA。"""
+    if img is None:
+        return Image.new("RGBA", (max_w, target_h), (46, 46, 46, 255))
+    w, h = img.size
+    scale = min(target_h / max(1, h), max_w / max(1, w), 1.0)
+    nw = max(1, round(w * scale))
+    nh = max(1, round(h * scale))
+    return img.convert("RGBA").resize((nw, nh), Image.Resampling.BILINEAR)
+
+
+def _action_thumb(action: dict, sections: dict, manifest: dict) -> "Image.Image | None":
+    """动作首帧缩略图；取不到（quad/缺帧图/老爷工程）时返回 None。"""
+    try:
+        img, _ = _render_frame_image(action, sections, 0, manifest)
+        return img
+    except Exception:  # noqa: BLE001 - 任一帧渲染不了都不影响别的动作出总览
+        return None
+
+
+@mcp.tool(annotations={
+    "title": "工程总览",
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": False,
+})
+def project_overview(project_path: str) -> dict:
+    """一次返回 .sstool 工程的全貌：动作清单 + 每动作首帧拼成的总览图。
+
+    比 list_actions 更进一步：每个动作附一张首帧缩略图，所有动作横排拼成
+    一张总览 PNG（base64），AI 一眼看清整个工程长得什么样、有哪些动作、
+    每个多少帧。取不到首帧的动作用灰块占位（不报错、不影响整体）。
+
+    参数：
+      - project_path (str)：.sstool 工程的本地绝对路径。
+
+    返回 dict：
+      {
+        "ok": true,
+        "project": str,                # 文件名
+        "action_count": int,
+        "total_frames": int,
+        "actions": [{ name, frames, fps, loop_mode, anchor, canvas_size,
+                      padding, action_type, move_direction, move_speed, color }],
+        "overview_png": str|None       # base64 PNG（黑底横排，动作多时会很宽）
+      }
+
+    工程读取失败时抛错误（含原因与建议）。
+    """
+    manifest, sections = _read_checked(project_path)
+    actions = _actions_of(manifest)
+    summaries = [_action_summary(a, _action_canvas(a, sections)) for a in actions]
+    thumbs = []
+    row_w = 0
+    for a in actions:
+        thumb = _fit_thumb(_action_thumb(a, sections, manifest), 88, 128)
+        thumbs.append(thumb)
+        row_w += thumb.width + 8
+    overview_png = None
+    if thumbs:
+        sheet = Image.new("RGBA", (row_w + 8, 88 + 8), (20, 20, 20, 255))
+        x = 8
+        for thumb in thumbs:
+            sheet.alpha_composite(thumb, (x, 4))
+            x += thumb.width + 8
+        overview_png = base64.b64encode(png_bytes(sheet)).decode("ascii")
+    return {
+        "ok": True,
+        "project": Path(project_path).name,
+        "action_count": len(actions),
+        "total_frames": sum(_frame_count(a) for a in actions),
+        "actions": summaries,
+        "overview_png": overview_png,
+    }
+
+
+@mcp.tool(annotations={
+    "title": "提取动作全部帧",
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": False,
+})
+def extract_action_frames_png(project_path: str, action_name: str) -> dict:
+    """提取动作的**全部**帧画面：逐帧 base64 列表 + 一张网格总览图。
+
+    与 extract_frame_png 同一套渲染口径（镜像/旋转复刻、quad 帧报错）；
+    适合 AI 一次看完整条动画序列。帧数很多时 contact_sheet 按每行最多 16 帧
+    自动换行（宽度不会失控）。
+
+    参数：
+      - project_path (str)：.sstool 工程本地绝对路径；
+      - action_name (str)：动作名称（用 list_actions 查可用名称）。
+
+    返回 dict：
+      {
+        "ok": true,
+        "action": str,
+        "frame_count": int,
+        "frames": [{ "frame_index", "width", "height", "base64_png", "source" }],
+        "contact_sheet_png": str     # 一张 base64 PNG：全部帧按序号排列的网格图
+      }
+
+    找不到动作 / 任一帧含 quad 自由透视时抛错误（含原因）。
+    """
+    manifest, sections = _read_checked(project_path)
+    action = _find_action(manifest, action_name)
+    count = _frame_count(action)
+    frames = []
+    sheet_cell = 64
+    per_row = 16
+    if count:
+        cols = min(per_row, count)
+        rows = (count + per_row - 1) // per_row
+        sheet = Image.new("RGBA", (cols * sheet_cell, rows * sheet_cell),
+                          (20, 20, 20, 255))
+    else:
+        sheet = None
+    for index in range(count):
+        img, source = _render_frame_image(action, sections, index, manifest)
+        raw = png_bytes(img)
+        frames.append({
+            "frame_index": index,
+            "width": img.width,
+            "height": img.height,
+            "base64_png": base64.b64encode(raw).decode("ascii"),
+            "source": source,
+        })
+        if sheet is not None:
+            thumb = _fit_thumb(img, sheet_cell - 8, sheet_cell - 8)
+            cx = (index % per_row) * sheet_cell + (sheet_cell - thumb.width) // 2
+            cy = (index // per_row) * sheet_cell + (sheet_cell - thumb.height) // 2
+            sheet.alpha_composite(thumb, (cx, cy))
+    contact_sheet_png = base64.b64encode(png_bytes(sheet)).decode("ascii") \
+        if sheet is not None else None
+    return {
+        "ok": True,
+        "action": action.get("name"),
+        "frame_count": count,
+        "frames": frames,
+        "contact_sheet_png": contact_sheet_png,
+    }
+
+
+@mcp.tool(annotations={
+    "title": "工程健康检查",
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": False,
+})
+def validate_project(project_path: str) -> dict:
+    """检查 .sstool 工程的数据完整性，列出所有问题（error / warning）。
+
+    error 级 = 会直接影响预览/导出正确性的硬伤；warning 级 = 老工程常见的
+    可回退情况。检查项：
+      - 空动作（0 帧，error）；
+      - frame_sections 里引用的帧图在工程里不存在（error）；
+      - 帧图数量与 rect 数量对不上（warning）；
+      - 帧 rect 越出合成大图 / 宽高 ≤ 0（warning）。
+
+    参数：
+      - project_path (str)：.sstool 工程的本地绝对路径。
+
+    返回 dict：
+      {
+        "ok": bool,                    # error 数为 0 即 true
+        "project": str,
+        "action_count": int,
+        "summary": { "errors": int, "warnings": int },
+        "issues": [{ "level": "error"|"warning", "scope": "project"|"action"|"frame",
+                     "action": str|None, "frame": int|None, "message": str }]
+      }
+    """
+    manifest, sections = _read_checked(project_path)
+    issues: list[dict] = []
+    error_count = warning_count = 0
+
+    def add(level: str, scope: str, action_name, frame_index, message: str) -> None:
+        nonlocal error_count, warning_count
+        if level == "error":
+            error_count += 1
+        else:
+            warning_count += 1
+        issues.append({
+            "level": level,
+            "scope": scope,
+            "action": action_name,
+            "frame": frame_index,
+            "message": message,
+        })
+
+    atlas = None
+    atlas_name = manifest.get("combined_image") or ""
+    atlas_img = png_from_bytes(sections.get(atlas_name, b"")) if atlas_name else None
+    if atlas_img is None:
+        add("warning", "project", None, None,
+            f"工程缺少合成大图（combined_image={atlas_name!r}），导出/部分预览会受限。")
+    else:
+        atlas = (atlas_img.width, atlas_img.height)
+
+    actions = _actions_of(manifest)
+    if not actions:
+        add("warning", "project", None, None, "工程里没有任何动作。")
+
+    for action in actions:
+        name = action.get("name") or "?"
+        frame_sections = action.get("frame_sections") or []
+        if not frame_sections:
+            add("error", "action", name, None, "空动作：没有任何帧。")
+            continue
+        rects = action.get("frame_rects") or []
+        if len(rects) != len(frame_sections):
+            add("warning", "action", name, None,
+                f"帧图 {len(frame_sections)} 张与 rect {len(rects)} 条数量不一致。")
+        missing = [s for s in frame_sections if s not in sections]
+        if missing:
+            add("error", "action", name, None,
+                f"有 {len(missing)} 帧图缺失：{missing[:3]}{'…' if len(missing) > 3 else ''}")
+        if atlas is not None and len(rects) == len(frame_sections):
+            aw, ah = atlas
+            for index, rect in enumerate(rects):
+                rx, ry, rw, rh = (int(v) for v in rect[:4])
+                if rw <= 0 or rh <= 0:
+                    add("warning", "frame", name, index,
+                        f"rect 宽高异常 ({rw}x{rh})。")
+                elif rx < 0 or ry < 0 or rx + rw > aw or ry + rh > ah:
+                    add("warning", "frame", name, index,
+                        f"rect 越出合成大图 {aw}x{ah}：({rx},{ry},{rw},{rh})。")
+
+    return {
+        "ok": error_count == 0,
+        "project": Path(project_path).name,
+        "action_count": len(actions),
+        "summary": {"errors": error_count, "warnings": warning_count},
+        "issues": issues,
     }
 
 
