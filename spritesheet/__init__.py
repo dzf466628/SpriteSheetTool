@@ -1,4 +1,4 @@
 """SpriteSheetTool —— 精灵图打包工具。"""
 
-__version__ = "1.1.41"
+__version__ = "1.1.42"
 __app_name__ = "SpriteSheetTool"

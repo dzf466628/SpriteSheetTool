@@ -9,7 +9,7 @@ import sys
 import faulthandler
 import traceback
 
-from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtGui import QFont, QIcon, QImageReader
 from PyQt6.QtWidgets import QApplication
 
 from spritesheet.single_instance import SingleInstance
@@ -60,6 +60,10 @@ def _project_arg(argv: list[str]) -> str | None:
 def main() -> int:
     _install_crash_logging()
     app = QApplication(sys.argv)
+    # Qt 6 图片解码默认配额 256MB：超大序列帧工程（几百帧拼出的合成大图解压后
+    # 轻松上 500MB）会被直接拒绝——用户看到的就是「工程缺少有效的原图数据」。
+    # 程序唯一入口统一放宽到 2GB；打开工程时还有一次 4GB 的抢救重试（main_window）。
+    QImageReader.setAllocationLimit(2048)
     app.setApplicationName("SpriteSheetTool")
     app.setStyle("Fusion")
     app.setStyleSheet(APP_QSS)

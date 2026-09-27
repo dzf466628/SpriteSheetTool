@@ -19,7 +19,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import (
-    QAction, QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QRegion,
+    QAction, QColor, QImage, QImageReader, QKeySequence, QPainter, QPen, QPixmap, QRegion,
     QUndoCommand, QUndoStack,
 )
 from PyQt6.QtWidgets import (
@@ -51,8 +51,8 @@ from .models import Action, MACARON_COLORS
 from .preview import ActionPreviewWidget
 from .settings_dialog import SettingsDialog
 from .transform import (action_frame_pixmap, action_frame_size, _alpha_bounds,
-                        cell_rect, compute_align_offsets, compute_source_anchor_offsets,
-                        detect_sheet_grid, grid_shape)
+                        compute_align_offsets, compute_source_anchor_offsets,
+                        detect_sheet_grid)
 from .widgets import (
     ActionCardWidget, ActionItemDelegate, AppNameLabel, ProjectTabBar, _APP_ROOT,
     paint_checkerboard,
@@ -2085,6 +2085,12 @@ class MainWindow(QMainWindow):
         viewer = self.image_viewer
         viewer._detect_generation += 1
         combined = _pixmap_from_bytes(sections.get(manifest.get("combined_image", ""), b""))
+        if combined.isNull():
+            # 合并大图没解出来：超大序列帧工程（几百帧拼一张合成图）解压后经常
+            # 上 500MB，默认 256MB 解码配额会直接拒绝（main.py 已放宽到 2GB，
+            # 这里作为深水区再抢救一次——资源其实都在工程里，只是没一口气解出）。
+            QImageReader.setAllocationLimit(4096)
+            combined = _pixmap_from_bytes(sections.get(manifest.get("combined_image", ""), b""))
         if combined.isNull():
             raise ValueError("工程缺少有效的原图数据")
         viewer._pixmap = combined
@@ -4176,6 +4182,11 @@ class MainWindow(QMainWindow):
         if doc is None:
             self._anim_preview_action = None
             self.preview._project_manifest = self._project_manifest
+            # 退出动图文档（含"文档里又载入普通图"、转为序列帧、导入动图后的常规刷新）时，
+            # 预览/导出用的动作列表必须换回主窗口这一份：动图文档里 preview 只有一个
+            # 「壳动作」（见 _refresh_anim_doc_views），不还回去，导出对话框左侧就一直
+            # 只有那一个（或空的），按动作导出 GIF/图集就全废了。
+            self.preview.set_actions(self.actions)
             return
         viewer.set_animation_frame(doc.frame(), fit=fit)
         # 动图文档不玩元素/动作：把动作列表清掉，别让「当前动作」指着一份不存在的编排
@@ -4678,13 +4689,31 @@ class MainWindow(QMainWindow):
         index_of = detect_sheet_grid(rects, pixmap.width(), pixmap.height())
         if not index_of:
             return None
-        cols, rows = grid_shape(index_of)
-        canvas_w, canvas_h = pixmap.width(), pixmap.height()
+        cols, rows = index_of.cols, index_of.rows
+        # 格子定位用哪种晶格，看数据自己选：
+        #   * 序列帧工程（帧正好坐在「簇间距」晶格上，格内偏移恒 0）→ 用间距晶格，
+        #     画布均分反而会因总尺寸除不尽逐列/逐行累积误差（实测上千像素）
+        #   * 真·精灵图（内容在格内浮动、中心点距不齐）→ 间距中位是噪声，必须退回
+        #     画布均分晶格，格内位置才精确
+        use_pitch = bool(index_of.pitch_x > 0 and index_of.pitch_y > 0)
+        if use_pitch:
+            for i in range(total):
+                r = rects[i]
+                if abs(r[0] - int(round(index_of[i][0] * index_of.pitch_x))) > 2 \
+                        or abs(r[1] - int(round(index_of[i][1] * index_of.pitch_y))) > 2:
+                    use_pitch = False
+                    break
         local_boxes, frame_sizes, content_in_frame = [], [], []
         for i in range(total):
-            cell = cell_rect(index_of, i, canvas_w, canvas_h, cols, rows)
+            col, row = index_of[i]
+            if use_pitch:
+                cell_x = int(round(col * index_of.pitch_x))
+                cell_y = int(round(row * index_of.pitch_y))
+            else:
+                cell_x = int(round(col * pixmap.width() / cols))
+                cell_y = int(round(row * pixmap.height() / rows))
             r = rects[i]
-            local_boxes.append((r[0] - cell[0], r[1] - cell[1], r[2], r[3]))
+            local_boxes.append((r[0] - cell_x, r[1] - cell_y, r[2], r[3]))
             frame_sizes.append(action_frame_size(action, i))
             part = action.frame_parts[i][0]
             content_in_frame.append((part[1], part[2]))

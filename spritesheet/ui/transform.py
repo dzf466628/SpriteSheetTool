@@ -455,6 +455,17 @@ def _center_pitch(values):
     return gaps[len(gaps) // 2]
 
 
+class SheetGrid(dict):
+    """``detect_sheet_grid`` 的返回：{帧序: (列, 行)} + 验证通过的那组网格几何。
+
+    ``cols/rows`` = 候选网格的列/行数；``pitch_x/pitch_y`` = 内容中心在该方向上的
+    簇间距。几何必须用候选值本身：不能拿「帧分布范围」反推行数 —— 序列帧/多动作
+    工程里动作只占画布一部分，按范围反推会把网格截断、格子被拉长，自动对齐就
+    整行整行飞（实测偏移 800~18000px）。
+    """
+    __slots__ = ("cols", "rows", "pitch_x", "pitch_y")
+
+
 def detect_sheet_grid(rects, canvas_w: int, canvas_h: int):
     """判定这张精灵图是不是「横竖均分」，是的话返回 {帧序: (列, 行)}，不是就返回 None。
 
@@ -506,6 +517,14 @@ def detect_sheet_grid(rects, canvas_w: int, canvas_h: int):
 
     for cols, rows in candidates:
         cell_w, cell_h = canvas_w / cols, canvas_h / rows
+        # 格子尺寸必须跟「内容块中心的行/列间距」对得上：均分格的"一格"就该是那个间距。
+        # 对不上说明候选格数是拿画布总尺寸硬凑的 —— 典型是序列帧工程：动作只用了画布
+        # 一部分帧（下半还排着别的帧），按内容聚簇算出的行数偏小，格子被拉长两倍多，
+        # 局部坐标整行整行错位，对齐一次帧就飞掉上万千像素（实测）。
+        if pitch_x > 0 and abs(cell_w - pitch_x) > cell_w * 0.15:
+            continue
+        if pitch_y > 0 and abs(cell_h - pitch_y) > cell_h * 0.15:
+            continue
         index_of: dict[int, tuple[int, int]] = {}
         ok = True
         for i, r in enumerate(rects):
@@ -520,7 +539,14 @@ def detect_sheet_grid(rects, canvas_w: int, canvas_h: int):
                 ok = False
                 break
         if ok:
-            return index_of                                 # 验算通过：均分判定成立
+            # 把验证通过的那组候选网格几何（列/行数与行列间距）一起带出去：
+            # 序列帧/多动作工程里动作只占画布一部分，格子必须按候选网格本身算，
+            # 不能像 grid_shape 那样拿「帧分布范围」反推行数 —— 会截断网格、格子被拉长。
+            result = SheetGrid()
+            result.cols, result.rows = cols, rows
+            result.pitch_x, result.pitch_y = pitch_x, pitch_y
+            result.update(index_of)
+            return result                                 # 验算通过：均分判定成立
     return None
 
 
