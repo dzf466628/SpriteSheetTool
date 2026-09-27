@@ -54,16 +54,22 @@ def _solid(color) -> Image.Image:
     return img
 
 
+def _draw_rect(draw, xywh, color) -> None:
+    """Pillow rectangle 需要 (left, top, right, bottom)；工程 rect 是 (x, y, w, h)。"""
+    x, y, w, h = xywh
+    draw.rectangle([x, y, x + w, y + h], fill=color)
+
+
 def make_test_project() -> tuple[Path, dict]:
     """现场造一个 v2 工程：2 个动作（跑×3 帧、跳×2 帧含 90° 旋转）。"""
     combined = Image.new("RGBA", (100, 50), (0, 0, 0, 0))
     draw = ImageDraw.Draw(combined)
     rects_run = [(0, 0, 8, 8), (8, 0, 8, 8), (16, 0, 8, 8)]
     for rect, color in zip(rects_run, [(255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255)]):
-        draw.rectangle(rect, fill=color)
+        _draw_rect(draw, rect, color)
     rects_jump = [(20, 0, 8, 8), (28, 0, 8, 4)]  # 第二帧 8×4，旋转 90 后应输出 4×8
-    draw.rectangle(rects_jump[0], fill=(255, 255, 0, 255))
-    draw.rectangle(rects_jump[1], fill=(255, 165, 0, 255))
+    _draw_rect(draw, rects_jump[0], (255, 255, 0, 255))
+    _draw_rect(draw, rects_jump[1], (255, 165, 0, 255))
 
     sections: dict[str, bytes] = {"images/combined.png": png_bytes(combined)}
     frame_images = {
@@ -123,9 +129,8 @@ def make_test_project() -> tuple[Path, dict]:
     return path, manifest
 
 
-def test_tools(project_path: Path) -> None:
+def test_tools(project_path: Path, manifest: dict) -> None:
     proj = str(project_path)
-    manifest, _ = (None, None)
 
     # ---- read_sstool_project ----
     info = read_sstool_project(proj)
@@ -146,7 +151,8 @@ def test_tools(project_path: Path) -> None:
 
     # ---- get_action_detail ----
     detail = get_action_detail(proj, "跳")
-    check("detail: 帧数=2", detail["frames"] == 2)
+    check("detail: 帧数=2", detail["frame_count"] == 2,
+          f"got={detail['frame_count']}")
     check("detail: 第2帧旋转后尺寸 4x8",
           detail["frames"][1]["size"] == [4, 8],
           f"got={detail['frames'][1]['size']}")
@@ -158,9 +164,9 @@ def test_tools(project_path: Path) -> None:
 
     # ---- export_to_engine_json（三种格式）----
     fmt_paths = {
-        "tp_hash": "制造.tp_hash.json",
-        "tp_array": "制造.tp_array.json",
-        "aseprite_array": "制造.aseprite.json",
+        "tp_hash": "fake.tp_hash.json",
+        "tp_array": "fake.tp_array.json",
+        "aseprite_array": "fake.aseprite.json",
     }
     for fmt, expected_name in fmt_paths.items():
         json_path = export_to_engine_json(proj, fmt, str(OUT))
@@ -170,14 +176,14 @@ def test_tools(project_path: Path) -> None:
         frames = payload["frames"]
         n = len(frames) if isinstance(frames, list) else len(frames)
         check(f"export {fmt}: 5 帧都在", n == 5, f"got={n}")
-        atlas_png = OUT / "制造.png"
+        atlas_png = OUT / "fake.png"
         check(f"export {fmt}: 配套图集已写出", atlas_png.exists() and atlas_png.stat().st_size > 0)
     # aseprite 特有：frameTags
-    ase = json.loads((OUT / "制造.aseprite.json").read_text(encoding="utf-8"))
+    ase = json.loads((OUT / "fake.aseprite.json").read_text(encoding="utf-8"))
     check("export aseprite: 2 个 frameTags",
           len(ase["meta"].get("frameTags", [])) == 2)
     # tp_hash：旋转帧必须烘焙（rect 在图集下方，即 y >= 原图高 50）
-    tp = json.loads((OUT / "制造.tp_hash.json").read_text(encoding="utf-8"))
+    tp = json.loads((OUT / "fake.tp_hash.json").read_text(encoding="utf-8"))
     jump2 = tp["frames"]["跳_1"]
     check("export tp_hash: 旋转帧烘焙进图集下方",
           jump2["frame"]["y"] >= 50,
@@ -278,7 +284,7 @@ def main() -> int:
         shutil.rmtree(OUT, ignore_errors=True)
     OUT.mkdir(parents=True, exist_ok=True)
     project_path, manifest = make_test_project()
-    test_tools(project_path)
+    test_tools(project_path, manifest)
     asyncio.run(test_handshake())
 
     print("=" * 50)

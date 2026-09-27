@@ -27,10 +27,14 @@ from __future__ import annotations
 import base64
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 from PIL import Image
 from mcp.server.fastmcp import FastMCP
+
+# 精灵图工程的合成大图本来就是超大合法素材（如 3596×35588 ≈ 1.3 亿像素，
+# 远超 Pillow 默认 8947 万像素的 DecompressionBomb 阈值）。这是本工具的
+# 正常使用场景而非 DOS 攻击，解除上限避免每次导出都打警告/未来转异常。
+Image.MAX_IMAGE_PIXELS = None
 
 from spritesheet import __app_name__, __version__
 from spritesheet.importer import load_project
@@ -244,7 +248,8 @@ def _compose_from_atlas(action: dict, sections: dict,
     rect = tuple(int(v) for v in rects[index])
     width, height = rect[2], rect[3]
     atlas = _combined_canvas(sections, manifest)
-    part = atlas.crop(rect)
+    # Pillow crop 用 (left, top, right, bottom) 绝对坐标；rect 是 (x, y, w, h)
+    part = atlas.crop((rect[0], rect[1], rect[0] + width, rect[1] + height))
     canvas_info = _action_canvas(action, sections)
     canvas_w, canvas_h = canvas_info["canvas"]
     pos_x, pos_y = _canvas_pos(action, sections, index, width, height)
@@ -268,27 +273,36 @@ def _combined_canvas(sections: dict, manifest: dict):
 # ---------------------------------------------------------------------------
 # 内部辅助：engine JSON 导出的 records / atlas（复刻 GUI 的「原图坐标图集」模式）
 # ---------------------------------------------------------------------------
-def _action_shell(action: dict) -> SimpleNamespace:
-    """把 manifest 里的动作字典包成 exporters 能鸭子访问的对象。
+class _ActionShell:
+    """把 manifest 里的动作字典包成 exporters 能鸭子访问的对象（可哈希）。
 
     exporters 只访问 .name / .frames（长度）/ .fps / .loop_mode /
-    .frame_duration_ms(i)，不碰像素。
+    .frame_duration_ms(i)，不碰像素。records 的键是 (action, index)，所以
+    外壳必须可哈希 —— 不用 SimpleNamespace（它定义了 __eq__，unhashable）。
+    本类不定义 __eq__，哈希回落到 object 的 id()。
     """
-    fps = int(action.get("fps") or 10)
 
-    def frame_duration_ms(i: int) -> int:
-        duration = (action.get("frame_durations") or {}).get(str(i))
-        if duration is not None:
-            return int(duration)
-        return max(1, round(1000 / max(1, fps)))
+    __slots__ = ("name", "frames", "fps", "loop_mode", "frame_duration_ms")
 
-    return SimpleNamespace(
-        name=action.get("name") or "action",
-        frames=[None] * _frame_count(action),
-        fps=fps,
-        loop_mode=action.get("loop_mode") or "loop",
-        frame_duration_ms=frame_duration_ms,
-    )
+    def __init__(self, action: dict) -> None:
+        self.name = action.get("name") or "action"
+        self.frames = [None] * _frame_count(action)
+        self.fps = int(action.get("fps") or 10)
+        self.loop_mode = action.get("loop_mode") or "loop"
+        durations = action.get("frame_durations") or {}
+        fps = self.fps
+
+        def frame_duration_ms(i: int) -> int:
+            duration = durations.get(str(i))
+            if duration is not None:
+                return int(duration)
+            return max(1, round(1000 / max(1, fps)))
+
+        self.frame_duration_ms = frame_duration_ms
+
+
+def _action_shell(action: dict) -> _ActionShell:
+    return _ActionShell(action)
 
 
 def _build_export_atlas(manifest: dict, sections: dict):
@@ -298,12 +312,14 @@ def _build_export_atlas(manifest: dict, sections: dict):
     - 带镜像/旋转的帧用帧图 + Pillow 复刻变换后**烘焙追加到图集下方**，
       图集尺寸随之扩张（同 GUI 的 _build_original_atlas）；
     - 含 quad 透视的帧 → 报错要求先在软件里处理（不静默丢帧）。
-    返回 (atlas: PIL.Image, records: dict)。
+    返回 (atlas: PIL.Image, records: dict, shells: list) —— records 的键
+    用的就是返回的 shells（外壳哈希是 id()，调用方必须用同一批对象，
+    不能重新 _action_shell 一份，否则 exporters 查 records 全部落空）。
     """
     atlas = _combined_canvas(sections, manifest)
-    shells: list[SimpleNamespace] = []
+    shells: list[_ActionShell] = []
     records: dict = {}
-    bake: list[tuple[SimpleNamespace, int, Image.Image]] = []
+    bake: list[tuple[_ActionShell, int, Image.Image]] = []
 
     for action in _actions_of(manifest):
         shell = _action_shell(action)
@@ -334,7 +350,7 @@ def _build_export_atlas(manifest: dict, sections: dict):
 
     if bake:
         atlas = _paste_baked(atlas, bake, records)
-    return atlas, records
+    return atlas, records, shells
 
 
 def _paste_baked(atlas: Image.Image, bake, records: dict) -> Image.Image:
@@ -656,8 +672,7 @@ def export_to_engine_json(project_path: str, fmt: str, out_dir: str) -> str:
             f"未知导出格式「{fmt}」。可选：{', '.join(sorted(allowed))}"
             "（不区分大小写）。"
         )
-    atlas, records = _build_export_atlas(manifest, sections)
-    shells = [_action_shell(a) for a in _actions_of(manifest)]
+    atlas, records, shells = _build_export_atlas(manifest, sections)
 
     payload = exporters.build_payload(
         fmt_normalized, shells, records,
