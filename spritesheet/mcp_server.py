@@ -1163,9 +1163,16 @@ def trace_motion(project_path: str, action_name: str) -> dict:
 #    备份：原文件同目录生成 <名>.sstool.bak-<时间戳>，改坏了随时可回退。
 # ---------------------------------------------------------------------------
 def _backup_then_write(project_path: str, manifest: dict, sections: dict) -> str:
-    """写回前把原工程复制成带时间戳的 .bak 备份，再写回；返回备份路径。"""
+    """写回前把原工程复制成带时间戳的 .bak 备份，再写回；返回备份路径。
+
+    同秒内多次写回会追加 -1/-2 后缀（同一文件绝不覆盖上个备份）。"""
     path = Path(project_path)
-    bak = path.parent / f"{path.name}.bak-{time.strftime('%Y%m%d%H%M%S')}"
+    stamp = time.strftime("%Y%m%d%H%M%S")
+    bak = path.parent / f"{path.name}.bak-{stamp}"
+    n = 1
+    while bak.exists():
+        bak = path.parent / f"{path.name}.bak-{stamp}-{n}"
+        n += 1
     if path.exists():
         shutil.copy2(path, bak)
     write_project(path, manifest, sections)

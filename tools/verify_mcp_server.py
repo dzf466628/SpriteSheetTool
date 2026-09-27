@@ -346,6 +346,13 @@ def test_tools(project_path: Path, manifest: dict) -> None:
            run_upd["move_direction"], run_upd["move_speed"]) ==
           (24, "once", 4, "left", 90),
           str(run_upd))
+    # 同秒连续两次写回：备份不互相覆盖（唯一后缀）
+    upd2 = update_action_meta(str(ed), "快跑", fps=15)
+    check("update: 同秒二次写回备份不覆盖",
+          upd["backup_path"] != upd2["backup_path"]
+          and Path(upd["backup_path"]).exists()
+          and Path(upd2["backup_path"]).exists(),
+          f"{upd['backup_path']} vs {upd2['backup_path']}")
     expect_error("err: update fps 越界",
                  lambda: update_action_meta(str(ed), "快跑", fps=0))
     expect_error("err: update 重名",
