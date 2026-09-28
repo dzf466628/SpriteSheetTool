@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """「原图选择」工具回归：点选 / Ctrl 追加 / 框选 / Esc / 高亮 / 与抠图面板打通。
 
 为什么单独一个脚本：这个工具的价值全在"点哪选哪、选了几张、选中的到底被处理了没有"，

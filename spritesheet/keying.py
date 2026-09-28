@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """抠除背景：传统手调算法（纯 Pillow，不依赖 Qt，可脱离界面单独测）。
 
 为什么不做 AI 抠图：本工具吃的是游戏精灵图和 AI 生成的关键帧，背景基本是纯色或单调

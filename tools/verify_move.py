@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Prove that blocks moved out of the backup are AST-identical (pure move).
 
 Usage: python tools/verify_move.py <backup.py> <new_module.py> <name> [<name> ...]

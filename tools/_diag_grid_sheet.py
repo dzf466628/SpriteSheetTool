@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """临时探针：把真图集拖进软件 → 点自动对齐 → 看均分格那条路对不对。
 
 判定标准（不循环论证）：图集本身就是"真值" —— 对齐之后，每帧内容在逻辑画布上的相对位置

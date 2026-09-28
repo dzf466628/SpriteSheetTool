@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """单实例回归：第二个进程必须把文件转给已在跑的实例，自己不开窗口。
 
 三层验证，从轻到重：

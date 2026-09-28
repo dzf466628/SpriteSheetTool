@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """导入精灵图 JSON：把导出的 JSON 还原成软件工程。
 
 支持四种格式（自动识别，无需用户选择）：

@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """通用小部件与图标/像素工具（从 main_window.py 拆出，纯搬移，逻辑未改动）。
 
 包含：

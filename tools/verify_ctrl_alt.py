@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """回归测试：原图查看器里 Ctrl / Alt / Ctrl+Alt 的点击与框选语义（含帧号标注）。
 
 用户口径（NEXT.md「原图选择 / 合成帧的 Ctrl+Alt 组合键」）：

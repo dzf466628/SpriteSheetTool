@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Equivalence tests for the performance optimizations.
 
 Every optimized hot path is checked against a reference implementation of the

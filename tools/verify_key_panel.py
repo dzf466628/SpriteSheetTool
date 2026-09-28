@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """抠除背景的界面回归：竖条按钮 -> 参数浮层 -> 实时预览 -> 原图分块选择 -> 应用/撤销。
 
 为什么单独一个脚本：算法层有 ``verify_keying.py``（纯 Pillow，32 项），这里管的是**接线**——

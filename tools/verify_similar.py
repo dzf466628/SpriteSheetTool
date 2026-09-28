@@ -1,4 +1,7 @@
 #!/usr/bin/env python
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """相似帧专项回归：算法（分组 / 容差 / 循环长度）+ 界面（开关两态、两处标色、纯显示不动数据）。
 
 口径来自用户：

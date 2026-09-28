@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """动画设置横条（原图区下方）：作用于**整个动作**的参数。
 
 与右侧「帧编辑」面板的分工：

@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Report PEP8 blank-line violations at module and class level.
 
 Cutting blocks with block_tool.py can consume the blank separator lines that

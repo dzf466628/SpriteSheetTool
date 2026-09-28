@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """回归：「按住空格/其他键要关（让位）画笔」+ Esc 关工具 + 点画布外自动收工具。
 
 用户口径（原话）："按住空格键或者其他按键要关闭画笔工具"。补充问的口径是：

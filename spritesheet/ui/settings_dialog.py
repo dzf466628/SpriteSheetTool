@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """软件设置弹窗：把「检查更新」从文件菜单收进来，并放软件级开关。
 
 目前内容：

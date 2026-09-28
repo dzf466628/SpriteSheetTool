@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Quick static scan: unused imports + suspected dead top-level defs (AST-based, no deps).
 
 **诊断工具，不是回归**：不参与整套专项回归，退出码恒为 0，输出只供人看。

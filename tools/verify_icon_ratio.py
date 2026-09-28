@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """图标文件本身的回归（PIL 层）：方形帧、比例未变、按高度铺满。
 
 配套 `tools/verify_icon_imagelist.py`（shell 层：SHGetFileInfo 取回真实图标量比例）。

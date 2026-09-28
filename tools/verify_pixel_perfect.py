@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """回归测试：「完美像素」（像素画视图）+「收边」0.5 档 + 辅助线颜色走设置。
 
 钉死的约定：

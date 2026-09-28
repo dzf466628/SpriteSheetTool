@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Export -> import round-trip audit for every JSON format.
 
 Builds a deliberately feature-rich document (reuse frames, composite frames,

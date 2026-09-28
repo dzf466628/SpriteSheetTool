@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Report per-block differences between the post-cleanup baseline and the
 current modules, so every difference can be attributed to a known change.
 

@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Apply the checkerboard tiling optimization to the three expensive paint sites.
 
 Replaces per-cell fillRect loops with a single cached-tile fillRect/drawTiledPixmap

@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """临时探针（第四版）：四种对齐口径放在真实素材上比一比。
 
 判定标准（不循环论证）：把各帧按某种口径摆到同一张逻辑画布上，然后**两两算相邻帧的

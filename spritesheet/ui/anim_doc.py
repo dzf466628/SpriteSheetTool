@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """② 「以单张图片修改」的动图文档：N 帧 + 逐帧时长 + 一串破坏性操作。
 
 用户口径（原话 + 追问确认）：

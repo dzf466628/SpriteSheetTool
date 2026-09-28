@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """从一张源 PNG 生成 Windows 多尺寸 .ico。
 
 **每一档都必须是方形画布**，把源图按长边适配居中（不拉伸、不裁切），输出全部标准尺寸

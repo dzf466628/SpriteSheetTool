@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 r"""冒烟测试模板 —— offscreen 模式下验证关键功能不崩。
 
 用法：

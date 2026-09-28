@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """自由变换各模式的**行为**回归（不是看画面，是看角点数值）。
 
 四角顺序（与 DEFAULT_QUAD 一致）：0=左上 1=右上 2=右下 3=左下；

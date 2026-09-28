@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """变异验证：往产品代码里塞 4 个"看起来对"的错，看回归是否按预期变红。
 
 约定（跟之前几批一致）：

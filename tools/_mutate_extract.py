@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """变异测试：证明 verify_extract.py 的断言真的会咬（一次性工具，不进回归）。
 
 做法：把 verify_extract.py 读进来，把某一行的期望值**改错**，再把改过的源码

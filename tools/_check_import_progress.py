@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """探针：导入的真进度条（A 单文件分块读 / B2 多文件与文件夹按"第 n/N 个"追加）。
 
 用法：offscreen 下跑，直接调真实入口（`_load_image_with_progress` / `_import_image_paths`），

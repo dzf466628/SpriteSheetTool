@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """List free names (referenced but not locally bound) for given top-level blocks.
 
 This computes exactly which imports a newly extracted module needs, instead of

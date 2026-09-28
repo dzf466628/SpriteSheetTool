@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """「本次更新」窗口：**更新完第一次打开软件时显示一次**（用户要求：只显示一次）。
 
 口径

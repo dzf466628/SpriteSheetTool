@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Assemble a new module from a hand-written header plus extracted blocks.
 
 Usage: python tools/assemble.py <header.py> <body.py> <output.py>

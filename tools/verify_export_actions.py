@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """导出对话框的动作列表必须跟着主窗口走 —— 走真实入口的端到端回归。
 
 钉住的 bug（本次修复）：

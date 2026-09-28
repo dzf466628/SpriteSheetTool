@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """临时探针：这张图集到底是不是「横竖均分」，一格多大。
 
 思路（不循环论证）：均分的话，各帧外框的中心在 X 上只会落在固定的几列、Y 上落在固定的几行，

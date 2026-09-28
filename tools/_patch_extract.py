@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """一次性补丁：把「抽帧窗口」和「空格拖动」接上（逐条断言锚点唯一，全成功才落盘）。
 
 为什么用脚本改而不是一条条手改：这轮要动 4 处小地方（提缩略图构造函数 / 工具按钮不抢空格 /

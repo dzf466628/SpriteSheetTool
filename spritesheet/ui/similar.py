@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """相似帧查找：把全图元素里"长得像"的归成组，给「帧工具 · 相似帧」那颗开关按钮用。
 
 用户口径（原话）：

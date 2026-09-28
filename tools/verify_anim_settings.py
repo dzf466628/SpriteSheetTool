@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """动画设置横条 + 帧编辑瘦身 回归验证。
 
 覆盖：

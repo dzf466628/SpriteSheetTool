@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """图标回归 —— 走**资源管理器真实使用的路径**（系统图标列表）。
 
 为什么必须专门有这么一个工具：上一轮改 `SSTool.ico` 时，我用

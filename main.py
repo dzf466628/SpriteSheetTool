@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """SpriteSheetTool 启动入口：python main.py
 
 单实例：整个系统只跑一个进程。第二次启动（包括双击 .sstool 文件关联打开）会把

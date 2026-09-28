@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """工程文件格式回归：新布局（PNG 前置）、旧布局兼容、损坏文件处理。
 
 新布局让 .sstool 本身是一张合法 PNG，资源管理器（配好图片缩略图处理器后）

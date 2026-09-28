@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """更新服务器连通性与目录列表检查。
 
 发版后跑一次，确认：

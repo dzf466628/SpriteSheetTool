@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """诊断工具：整窗渲染，找出有没有「成条描不出来的浅色区域」。
 
 **这是诊断工具，不是断言工具**（正常退出码 0）：它把发现的东西列出来给人看，

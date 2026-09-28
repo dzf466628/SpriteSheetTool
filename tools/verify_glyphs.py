@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """字形回归 —— **必须跑在真实的 windows 平台下**（本脚本自己强制切换）。
 
 为什么单独一个脚本：`QT_QPA_PLATFORM=offscreen` 的回归环境**没有真实字体**，

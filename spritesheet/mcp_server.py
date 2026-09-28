@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """SpriteSheetTool MCP Server（headless，stdio 传输）。
 
 让 Claude Desktop / Cursor 等 MCP 客户端直接读写精灵图工程 —— 导入精灵图 JSON、

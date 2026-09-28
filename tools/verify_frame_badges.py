@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Regression test: frame-number badges of different actions must not overlap.
 
 The bug: badge x-positions were computed as `rect.left() + action_index * (sq+2)`,

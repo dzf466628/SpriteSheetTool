@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """「当前帧微调」拖动行为的回归：**拖的时候帧真的动，松手才重算画布区域**。
 
 用户原话：

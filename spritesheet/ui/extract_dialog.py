@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """抽帧窗口（初始 500×600，可缩放）：动画预览（悬浮播放工具条）+ 缩略图 + 抽帧选项。
 
 用户口径（原话，按时间顺序）：

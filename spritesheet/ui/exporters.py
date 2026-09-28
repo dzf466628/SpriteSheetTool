@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """第三方精灵图 JSON 导出器。
 
 将本工具的动作/帧数据导出为业界通用格式，供其他引擎/软件直接使用：

@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """「帧工具 · 自动对齐」专项回归。
 
 用户口径（这一版按他的话重写）：

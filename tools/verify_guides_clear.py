@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """回归测试：右键「清空选中区域」+ 标线（从标尺拖出来的参考线）。
 
 钉死的约定：

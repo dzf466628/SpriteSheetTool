@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """相似帧的变异验证：故意改坏产品代码，确认对应断言会红；改完逐字节还原。
 
 只改产品代码（spritesheet/），改前 read_bytes 存一份、跑完 write_bytes 还原，

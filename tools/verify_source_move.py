@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """拖动原图移位回归：位置存储 / 夹取 / 帧跟着走 / 撤销重做 / 工程往返。
 
 为什么单独一个脚本：允许拖动之后"位置"从**算出来的**变成了**存下来的状态**，于是有三件

@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """回归：「② 以单张图片修改」的动图文档 —— 单帧画布 + 改动同步全部帧 + 操作链撤销 + 导出壳动作。
 
 用户口径（原话 + 追问确认）：

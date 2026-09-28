@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """帧变换与预览布局纯函数（从 main_window.py 拆出，纯搬移，逻辑未改动）。
 
 预览、缩略图、GIF、图集/JSON 导出全部复用这里的函数，保证所见即所得。

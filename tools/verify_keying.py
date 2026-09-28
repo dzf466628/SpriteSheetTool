@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """验证抠图算法（spritesheet/keying.py）。
 
 纯 Pillow、不需要 Qt，所以不用 offscreen 就能跑：

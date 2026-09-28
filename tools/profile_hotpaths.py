@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Profile the hot paths that are still slow after the first optimization pass.
 
 Previous pass fixed _alpha_bounds / frame_base_size / checkerboard / detection.

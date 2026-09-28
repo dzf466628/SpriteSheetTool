@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """回归：动图（GIF / WebP）判定 + 解帧 + 逐帧时长 + 体积护栏。
 
 用户要的功能是"拖进 GIF/WebP，是动图就问一句：转序列帧 / 当单张改"。这一步只做**解帧**，

@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """顶部名称栏回归：没有软件图标、首字母放大且与其余文字垂直居中。
 
 量法：把 AppNameLabel 实际渲染到图上（widget.grab()），再按**非透明像素**求

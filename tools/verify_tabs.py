@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """工程标签页回归：新建 / 切换 / 改名 / 关闭，且**每个标签的文档互不串味**。
 
 要证明的四件事：

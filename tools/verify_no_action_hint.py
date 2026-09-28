@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """「加了图片但还没有动作」时点图片/控件的提示回归。
 
 用户原话：

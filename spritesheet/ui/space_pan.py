@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """空格 = 按住拖动（**应用级**）。
 
 用户要求：「鼠标放在预览的窗口 按空格可以随意拖动」。只在画布自己的 keyPressEvent 里认空格

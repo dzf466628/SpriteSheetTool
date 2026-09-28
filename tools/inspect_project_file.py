@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """存一个真实工程，检查 .sstool 的文件布局与缩略图。
 
 Usage: .venv\\Scripts\\python.exe tools\\inspect_project_file.py [输出路径]

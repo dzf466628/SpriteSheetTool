@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """抠除背景的参数浮层：浮在原图区画布上，参数一改就实时预览。
 
 单独一个模块的理由：这面板自己有十几个控件 + 防抖 + 预览计算，塞进 image_viewer.py

@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Compare each member of a class between two files and name the differing ones.
 
 Usage: python tools/verify_class_members.py <fileA> <fileB> <ClassName>

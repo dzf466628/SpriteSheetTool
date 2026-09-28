@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """深色主题 + 单一玫红强调色（与 AnchorMotion 风格统一）。"""
 
 import ctypes

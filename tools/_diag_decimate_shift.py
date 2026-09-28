@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """诊断：抽帧后「后面的元素会位移」到底是哪一帧挪了、偏移有没有贴错帧。
 
 做法（量化，不靠肉眼）：

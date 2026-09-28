@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Single-file SpriteSheetTool project format.
 
 The format is intentionally not an archive.  It is a small binary container

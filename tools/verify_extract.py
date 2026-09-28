@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """「抽帧」窗口端到端回归：真点「抽帧」按钮 → 真点四档 → 应用/取消。
 
 由探针 `tools/_check_extract.py` 提升而来（原来只 print、不判定，断言全过但收尾崩 0xC0000005）。

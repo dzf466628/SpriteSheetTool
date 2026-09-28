@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """回归：「① 转成序列帧」—— 横排铺帧 + 整帧一个元素 + 自动建动作 + 逐帧时长 + 一条撤销。
 
 用户口径（原话 + 追问确认）：

@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 r"""验证脚本模板 —— 专门验证视觉/交互细节（offscreen 测不了的）。
 
 用法：

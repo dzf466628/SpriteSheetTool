@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """删除此帧回归：预览/抽帧缩略图右键删除 + 取消还原语义 + 滚动条悬浮动画。
 
 覆盖三个新需求：

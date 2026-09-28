@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Offscreen smoke test for SpriteSheetTool.
 
 Runs the real MainWindow headless and exercises the full pipeline:

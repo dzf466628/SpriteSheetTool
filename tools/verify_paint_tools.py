@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """回归测试：左侧原图工具栏的画笔 / 橡皮擦 / 吸管 / 颜色选择（PS 同款四件套）。
 
 钉死的约定：

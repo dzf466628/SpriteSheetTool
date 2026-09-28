@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """抽帧算法的专项回归（纯函数，不碰 UI）。
 
 对应需求原话：

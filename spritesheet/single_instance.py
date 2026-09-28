@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """单实例：整个系统只允许跑一个本程序，第二次启动把"要打开的文件"转给已在跑的那个。
 
 需求：双击多个 `.sstool`（或用文件关联打开）时，不要开出一堆进程，而是**在同一个窗口里

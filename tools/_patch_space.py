@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """一次性补丁②：空格拖动改成**应用级**，并建 space_pan.py。
 
 为什么推倒重来：用户实测「鼠标放在预览窗口上按空格还是不能拖动，指针都没变」——

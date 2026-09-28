@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """AST block tool for mechanical refactoring.
 
 Locates top-level / class-level definitions by qualified name and can list,

@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """回归脚本的"用户设置保险"：把会被测试改动的软件设置先记到磁盘，跑完原样写回。
 
 为什么要落盘，而不是记在内存里就完事：这套回归要验"标线/网格的颜色真的从设置里读、

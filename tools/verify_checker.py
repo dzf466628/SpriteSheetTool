@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Pixel-exact verification of the checkerboard tiling optimization.
 
 Renders the checkerboard with the ORIGINAL per-cell fillRect loop and with the

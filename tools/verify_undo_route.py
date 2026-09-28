@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """撤销路由回归：动作栈优先、撤空了落到全局栈。
 
 为什么单独一个脚本：抠除背景 / 添加原图这类工程级操作记在**全局栈**，而 Ctrl+Z 走的是

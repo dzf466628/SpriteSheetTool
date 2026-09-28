@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Regression test: composite-frame badges of different actions must not overlap.
 
 Scenario: two actions composite the SAME pair of elements, so their composite
