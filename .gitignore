@@ -61,3 +61,10 @@ _shots/
 # 技能包备份（dudu-ai-dev-kit 等），不进仓库
 skills/*.rar
 crash.log
+
+# >>> RepoPulse 文件管理（可视化开关自动维护） >>>
+/SSTool_源图.png
+/spritesheet/
+/tools/
+/video/
+# <<< RepoPulse 文件管理 <<<
