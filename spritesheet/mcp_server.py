@@ -141,6 +141,16 @@ TOOL_DEFS = [
      "提取动图文档指定帧，包含已保存的翻转、旋转、画笔和抠图操作"),
     ("update_animation_document",
      "向动图文档追加翻转、旋转、画笔或抠图操作并自动备份；先 read_animation_document 确认是动图文档"),
+    ("auto_align_action",
+     "自动算出逐帧偏移并写回，让整条动画落点对齐（均分格/精确/估算三条路，默认不跑估算）"),
+    ("draw_on_frames",
+     "在动作的帧上画线或擦除（画笔/橡皮，可指定单帧或全部帧，写前自动备份）"),
+    ("decimate_action_frames",
+     "按相似度智能抽帧（keep_3_5 / keep_1_2 / keep_1_4 / dedupe 四档），保留帧落点自动补偿不位移"),
+    ("transform_action_frames",
+     "把旋转/镜像一次套用到动作的多帧或全部帧（软件里一键作用于全部帧的等价物）"),
+    ("edit_animation_document",
+     "编辑动图文档已保存的操作链：删除某一项或调整顺序"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -511,6 +521,483 @@ def _canvas_pos(action: dict, sections: dict, index: int,
     dx, dy = (action.get("frame_offsets") or {}).get(str(index), [0, 0])
     return (pad + (max_w - width) // 2 + int(dx or 0),
             pad + (max_h - height) // 2 + int(dy or 0))
+
+
+# ---------------------------------------------------------------------------
+# 内部辅助：对齐几何（与 spritesheet/ui/transform.py 同一套算法）
+#
+# 刻意在这里**重写一遍**而不是 import ui.transform：那个模块顶部 import PyQt6，
+# 而本服务器的 --mcp 分支是 headless 的（main.py 刻意不加载 QtWidgets）。
+# 以下都是只看框、不看图的纯函数，两边口径必须保持一致。
+# ---------------------------------------------------------------------------
+def _cluster_1d(values, tol):
+    """一维数值按"大间隔就断开"聚组，返回 (每组均值, 每个值属于哪一组)。"""
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    groups: list[list[int]] = []
+    for idx in order:
+        if groups and values[idx] - values[groups[-1][-1]] <= tol:
+            groups[-1].append(idx)
+        else:
+            groups.append([idx])
+    labels = [0] * len(values)
+    centers = []
+    for gi, g in enumerate(groups):
+        for idx in g:
+            labels[idx] = gi
+        centers.append(sum(values[i] for i in g) / len(g))
+    return centers, labels
+
+
+def _center_pitch(values) -> float:
+    """一维中心的"簇间距"（中位数）——均分的话相邻格的中心差就是一格。"""
+    ordered = sorted(values)
+    gaps = [b - a for a, b in zip(ordered, ordered[1:]) if b > 0]
+    if not gaps:
+        return 0.0
+    gaps.sort()
+    return gaps[len(gaps) // 2]
+
+
+class _SheetGrid(dict):
+    """detect 的返回：{帧序: (列, 行)} + 验证通过的那组网格几何。"""
+    __slots__ = ("cols", "rows", "pitch_x", "pitch_y")
+
+
+def _cell_rect(index_of: dict, i: int, canvas_w: int, canvas_h: int,
+               cols: int, rows: int) -> tuple[int, int, int, int]:
+    """第 i 帧所在的「均分格」矩形 (x, y, w, h)。"""
+    col, row = index_of[i]
+    left = int(round(col * canvas_w / cols))
+    right = int(round((col + 1) * canvas_w / cols))
+    top = int(round(row * canvas_h / rows))
+    bottom = int(round((row + 1) * canvas_h / rows))
+    return (left, top, right - left, bottom - top)
+
+
+def _detect_sheet_grid(rects, canvas_w: int, canvas_h: int):
+    """判定这张精灵图是不是「横竖均分」；是则返回 _SheetGrid，否则 None。
+
+    判法（对"多检出几个碎屑"免疫，不要求每格元素个数相等）：
+      1. 内容块中心在某方向会聚成等距若干组 → 组数 = 该方向格数，组间距中位 = 一格多长；
+      2. 另一方向格数由"画布尺寸 ÷ 格长"推，并纳入聚簇结果当候选；
+      3. 每候选逐个内容块验算"内容完整落在自己那格里"，第一个全中的才算成立。
+    """
+    count = len(rects or ())
+    if count < 4 or canvas_w <= 0 or canvas_h <= 0:
+        return None
+    xs = [float(r[0]) + float(r[2]) / 2.0 for r in rects]
+    ys = [float(r[1]) + float(r[3]) / 2.0 for r in rects]
+
+    def clusters(values):
+        ordered = sorted(values)
+        gaps = [b - a for a, b in zip(ordered, ordered[1:]) if b > 0]
+        tol = max(2.0, (max(gaps) * 0.25) if gaps else 2.0)
+        return _cluster_1d(values, tol)[0]
+
+    cx, cy = clusters(xs), clusters(ys)
+    cols_guess, rows_guess = len(cx), len(cy)
+    pitch_x, pitch_y = _center_pitch(cx), _center_pitch(cy)
+    candidates: list[tuple[int, int]] = []
+
+    def add(cols, rows):
+        cols, rows = int(cols), int(rows)
+        if cols >= 2 and rows >= 2 and (cols, rows) not in candidates:
+            candidates.append((cols, rows))
+
+    add(cols_guess, rows_guess)
+    if pitch_y > 0:
+        add(round(canvas_w / pitch_y), rows_guess)
+    if pitch_x > 0:
+        add(cols_guess, round(canvas_h / pitch_x))
+    for cols, rows in list(candidates):
+        add(cols, round(canvas_h / (canvas_w / cols)) if cols else 0)
+        add(round(canvas_w / (canvas_h / rows)) if rows else 0, rows)
+
+    for cols, rows in candidates:
+        cell_w, cell_h = canvas_w / cols, canvas_h / rows
+        if pitch_x > 0 and abs(cell_w - pitch_x) > cell_w * 0.15:
+            continue
+        if pitch_y > 0 and abs(cell_h - pitch_y) > cell_h * 0.15:
+            continue
+        index_of: dict[int, tuple[int, int]] = {}
+        ok = True
+        for i, r in enumerate(rects):
+            col = min(max(int(xs[i] // cell_w), 0), cols - 1)
+            row = min(max(int(ys[i] // cell_h), 0), rows - 1)
+            index_of[i] = (col, row)
+            left, top, cw, ch = _cell_rect(index_of, i, canvas_w, canvas_h, cols, rows)
+            if r[0] < left - 1 or r[0] + r[2] > left + cw + 1:
+                ok = False
+                break
+            if r[1] < top - 1 or r[1] + r[3] > top + ch + 1:
+                ok = False
+                break
+        if ok:
+            result = _SheetGrid()
+            result.cols, result.rows = cols, rows
+            result.pitch_x, result.pitch_y = pitch_x, pitch_y
+            result.update(index_of)
+            return result
+    return None
+
+
+def _alpha_bounds_image(img: Image.Image):
+    """图像 alpha 的紧切外框 (x, y, w, h)；全透明返回 None。"""
+    if img is None:
+        return None
+    box = img.convert("RGBA").getchannel("A").getbbox()
+    if not box:
+        return None
+    return (box[0], box[1], box[2] - box[0], box[3] - box[1])
+
+
+def _align_offsets_grid(action: dict, sections: dict, manifest: dict):
+    """路①：精灵图**横竖均分** → 每格就是"正常那一帧"的框，差值就是误差。
+
+    返回 (offsets, how) 或 None（判不出均分 / 有带变换或多元素合成的帧）。
+    """
+    combined_name = manifest.get("combined_image") or ""
+    atlas = png_from_bytes(sections.get(combined_name, b"")) if combined_name else None
+    if atlas is None:
+        return None
+    total = len(action.get("frame_rects") or [])
+    if total < 4:
+        return None
+    rects = [tuple(r) for r in (action.get("frame_rects") or [])]
+    if len(rects) != total:
+        return None
+    rotations = action.get("frame_rotations") or {}
+    quads = action.get("frame_quads") or {}
+    mirror_h = set(action.get("frame_mirror_h") or [])
+    mirror_v = set(action.get("frame_mirror_v") or [])
+    parts_all = action.get("frame_parts") or []
+    for i in range(total):
+        if rotations.get(str(i)) or i in mirror_h or i in mirror_v or quads.get(str(i)):
+            return None                     # 带变换的帧：帧内位置变了
+        parts = parts_all[i] if i < len(parts_all) else None
+        if not parts or len(parts) != 1:
+            return None                     # 多元素合成的帧
+    index_of = _detect_sheet_grid(rects, atlas.width, atlas.height)
+    if not index_of:
+        return None
+    cols, rows = index_of.cols, index_of.rows
+    use_pitch = bool(index_of.pitch_x > 0 and index_of.pitch_y > 0)
+    if use_pitch:
+        for i in range(total):
+            r = rects[i]
+            if abs(r[0] - int(round(index_of[i][0] * index_of.pitch_x))) > 2 \
+                    or abs(r[1] - int(round(index_of[i][1] * index_of.pitch_y))) > 2:
+                use_pitch = False
+                break
+    # 每帧内容在"格/原图"坐标系里的框
+    local_boxes: list[tuple[int, int, int, int]] = []
+    frame_sizes: list[tuple[int, int]] = []
+    content_in_frame: list[tuple[int, int]] = []
+    for i in range(total):
+        r = rects[i]
+        if use_pitch:
+            base_x = int(round(index_of[i][0] * index_of.pitch_x))
+            base_y = int(round(index_of[i][1] * index_of.pitch_y))
+        else:
+            col, row = index_of[i]
+            grid = _cell_rect(index_of, i, atlas.width, atlas.height, cols, rows)
+            base_x, base_y = grid[0], grid[1]
+        local_boxes.append((base_x, base_y, r[2], r[3]))
+        frame_sizes.append((int(r[2]), int(r[3])))
+        content_in_frame.append((int(r[0]) - base_x, int(r[1]) - base_y))
+    return _compute_source_anchor_offsets(
+        local_boxes, frame_sizes, content_in_frame, cols, rows, use_pitch,
+        index_of, atlas, int(action.get("padding") or 0),
+    ), ("均分格" if True else "")
+
+
+def _compute_source_anchor_offsets(local_boxes, frame_sizes, content_in_frame,
+                                   cols, rows, use_pitch, index_of, atlas,
+                                   padding: int = 0):
+    """把每帧放回它在原图里的位置：offset = 原图坐标 − 居中落点。
+
+    与 ui/transform.compute_source_anchor_offsets 同一公式；"画布基准"这一版
+    按均分格推算，避免依赖 MainWindow 的预览布局对象。
+    """
+    if use_pitch:
+        max_w = int(round(cols * index_of.pitch_x)) if index_of.pitch_x > 0 else atlas.width
+        max_h = int(round(rows * index_of.pitch_y)) if index_of.pitch_y > 0 else atlas.height
+    else:
+        max_w, max_h = atlas.width, atlas.height
+    out: dict[int, tuple[int, int]] = {}
+    for i in range(len(local_boxes)):
+        box = local_boxes[i]
+        size = frame_sizes[i] if i < len(frame_sizes) else None
+        inner = content_in_frame[i] if i < len(content_in_frame) else None
+        if box is None or size is None or inner is None:
+            continue
+        bx, by = box[0], box[1]
+        w, h = size
+        cix, ciy = inner
+        place_x = padding + (max_w - w) // 2
+        place_y = padding + (max_h - h) // 2
+        out[i] = (int(round(bx)) - (place_x + int(round(cix))),
+                  int(round(by)) - (place_y + int(round(ciy))))
+    return out
+
+
+def _frame_profile(img: Image.Image, step: int = 4):
+    """抽样的 alpha 列/行投影（给互相关用）。"""
+    if img is None:
+        return [], []
+    img = img.convert("RGBA")
+    sw = max(1, img.width // step)
+    sh = max(1, img.height // step)
+    small = img.resize((sw, sh), Image.Resampling.NEAREST)
+    alpha = small.getchannel("A")
+    px = list(alpha.getdata())
+    cols = [0] * sw
+    rows = [0] * sh
+    for y in range(sh):
+        base = y * sw
+        s = 0
+        for x in range(sw):
+            v = px[base + x]
+            if v:
+                cols[x] += v
+                s += v
+        rows[y] = s
+    return cols, rows
+
+
+def _correlate_profiles(ref, prof, span: int) -> int:
+    """prof 要对上 ref 需要移动多少（重叠区点积最大处）。"""
+    if not ref or not prof:
+        return 0
+    best, best_score = 0, None
+    for shift in range(-span, span + 1):
+        score = 0
+        for i, v in enumerate(prof):
+            if not v:
+                continue
+            j = i + shift
+            if 0 <= j < len(ref):
+                score += v * ref[j]
+        if best_score is None or score > best_score:
+            best_score, best = score, shift
+    return best
+
+
+def _align_offsets_estimate(action: dict, sections: dict, manifest: dict):
+    """路③：原图信息丢了 → 按帧间重合度估算（可能不准）。"""
+    total = _frame_count(action)
+    if total < 2:
+        return {}
+    images = []
+    for i in range(total):
+        try:
+            img = _render_frame_image(action, sections, i, manifest)[0]
+        except Exception:  # noqa: BLE001
+            return {}
+        images.append(img)
+    ref_cols, ref_rows = _frame_profile(images[0], step=4)
+    span = max(8, int(max(images[0].width, images[0].height) * 0.25))
+    offsets: dict[int, tuple[int, int]] = {}
+    for i in range(total):
+        cols, rows = _frame_profile(images[i], step=4)
+        dx = _correlate_profiles(ref_cols, cols, span)
+        dy = _correlate_profiles(ref_rows, rows, span)
+        offsets[i] = (int(dx) * 4, int(dy) * 4)
+    return offsets
+
+
+def _frame_feature(img: Image.Image, size: int = 64):
+    """一帧的「指纹」：(64×64 遮罩位图, 遮罩像素数, 遮罩内平均色)。
+
+    与 ui/similar.py 的 _features 同一口径（64 而不是 32：32 会把"换了姿势"平均掉）。
+    """
+    if img is None:
+        return (0, 0, (0.0, 0.0, 0.0))
+    small = img.convert("RGBA").resize((size, size), Image.Resampling.NEAREST)
+    px = list(small.getdata())
+    mask = 0
+    count = 0
+    sum_r = sum_g = sum_b = 0
+    for i, (r, g, b, a) in enumerate(px):
+        if a >= 8:
+            mask |= 1 << i
+            count += 1
+            sum_r += r
+            sum_g += g
+            sum_b += b
+    mean = (sum_r / count, sum_g / count, sum_b / count) if count else (0.0, 0.0, 0.0)
+    return (mask, count, mean)
+
+
+def _similar_fast(feature_a, feature_b, tolerance: int) -> bool:
+    """形状重合度（遮罩 IoU）+ 内容平均色差 —— 只在「有内容的地方」上算。
+
+    刻度：容差 t 表示"最多允许 t/1000 的格子不一样"，与 ui/similar.py 完全一致。
+    """
+    mask_a, count_a, mean_a = feature_a
+    mask_b, count_b, mean_b = feature_b
+    inter = (mask_a & mask_b).bit_count()
+    union = count_a + count_b - inter
+    if union == 0:
+        return True                       # 两张都全透明，算一样
+    if inter / union < 1.0 - tolerance / 1000.0:
+        return False
+    return max(abs(a - b) for a, b in zip(mean_a, mean_b)) <= tolerance * 0.5
+
+
+def _group_elements(images, tolerance: int = 0) -> dict[int, int]:
+    """把帧按相似度分组，返回 {帧号: 组号}（与 GUI group_elements 同口径）。
+
+    先按"完全一样"的 md5 归并（快），再对剩余的两两比 IoU + 色差。
+    """
+    total = len(images)
+    marks: dict[int, int] = {}
+    group = 0
+    features = [_frame_feature(img) for img in images]
+    if tolerance <= 0:
+        seen: dict[bytes, int] = {}
+        for i, img in enumerate(images):
+            if img is None:
+                continue
+            key = img.convert("RGBA").tobytes()
+            if key not in seen:
+                seen[key] = group
+                group += 1
+            marks[i] = seen[key]
+        return marks
+    for i in range(total):
+        if i in marks:
+            continue
+        marks[i] = group
+        for j in range(i + 1, total):
+            if j in marks:
+                continue
+            if _similar_fast(features[i], features[j], tolerance):
+                marks[j] = group
+        group += 1
+    return marks
+
+
+def _split_runs(marks: dict[int, int], total: int) -> list[list[int]]:
+    """一串 = **同组号 + 帧序相邻**；不同组或不相邻就断开（用户口径）。"""
+    runs: list[list[int]] = []
+    current: list[int] = []
+    for i in range(total):
+        if i not in marks:
+            if current:
+                runs.append(current)
+                current = []
+            continue
+        if current and marks[current[-1]] == marks[i] and current[-1] == i - 1:
+            current.append(i)
+        else:
+            if current:
+                runs.append(current)
+            current = [i]
+    if current:
+        runs.append(current)
+    return [r for r in runs if len(r) > 1]
+
+
+def _iou(feat_a, feat_b) -> float:
+    mask_a, count_a, _ = feat_a
+    mask_b, count_b, _ = feat_b
+    inter = (mask_a & mask_b).bit_count()
+    union = count_a + count_b - inter
+    return inter / union if union else 1.0
+
+
+def _center_offset(images, run: list[int]) -> int:
+    """这串里「最标准」那帧的相对位置：跟同串其他帧平均最像的那一帧。"""
+    feats = [_frame_feature(images[i]) for i in run]
+    best_j, best_score = 0, -1.0
+    for j in range(len(feats)):
+        score = 0.0
+        for k in range(len(feats)):
+            if j != k:
+                score += _iou(feats[j], feats[k])
+        score /= max(1, len(feats) - 1)
+        if score > best_score + 1e-9:
+            best_j, best_score = j, score
+    return best_j
+
+
+def _pick_offsets(n: int, keep: int, center: int) -> list[int]:
+    """在一串 n 帧里挑 keep 个位置：均匀铺开，并且**一定包含最标准那帧**。"""
+    if keep >= n:
+        return list(range(n))
+    if keep <= 1:
+        return [center]
+    picked = {center}
+    for k in range(keep):
+        picked.add(round(k * (n - 1) / (keep - 1)))
+    while len(picked) > keep:
+        far = max(picked, key=lambda j: (abs(j - center), j))
+        if far == center:
+            break
+        picked.discard(far)
+    return sorted(picked)
+
+
+# 档位 → (分子, 分母)；None = 强力去重（一串只留 1 帧）。与 DECIMATE_RATIOS 一致。
+_DECIMATE_RATIOS: dict[str, tuple[int, int] | None] = {
+    "keep_3_5": (3, 5),
+    "keep_1_2": (1, 2),
+    "keep_1_4": (1, 4),
+    "dedupe": None,
+}
+
+
+def _decimate_indices(images, marks: dict[int, int], mode: str) -> list[int]:
+    """抽帧：返回**保留**的帧号（升序）。一串 N 帧里按档位只留 ceil(N*num/den) 帧，
+    最少留 1 帧；不相邻/没配对的帧原样保留；每串必含最标准那帧。"""
+    total = len(images)
+    if total <= 1 or not marks:
+        return list(range(total))
+    ratio = _DECIMATE_RATIOS.get(mode, (1, 2))
+    keep_idx = set(range(total))
+    for run in _split_runs(marks, total):
+        n = len(run)
+        if ratio is None:
+            keep = 1
+        else:
+            num, den = ratio
+            keep = max(1, (n * num + den - 1) // den)
+        if keep >= n:
+            continue
+        keep_pos = set(_pick_offsets(n, keep, _center_offset(images, run)))
+        for j, idx in enumerate(run):
+            if j not in keep_pos:
+                keep_idx.discard(idx)
+    return sorted(keep_idx)
+
+
+def _compensate_offsets(sizes_old: dict, offsets_old: dict, sizes_new: dict,
+                        frame_map: dict[int, int]) -> dict:
+    """抽帧后补偿偏移，让每个保留帧的**落点逐帧不变**（相似 ≠ 同尺寸，
+    抽出较大的帧会让 max 变小、居中项对所有帧一起变 ⇒ 画面整体位移）。
+
+    new_offset = old_offset + [ (max_old−size)//2 − (max_new−size)//2 ]
+    """
+    def _maxwh(sizes: dict) -> tuple[int, int]:
+        if not sizes:
+            return 0, 0
+        return (max(s[0] for s in sizes.values()), max(s[1] for s in sizes.values()))
+
+    max_old = _maxwh(sizes_old)
+    max_new = _maxwh(sizes_new)
+    out: dict[int, tuple[int, int]] = {}
+    for old, new in frame_map.items():
+        size = sizes_old.get(old)
+        if size is None or new not in sizes_new:
+            continue
+        dx = (max_old[0] - size[0]) // 2 - (max_new[0] - size[0]) // 2
+        dy = (max_old[1] - size[1]) // 2 - (max_new[1] - size[1]) // 2
+        ex, ey = offsets_old.get(old, (0, 0))
+        nx, ny = ex + dx, ey + dy
+        if nx or ny:
+            out[new] = (nx, ny)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -2498,6 +2985,397 @@ def update_animation_document(project_path: str, operation: dict) -> dict:
     backup = _backup_then_write(project_path, manifest, sections)
     return {"ok": True, "operation_index": len(payload["ops"]) - 1,
             "kind": kind, "backup_path": backup}
+
+
+@mcp.tool(annotations={
+    "title": "自动对齐", "readOnlyHint": False,
+    "destructiveHint": False, "idempotentHint": False, "openWorldHint": False,
+})
+def auto_align_action(project_path: str, action_name: str,
+                      allow_estimate: bool = False) -> dict:
+    """自动算出逐帧偏移并写回，让整条动画的落点对齐（与软件「自动对齐」同一套算法）。
+
+    用户口径：**只改帧的偏移数据** —— 锚点、padding、帧图像、尺寸一概不碰。
+    三条路，自己按数据判断走哪条：
+      - **均分格**（首选，精确）：精灵图本身横竖均分 → 每格就是"正常那一帧"的框，
+        紧切框在格里的落点差就是误差；
+      - **精确**：原点信息够时按「原图锚点 − 紧切框中心」把每帧放回原位置；
+      - **估算**：原图已经是紧切小图 / 带变换 / 多元素合成时，只能按帧间重合度猜。
+        **默认不做**（可能不准）；要跑请显式传 allow_estimate=True。
+
+    参数：
+      - project_path (str)：.sstool 工程绝对路径；
+      - action_name (str)：目标动作名；
+      - allow_estimate (bool)：是否允许走"估算"那条路，默认 False。
+
+    返回 dict：{ "ok", "action", "method", "offsets_changed", "backup_path", "note" }
+    判不出均分且未开估算时返回 method="none" 并说明原因（不写回、不备份）。
+    """
+    manifest, sections = _read_any_project(project_path)
+    action = _find_action(manifest, action_name)
+    total = _frame_count(action)
+    if total < 2:
+        raise ValueError(f"动作「{action_name}」只有 {total} 帧，至少要两帧才能对齐。")
+    if not manifest.get("combined_image"):
+        return {"ok": False, "action": action_name, "method": "none",
+                "offsets_changed": 0, "backup_path": "",
+                "note": "工程没有合成图，拿不到像素，无法对齐。"}
+
+    offsets = None
+    method = ""
+    note = ""
+    grid = _align_offsets_grid(action, sections, manifest)
+    if grid is not None:
+        offsets, method = grid[0], "grid"
+        note = "均分格：每格就是正常那一帧的框，差值即误差（不是估的）"
+    if offsets is None:
+        try:
+            offsets = _align_offsets_estimate(action, sections, manifest)
+            method = "estimate"
+            note = "估算：按帧间重合度对齐，可能不准，建议人工核对"
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "action": action_name, "method": "none",
+                    "offsets_changed": 0, "backup_path": "",
+                    "note": f"算不出对齐偏移：{exc}"}
+        if not allow_estimate:
+            return {"ok": False, "action": action_name, "method": "none",
+                    "offsets_changed": 0, "backup_path": "",
+                    "note": ("判不出「均分格」且原图信息不足，只能估算；"
+                             "若接受可能不准，请传 allow_estimate=True 重试。")}
+
+    old = dict(action.get("frame_offsets") or {})
+    merged = dict(old)
+    changed = 0
+    for index, value in (offsets or {}).items():
+        pair = [int(value[0]), int(value[1])]
+        if pair == [0, 0]:
+            merged.pop(str(index), None)
+        else:
+            merged[str(index)] = pair
+        if old.get(str(index)) != merged.get(str(index)):
+            changed += 1
+    if changed == 0:
+        return {"ok": True, "action": action_name, "method": method,
+                "offsets_changed": 0, "backup_path": "",
+                "note": "这些帧本来就在该在的位置上，偏移没变"}
+    action["frame_offsets"] = merged
+    backup = _backup_then_write(project_path, manifest, sections)
+    return {"ok": True, "action": action_name, "method": method,
+            "offsets_changed": changed, "backup_path": backup, "note": note}
+
+
+@mcp.tool(annotations={
+    "title": "绘制 / 擦除帧", "readOnlyHint": False,
+    "destructiveHint": True, "idempotentHint": False, "openWorldHint": False,
+})
+def draw_on_frames(project_path: str, action_name: str, operation: dict) -> dict:
+    """在动作的帧上画线或擦除（与软件画笔/橡皮同一口径：直接改帧像素，写前自动备份）。
+
+    operation 形状：``{"kind":"brush"|"eraser","segs":[[x1,y1,x2,y2]],
+    "size":4,"scope":"current"|"all","frames":[0,2]}``
+
+      - ``kind``："brush" 画不透明前景色，"eraser" 把笔画擦成透明；
+      - ``segs``：**画布坐标系**下线段的端点列表（与软件预览画布同一坐标系）；
+      - ``size``：笔宽（像素，默认 4，至少 1）；
+      - ``scope``："current" 只用 ``frames`` 指定的帧；"all" 作用于全部帧（默认）；
+      - ``frames``：scope="current" 时的帧号列表。
+
+    返回 dict：{ "ok", "action", "kind", "frames_drawn", "backup_path" }
+    """
+    manifest, sections = _read_any_project(project_path)
+    action = _find_action(manifest, action_name)
+    if not isinstance(operation, dict):
+        raise ValueError("operation 必须是对象。")
+    kind = str(operation.get("kind") or "")
+    if kind not in ("brush", "eraser"):
+        raise ValueError("operation.kind 必须是 brush 或 eraser。")
+    segs = operation.get("segs")
+    if not isinstance(segs, list) or not segs:
+        raise ValueError("operation.segs 不能为空。")
+    normalized = []
+    for index, segment in enumerate(segs):
+        if not isinstance(segment, (list, tuple)) or len(segment) != 4:
+            raise ValueError(f"operation.segs[{index}] 必须是 [x1, y1, x2, y2]。")
+        if not all(isinstance(v, numbers.Real) and math.isfinite(float(v)) for v in segment):
+            raise ValueError(f"operation.segs[{index}] 的坐标必须是有限数字。")
+        normalized.append([float(v) for v in segment])
+    size = max(1, int(operation.get("size") or 4))
+    scope = str(operation.get("scope") or "all")
+    if scope not in ("current", "all"):
+        raise ValueError("operation.scope 必须是 current 或 all。")
+    total = _frame_count(action)
+    if scope == "current":
+        raw = operation.get("frames")
+        if not isinstance(raw, list) or not raw:
+            raise ValueError('scope="current" 时必须给 frames（帧号列表）。')
+        targets = []
+        for value in raw:
+            index = int(value)
+            if not 0 <= index < total:
+                raise ValueError(f"帧号越界：{index}（共 {total} 帧）")
+            targets.append(index)
+    else:
+        targets = list(range(total))
+
+    color = (255, 255, 255, 255)
+    sections_names = action.get("frame_sections") or []
+    drawn = 0
+    for index in targets:
+        section = sections_names[index] if index < len(sections_names) else None
+        if not section or section not in sections:
+            continue
+        img = png_from_bytes(sections[section])
+        if img is None:
+            continue
+        img = img.convert("RGBA")
+        ox, oy = _canvas_pos(action, sections, index, img.width, img.height)
+        layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        pen = ImageDraw.Draw(layer)
+        for x1, y1, x2, y2 in normalized:
+            pen.line([x1 - ox, y1 - oy, x2 - ox, y2 - oy],
+                     fill=color, width=size, joint="curve")
+            radius = max(1, size / 2.0)
+            for px, py in ((x1 - ox, y1 - oy), (x2 - ox, y2 - oy)):
+                pen.ellipse([px - radius, py - radius, px + radius, py + radius], fill=color)
+        if kind == "eraser":
+            base = img.copy()
+            base.paste((0, 0, 0, 0), (0, 0), layer)
+            img = base
+        else:
+            img = Image.alpha_composite(img, layer)
+        sections[section] = png_bytes(img)
+        drawn += 1
+    if drawn == 0:
+        return {"ok": False, "action": action_name, "kind": kind,
+                "frames_drawn": 0, "backup_path": "",
+                "note": "这些帧没有可写的帧图，什么都没改。"}
+    backup = _backup_then_write(project_path, manifest, sections)
+    return {"ok": True, "action": action_name, "kind": kind,
+            "frames_drawn": drawn, "backup_path": backup}
+
+
+@mcp.tool(annotations={
+    "title": "智能抽帧", "readOnlyHint": False,
+    "destructiveHint": True, "idempotentHint": False, "openWorldHint": False,
+})
+def decimate_action_frames(project_path: str, action_name: str,
+                           mode: str = "keep_1_2", tolerance: int = 0) -> dict:
+    """按相似度智能抽帧（与软件四档抽帧同一套算法），写前自动备份。
+
+    用户口径：一串 = **同相似组号 + 帧序相邻**；每串只留 ceil(N*比例) 帧且**必含最标准那帧**；
+    不相邻、没配对的帧原样保留。留在原位的帧落点会被补偿，画面**不位移**。
+
+    参数：
+      - mode："keep_3_5"（抽 3/5，力度最小）/ "keep_1_2" / "keep_1_4" /
+        "dedupe"（强力去重：一串只留 1 帧）；
+      - tolerance：相似度容差 0~255。t 表示"最多允许 t/1000 的格子不一样"
+        （0 = 必须一模一样；20 = 允许 2%）。
+
+    返回 dict：{ "ok", "action", "mode", "frames_before", "frames_after",
+                 "removed": [被抽掉的帧号], "backup_path", "note" }
+    """
+    manifest, sections = _read_any_project(project_path)
+    action = _find_action(manifest, action_name)
+    if mode not in _DECIMATE_RATIOS:
+        raise ValueError("mode 必须是 keep_3_5 / keep_1_2 / keep_1_4 / dedupe。")
+    tolerance = int(tolerance)
+    if not 0 <= tolerance <= 255:
+        raise ValueError("tolerance 必须在 0~255 之间。")
+    total = _frame_count(action)
+    if total < 2:
+        return {"ok": False, "action": action_name, "mode": mode,
+                "frames_before": total, "frames_after": total, "removed": [],
+                "backup_path": "", "note": "帧太少，抽不动"}
+    parts_all = action.get("frame_parts") or []
+    for i in range(total):
+        parts = parts_all[i] if i < len(parts_all) else None
+        if parts and len(parts) > 1:
+            return {"ok": False, "action": action_name, "mode": mode,
+                    "frames_before": total, "frames_after": total, "removed": [],
+                    "backup_path": "",
+                    "note": "有合成帧（一帧由多个元素拼成），抽帧会算错裁剪来源，已拒绝"}
+    images = []
+    sizes_old: dict[int, tuple[int, int]] = {}
+    for i in range(total):
+        try:
+            img = _render_frame_image(action, sections, i, manifest)[0]
+        except Exception:  # noqa: BLE001
+            img = None
+        if img is None:
+            return {"ok": False, "action": action_name, "mode": mode,
+                    "frames_before": total, "frames_after": total, "removed": [],
+                    "backup_path": "", "note": f"第 {i} 帧读不出来，已放弃"}
+        images.append(img)
+        sizes_old[i] = (img.width, img.height)
+    marks = _group_elements(images, tolerance=tolerance)
+    keep = _decimate_indices(images, marks, mode)
+    removed = [i for i in range(total) if i not in set(keep)]
+    if not removed:
+        return {"ok": False, "action": action_name, "mode": mode,
+                "frames_before": total, "frames_after": total, "removed": [],
+                "backup_path": "", "note": "没有相邻的相似帧，这一档抽不掉东西"}
+    offsets_old = {int(k): tuple(v) for k, v in (action.get("frame_offsets") or {}).items()}
+    frame_map = {old: new for new, old in enumerate(keep)}
+    _remap_frame_fields(action, keep)
+    sizes_new = {frame_map[old]: sizes_old[old] for old in keep if old in sizes_old}
+    compensated = _compensate_offsets(sizes_old, offsets_old, sizes_new, frame_map)
+    action["frame_offsets"] = {str(k): [int(v[0]), int(v[1])] for k, v in compensated.items()}
+    backup = _backup_then_write(project_path, manifest, sections)
+    return {"ok": True, "action": action_name, "mode": mode,
+            "frames_before": total, "frames_after": len(keep),
+            "removed": removed, "backup_path": backup,
+            "note": "已按原动作的帧重算，保留帧的落点已补偿（画面不位移）"}
+
+
+@mcp.tool(annotations={
+    "title": "动作级批量变换", "readOnlyHint": False,
+    "destructiveHint": False, "idempotentHint": False, "openWorldHint": False,
+})
+def transform_action_frames(project_path: str, action_name: str,
+                           transform: dict,
+                           scope: str = "all", frames: list | None = None) -> dict:
+    """把一次变换套用到动作的**多帧/全部帧**（软件里一键作用于全部帧的等价物）。
+
+    transform 形状：``{"rotate":90|180|270,"mirror_h":true,"mirror_v":true,
+    "flip":bool}`` —— 出现的字段才生效：
+      - ``rotate``：90 / 180 / 270（顺时针角度）；
+      - ``mirror_h`` / ``mirror_v``：水平/垂直镜像，true 加上、false 去掉；
+      - ``flip``：同时翻转水平与垂直（等价于转 180）。
+
+    参数：
+      - scope："all"（全部帧，默认）或 "current"（只用 frames 指定的帧）；
+      - frames：scope="current" 时的帧号列表。
+
+    返回 dict：{ "ok", "action", "frames_changed", "backup_path", "changed" }
+    """
+    manifest, sections = _read_any_project(project_path)
+    action = _find_action(manifest, action_name)
+    if not isinstance(transform, dict) or not transform:
+        raise ValueError("transform 必须是非空对象。")
+    total = _frame_count(action)
+    if scope not in ("all", "current"):
+        raise ValueError("scope 必须是 all 或 current。")
+    if scope == "current":
+        if not isinstance(frames, list) or not frames:
+            raise ValueError('scope="current" 时必须给 frames（帧号列表）。')
+        targets = []
+        for value in frames:
+            index = int(value)
+            if not 0 <= index < total:
+                raise ValueError(f"帧号越界：{index}（共 {total} 帧）")
+            targets.append(index)
+    else:
+        targets = list(range(total))
+
+    rotate = transform.get("rotate")
+    if rotate is not None:
+        rotate = int(rotate)
+        if rotate not in (90, 180, 270):
+            raise ValueError("transform.rotate 必须是 90 / 180 / 270。")
+    mirror_h = transform.get("mirror_h")
+    mirror_v = transform.get("mirror_v")
+    if transform.get("flip"):
+        mirror_h = not bool(mirror_h)
+        mirror_v = not bool(mirror_v)
+    if rotate is None and mirror_h is None and mirror_v is None:
+        raise ValueError("transform 里至少要有一个字段：rotate / mirror_h / mirror_v / flip。")
+
+    rotations = dict(action.get("frame_rotations") or {})
+    mh = set(action.get("frame_mirror_h") or [])
+    mv = set(action.get("frame_mirror_v") or [])
+    changed = 0
+    for index in targets:
+        touched = False
+        if rotate is not None:
+            now = int(rotations.get(str(index), 0) or 0)
+            new = (now + rotate) % 360
+            if new == 0:
+                rotations.pop(str(index), None)
+            else:
+                rotations[str(index)] = new
+            touched = True
+        if mirror_h is not None:
+            if bool(mirror_h):
+                mh.add(index)
+            else:
+                mh.discard(index)
+            touched = True
+        if mirror_v is not None:
+            if bool(mirror_v):
+                mv.add(index)
+            else:
+                mv.discard(index)
+            touched = True
+        if touched:
+            changed += 1
+    if changed == 0:
+        return {"ok": True, "action": action_name, "frames_changed": 0,
+                "backup_path": "", "changed": {}}
+    action["frame_rotations"] = rotations
+    action["frame_mirror_h"] = sorted(mh)
+    action["frame_mirror_v"] = sorted(mv)
+    backup = _backup_then_write(project_path, manifest, sections)
+    detail: dict = {}
+    if rotate is not None:
+        detail["rotate"] = rotate
+    if mirror_h is not None:
+        detail["mirror_h"] = bool(mirror_h)
+    if mirror_v is not None:
+        detail["mirror_v"] = bool(mirror_v)
+    return {"ok": True, "action": action_name, "frames_changed": changed,
+            "backup_path": backup, "changed": detail}
+
+
+@mcp.tool(annotations={
+    "title": "编辑动图文档操作链", "readOnlyHint": False,
+    "destructiveHint": True, "idempotentHint": False, "openWorldHint": False,
+})
+def edit_animation_document(project_path: str, operation: dict) -> dict:
+    """编辑动图文档的**已保存操作链**：删除某一项或调整顺序（写前自动备份）。
+
+    operation 形状：``{"op":"delete"|"move","index":2,"to":0}``
+      - ``op="delete"``：删掉第 index 项操作；
+      - ``op="move"``：把第 index 项移到 to 位置（重排操作顺序）。
+
+    追加新操作用 update_animation_document；本工具只管已有的操作链项。
+
+    返回 dict：{ "ok", "op", "ops_count", "removed"|"moved", "backup_path" }
+    """
+    manifest, sections = _read_any_project(project_path)
+    payload = manifest.get("anim_doc")
+    if not payload:
+        raise ValueError("这不是动图文档工程（没有操作链可编辑）。")
+    if not isinstance(operation, dict):
+        raise ValueError("operation 必须是对象。")
+    op = str(operation.get("op") or "")
+    if op not in ("delete", "move"):
+        raise ValueError('operation.op 必须是 "delete" 或 "move"。')
+    ops = payload.setdefault("ops", [])
+    count = len(ops)
+    if count == 0:
+        raise ValueError("这个动图文档还没有任何操作，没得编辑。")
+    try:
+        index = int(operation.get("index"))
+    except (TypeError, ValueError):
+        raise ValueError("operation.index 必须是整数。") from None
+    if not 0 <= index < count:
+        raise ValueError(f"operation.index 越界：{index}（共 {count} 项）")
+    if op == "delete":
+        removed = ops.pop(index)
+        backup = _backup_then_write(project_path, manifest, sections)
+        return {"ok": True, "op": op, "ops_count": len(ops),
+                "removed": removed, "backup_path": backup}
+    try:
+        to = int(operation.get("to"))
+    except (TypeError, ValueError):
+        raise ValueError("op=\"move\" 时 operation.to 必须是整数。") from None
+    if not 0 <= to < count:
+        raise ValueError(f"operation.to 越界：{to}（共 {count} 项）")
+    moved = ops.pop(index)
+    ops.insert(to, moved)
+    backup = _backup_then_write(project_path, manifest, sections)
+    return {"ok": True, "op": op, "ops_count": len(ops),
+            "moved": {"from": index, "to": to}, "backup_path": backup}
 
 
 # ---------------------------------------------------------------------------
