@@ -242,6 +242,7 @@ def main() -> int:
     print("=== 8. 标签栏画出来的样子（逐像素）===")
     win.close()
 
+
     from spritesheet.ui.widgets import ProjectTabBar
 
     def rendered(names, dirty_index=None, current=0):
@@ -424,6 +425,21 @@ def main() -> int:
     check("干净工程的标题没有 * 号", "*" not in clean_title, clean_title)
     check("未保存标记改在窗口标题上（* 号）", "*" in dirty_title, dirty_title)
 
+
+    # Qt 收尾：headless 下让解释器直接回收原生对象/后台线程会随机 0xC0000005
+    # （检测线程、QPixmap 缓存等）。顺序与 smoke_test.py 一致：先跑几轮事件，
+    # 再 deleteLater 让 Qt 真正析构，最后 quit 并再跑一轮事件。
+    # 注意只 `del win` 是不够的：解释器退出时才回收原生对象，实测 8 次里会崩 3 次；
+    # 必须 deleteLater() 让 Qt 先在事件循环里析构掉它。
+    for _ in range(3):
+        app.processEvents()
+    win.close()
+    app.processEvents()
+    win.deleteLater()
+    app.processEvents()
+    app.quit()
+    app.processEvents()
+    del win
     print()
     print(f"TABS FAILED {len(FAILURES)}" if FAILURES else "TABS OK")
     if FAILURES:

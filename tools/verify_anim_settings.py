@@ -230,6 +230,18 @@ def main() -> int:
           and not bar.btn_all_mirror_h.isEnabled() and not bar.btn_all_right.isEnabled())
 
     win.close()
+
+    # Qt 收尾：headless 下让解释器直接回收原生对象/后台线程会随机 0xC0000005
+    # （检测线程、QPixmap 缓存等）。顺序与 smoke_test.py 一致：先跑几轮事件，
+    # 再 deleteLater 让 Qt 真正析构，最后 quit 并再跑一轮事件。
+    for _ in range(3):
+        app.processEvents()
+    win.deleteLater()
+    app.processEvents()
+    app.quit()
+    app.processEvents()
+    del win
+
     print("=" * 50)
     print(f"PASSED {passed} | FAILED {len(FAILS)}")
     if FAILS:

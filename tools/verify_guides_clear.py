@@ -42,6 +42,11 @@ from spritesheet.ui.main_window import MainWindow
 
 _APP = QApplication.instance() or QApplication(sys.argv)
 
+# 用户设置保险：本脚本要用固定阈值做检测断言，会临时改「自动识别阈值」，
+# 跑完必须原样写回（跑到一半崩了也有存档兜住）。见 settings_guard 模块说明。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from settings_guard import protect_settings                          # noqa: E402
+
 FAILURES: list[str] = []
 passed = 0
 
@@ -187,6 +192,11 @@ def drag_guide_from_ruler(win, orientation: str, from_point: QPoint, to_point: Q
 
 
 def main() -> int:
+    # 本脚本依赖「ring_sheet 能认出 2 个元素」，而内块只有 21×21：用户若把
+    # 设置里的「自动识别阈值」调高过（例如 30），内块会被过滤掉，断言就会假红。
+    # 所以先把阈值固定为 0，跑完在收尾处恢复用户原值。
+    restore_settings = protect_settings()
+    settings.set_detect_min_area(0)
     win = MainWindow()
     win.resize(1280, 860)
     win.show()
@@ -529,7 +539,20 @@ def main() -> int:
 
     print("--- 13. 收尾 ---")
     win.close()
+
     wait(400)
+
+    # Qt 收尾：headless 下让解释器直接回收原生对象/后台线程会随机 0xC0000005
+    # （检测线程、QPixmap 缓存等）。顺序与 smoke_test.py 一致：先跑几轮事件，
+    # 再 deleteLater 让 Qt 真正析构，最后 quit 并再跑一轮事件。
+    for _ in range(3):
+        _APP.processEvents()
+    win.deleteLater()
+    _APP.processEvents()
+    _APP.quit()
+    _APP.processEvents()
+    del win
+    restore_settings()                      # 把「自动识别阈值」等用户设置原样写回
     print()
     print("=" * 52)
     print(f"PASSED {passed}  |  FAILED {len(FAILURES)}")

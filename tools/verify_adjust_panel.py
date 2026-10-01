@@ -203,6 +203,15 @@ def main() -> int:
     check("移开后恢复红色图标", clear.icon_state() == "normal", f"实际 {clear.icon_state()}")
 
     win.close()
+    # Qt 收尾：headless 下直接让解释器回收原生对象/后台线程会随机 0xC0000005。
+    # 与 smoke_test.py 同一套收尾（先跑一轮事件，再 deleteLater，再 quit）。
+    for _ in range(3):
+        app.processEvents()
+    win.deleteLater()
+    app.processEvents()
+    app.quit()
+    app.processEvents()
+    del win
     print()
     if FAILURES:
         print("ADJUST PANEL FAILED：", *FAILURES, sep="\n  - ")

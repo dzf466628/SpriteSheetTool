@@ -129,7 +129,6 @@ def main() -> int:
     win.show()
     wait(200)
     panel = win.preview.adjust_panel
-    from spritesheet.ui.transform import action_frame_size              # noqa: F401
 
     # ---------------------------------------------------------------- 段 1
     print("=== 1. 整帧原图（工具的真实流程）：自己判断出「可以精确」===")
@@ -322,7 +321,7 @@ def main() -> int:
     action4 = win._create_animation_action("均分图集测试", [], 0, 9)
     win._install_animation_action(action4)
     wait(600)
-    from spritesheet.ui.transform import detect_sheet_grid, grid_shape, cell_rect
+    from spritesheet.ui.transform import detect_sheet_grid, grid_shape
     index_of = detect_sheet_grid(action4.frame_rects, atlas.width(), atlas.height())
     check("判定出「横竖均分 = 3×3」", grid_shape(index_of) if index_of else None == (3, 3),
           f"{grid_shape(index_of) if index_of else None}")
@@ -382,7 +381,14 @@ def main() -> int:
     win.image_viewer.set_current_action(None)
     for w in OLD_WINDOWS + [win]:
         w.close()
-    wait(100)
+    # 光 close() 不够：headless 下解释器退出时才回收原生对象，实测会随机 0xC0000005。
+    # 复用上面循环的 w，把每个窗口都交给 Qt 自己析构，再跑事件让 deleteLater 落地。
+    for w in OLD_WINDOWS + [win]:
+        w.deleteLater()
+    for _ in range(3):
+        _APP.processEvents()
+    _APP.quit()
+    _APP.processEvents()
     del win, action, action2, action3, sources, tight_sources
     OLD_WINDOWS.clear()
     gc.collect()

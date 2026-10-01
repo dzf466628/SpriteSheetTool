@@ -695,6 +695,17 @@ def main() -> int:
     restore_settings()                 # 原样写回用户的设置（幂等，atexit 也会兜一次）
     viewer.reload_view_colors()
     win.close()
+
+    # Qt 收尾：headless 下让解释器直接回收原生对象/后台线程会随机 0xC0000005
+    # （检测线程、QPixmap 缓存等）。顺序与 smoke_test.py 一致：先跑几轮事件，
+    # 再 deleteLater 让 Qt 真正析构，最后 quit 并再跑一轮事件。
+    for _ in range(3):
+        _APP.processEvents()
+    win.deleteLater()
+    _APP.processEvents()
+    _APP.quit()
+    _APP.processEvents()
+    del win
     wait(400)
     print()
     print("=" * 52)
