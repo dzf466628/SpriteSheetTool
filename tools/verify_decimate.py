@@ -22,6 +22,10 @@ from PyQt6.QtCore import Qt                                          # noqa: E40
 from PyQt6.QtGui import QColor, QPainter, QPixmap                    # noqa: E402
 from PyQt6.QtWidgets import QApplication                             # noqa: E402
 
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 _APP = QApplication.instance() or QApplication(sys.argv)
 
 from spritesheet.ui.similar import (DECIMATE_RATIOS, compensate_offsets,  # noqa: E402

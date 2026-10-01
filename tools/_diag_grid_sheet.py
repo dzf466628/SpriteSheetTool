@@ -22,6 +22,10 @@ from PyQt6.QtCore import QElapsedTimer                            # noqa: E402
 from PyQt6.QtGui import QPixmap                                   # noqa: E402
 from PyQt6.QtWidgets import QApplication                          # noqa: E402
 
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 from settings_guard import protect_settings                       # noqa: E402
 
 _APP = QApplication.instance() or QApplication(sys.argv)

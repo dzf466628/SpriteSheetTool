@@ -3,3 +3,7 @@
 
 # Build tooling used by build_windows.ps1
 PyInstaller>=6.0,<7
+
+# Static check used by the 三件套 workflow (compileall + pyflakes + smoke_test).
+# 不装它 `python -m pyflakes` 会直接 ModuleNotFoundError，新电脑照文档装完依赖跑不通第二步。
+pyflakes>=3.0
