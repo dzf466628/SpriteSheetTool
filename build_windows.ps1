@@ -33,6 +33,19 @@ Write-Host "[1/3] Build PyInstaller onedir directory ..."
 if (-not (Test-Path (Join-Path $distApp "SpriteSheetTool.exe"))) {
     throw "PyInstaller did not create dist\SpriteSheetTool\SpriteSheetTool.exe"
 }
+# jsonschema_specifications discovers its metaschemas from a real package
+# directory at runtime. Keep the directory beside the frozen Python modules;
+# PyInstaller's collect hook can otherwise omit the extensionless vocabulary files.
+$schemaSource = Join-Path $projectRoot ".venv\Lib\site-packages\jsonschema_specifications\schemas"
+$schemaTarget = Join-Path $distApp "_internal\jsonschema_specifications\schemas"
+if (-not (Test-Path $schemaSource)) {
+    throw "Missing jsonschema_specifications schemas: $schemaSource"
+}
+New-Item -ItemType Directory -Force -Path $schemaTarget | Out-Null
+& robocopy.exe $schemaSource $schemaTarget /E /NFL /NDL /NJH /NJS /NC /NS | Out-Null
+if ($LASTEXITCODE -gt 7) {
+    throw "Failed to copy jsonschema_specifications schemas (robocopy exit $LASTEXITCODE)"
+}
 
 Write-Host "[2/3] Compile Inno Setup installer ..."
 New-Item -ItemType Directory -Force -Path $installerRoot | Out-Null

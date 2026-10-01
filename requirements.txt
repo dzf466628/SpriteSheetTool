@@ -1,4 +1,6 @@
 PyQt6>=6.6,<7
 Pillow>=10.0,<13
+# 卡通 profile 使用；传统模式仍只依赖 Pillow。
+numpy>=1.24
 # mcp 2.x 是破坏性大版本（FastMCP 改名 MCPServer），本软件用 1.x FastMCP API，锁 <2
 mcp>=1.0,<2

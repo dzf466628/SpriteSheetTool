@@ -6,7 +6,7 @@
 
 **把零散精灵图，做成引擎直接能播的动画。**
 
-[![version](https://img.shields.io/badge/version-v1.1.44-E91E63?style=flat-square)](https://github.com/dzf466628/SpriteSheetTool/releases)
+[![version](https://img.shields.io/badge/version-v1.1.48-E91E63?style=flat-square)](https://github.com/dzf466628/SpriteSheetTool/releases)
 [![license](https://img.shields.io/badge/license-GPL--3.0-73df9a?style=flat-square)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.10%2B-ffc76b?style=flat-square)](https://www.python.org/)
 [![windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?style=flat-square)]()
@@ -24,6 +24,27 @@ SpriteSheetTool 是一款精灵图自动检测、动作编排、自由变换与�
 ---
 
 ## 核心能力
+
+### v1.1.48 更新
+
+- 修复 MCP 客户端关闭连接时打包版因 `BrokenPipeError` 弹出未处理异常窗口。
+- 完善动图文档笔刷操作校验，空笔刷路径和非法坐标会返回可读的 MCP 工具错误。
+
+### v1.1.47 更新
+
+- 补充 MCP 创建工程的明确操作引导：创建工程 → 创建动作 → 添加帧；内部布局字段由服务器自动维护。
+
+### v1.1.46 更新
+
+- 修复 MCP 握手版本误报为 SDK 的 `1.30.0`，现在服务端正确报告 SpriteSheetTool 版本。
+- 修复 MCP 创建的工程打开时报 `int(None)`，导致动作无法加载的问题。
+
+### v1.1.45 更新
+
+- MCP 工具扩展到 30 个，覆盖工程创建、动作与帧编辑、源图管理、抠图、动图文档和完整导出。
+- 抠图保留传统色键与卡通背景两种模式，支持 MCP headless 操作和操作链重放。
+- 补齐多部件帧导入、TexturePacker / Aseprite / 本工具 JSON、GIF、逐帧 PNG 导出。
+- 修复 Windows 打包版 Qt DLL 加载和 MCP 无界面启动问题。
 
 ### 自动检测，快速建立帧
 
@@ -72,13 +93,14 @@ SpriteSheetTool 是一款精灵图自动检测、动作编排、自由变换与�
 - 导入精灵图 JSON、读 .sstool 工程元信息
 - 列出 / 细看动作、导出引擎 JSON
 - 取任意帧的 PNG 预览（base64，AI 能直接看图）
+- 创建工程、编排动作和逐帧参数，执行抠图与完整资源导出
 - 全程无 GUI，图片用 Pillow 编解码，不依赖 Qt
 
 ---
 
 ## 抠背景：精灵图去底色
 
-为游戏精灵图和 AI 生成的关键帧去除纯色或单调渐变背景。纯 Pillow 实现，零新增依赖（安装包不涨体积），所有逐像素运算走 Pillow C 层，拖拽滑块实时预览。
+为游戏精灵图和 AI 生成的关键帧去除纯色或单调渐变背景。基础色键和卡通背景 profile 通过同一套参数面板按需切换。
 
 | 参数 | 说明 |
 |------|------|
@@ -87,8 +109,10 @@ SpriteSheetTool 是一款精灵图自动检测、动作编排、自由变换与�
 | **只清边缘 edge_only** | 只清"与图片边缘连通"的背景，保护角色内部的同色像素（白衣服、眼白、高光），默认开 |
 | **收缩 shrink** | alpha 收缩 / 扩张 N 像素，正数 = 收缩（腐蚀，去残留白边），负数 = 扩张 |
 | **去溢色 despill** | 半透明边缘里混进来的背景色做 un-premultiply 减掉 |
+| **抠图模式** | 基础色键、卡通背景 profile |
+| **明暗差上限** | 控制绿幕/蓝幕阴影的清除范围，避免主体灰色区域被误删 |
 
-> 为什么不做 AI 抠图：精灵图背景基本是纯色或单调渐变，传统取样 + 容差 + 边缘迭代够用；rembg 那条路线会拉来 scipy / opencv / onnxruntime 一堆库，安装包从 30MB 涨到 200MB，不划算。
+基础色键适合实时预览；卡通背景 profile 使用 `numpy` 自动保护黑线和主体颜色，不需要额外模型文件。
 
 ---
 
@@ -212,7 +236,7 @@ SpriteSheetTool.exe --mcp
 <details>
 <summary><b>抠背景和 KeyFrame 有什么区别？</b></summary>
 
-SpriteSheetTool 的抠背景是纯 Pillow 传统算法，针对精灵图的纯色 / 单调渐变背景，零新增依赖、实时预览、安装包不涨体积。KeyFrame 是 AI 模型抠像，适合复杂背景和视频，但需要模型文件、安装包更大。
+SpriteSheetTool 保留了原来的分块抠图、撤销和实时预览流程，并接入 KeyFrame 的卡通背景 profile。基础色键适合纯色背景，卡通 profile 适合带黑线和抗锯齿边缘的关键帧。
 
 </details>
 

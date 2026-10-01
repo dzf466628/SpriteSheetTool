@@ -158,9 +158,38 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         check("project round-trip", False, f"{type(exc).__name__}: {exc}")
 
-    # ---- 6. Undo stack sanity ----
+    # ---- 6. MCP-created project must open in the desktop app ----
+    # This exercises the actual headless write schema, including optional
+    # fields that are commonly JSON null, rather than only the GUI saver.
+    mcp_path = out / "mcp-created.sstool"
+    mcp_frame = out / "mcp-frame.png"
+    try:
+        pm.save(str(mcp_frame), "PNG")
+        from spritesheet.mcp_server import create_action, create_empty_project, add_frame
+        create_empty_project(str(mcp_path), 2048, 2048)
+        create_action(str(mcp_path), "MCP 动作")
+        add_frame(str(mcp_path), "MCP 动作", str(mcp_frame))
+        ok3 = win._open_project(str(mcp_path))
+        current = [a for a in win.actions if a.name == "MCP 动作"]
+        check("MCP project opens", ok3 and len(current) == 1,
+              f"actions={[a.name for a in win.actions]}")
+        check("MCP action frames load", bool(current and len(current[0].frames) == 1),
+              f"frames={len(current[0].frames) if current else 0}")
+    except Exception as exc:  # noqa: BLE001
+        check("MCP project round-trip", False, f"{type(exc).__name__}: {exc}")
+
+    # ---- 7. Undo stack sanity ----
     check("undo stack exists", win._undo_stack is not None)
     win.close()
+    # Give Qt one event turn to finish deleteLater callbacks before the
+    # headless interpreter tears down native image/thread objects on Windows.
+    wait_ms(app, 100)
+    win.deleteLater()
+    app.processEvents()
+    app.quit()
+    app.processEvents()
+    del win
+    del app
 
     print("=" * 50)
     print(f"PASSED {passed}  |  FAILED {len(FAILURES)}")

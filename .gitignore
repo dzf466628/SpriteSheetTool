@@ -64,7 +64,5 @@ crash.log
 
 # >>> RepoPulse 文件管理（可视化开关自动维护） >>>
 /SSTool_源图.png
-/spritesheet/
-/tools/
 /video/
 # <<< RepoPulse 文件管理 <<<

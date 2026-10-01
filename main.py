@@ -12,12 +12,16 @@ import sys
 import faulthandler
 import traceback
 
-from PyQt6.QtGui import QFont, QIcon, QImageReader
-from PyQt6.QtWidgets import QApplication
-
-from spritesheet.single_instance import SingleInstance
-from spritesheet.ui.main_window import MainWindow
-from spritesheet.ui.theme import APP_QSS, install_dark_titlebars
+# Keep the handle alive for the lifetime of the process.  Windows removes a
+# directory from the DLL search path when the returned handle is collected.
+_QT_DLL_HANDLE = None
+if sys.platform.startswith("win") and getattr(sys, "frozen", False):
+    _frozen_root = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    _qt_bin = os.path.join(_frozen_root, "PyQt6", "Qt6", "bin")
+    if os.path.isdir(_qt_bin):
+        os.environ["PATH"] = _qt_bin + os.pathsep + os.environ.get("PATH", "")
+        if hasattr(os, "add_dll_directory"):
+            _QT_DLL_HANDLE = os.add_dll_directory(_qt_bin)
 
 
 def _install_crash_logging() -> None:
@@ -68,6 +72,14 @@ def main() -> int:
     if "--mcp" in sys.argv[1:]:
         from spritesheet.mcp_server import run
         return run()
+
+    # The GUI-only dependency chain is loaded after the headless branch so
+    # packaged MCP clients never need QtWidgets or platform plugins.
+    from PyQt6.QtGui import QFont, QIcon, QImageReader
+    from PyQt6.QtWidgets import QApplication
+    from spritesheet.single_instance import SingleInstance
+    from spritesheet.ui.main_window import MainWindow
+    from spritesheet.ui.theme import APP_QSS, install_dark_titlebars
 
     _install_crash_logging()
     app = QApplication(sys.argv)

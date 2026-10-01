@@ -7,7 +7,9 @@
 """
 
 from pathlib import Path
+import PyQt6
 
+from PyInstaller.building.datastruct import TOC
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 
@@ -37,9 +39,31 @@ for _pkg in ("mcp", "pydantic", "anyio", "httpx",
         _mcp_hid += _h
     except Exception:  # noqa: BLE001 - 缺包不打断打包（mcp 本体装了就够）
         print(f"[spec] 未收集到可选依赖：{_pkg}")
+# jsonschema loads its metaschema files through importlib.resources at runtime;
+# collect_all(mcp) does not pull this separately installed package's data files.
+try:
+    _js_spec_datas, _js_spec_bins, _js_spec_hid = collect_all("jsonschema_specifications")
+    _mcp_datas += _js_spec_datas
+    _mcp_bins += _js_spec_bins
+    _mcp_hid += _js_spec_hid
+    _js_spec_root = Path(__import__("jsonschema_specifications").__file__).resolve().parent
+    _mcp_datas.append((str(_js_spec_root / "schemas"), "jsonschema_specifications/schemas"))
+except Exception:  # noqa: BLE001
+    print("[spec] 未收集到 jsonschema_specifications 数据")
 datas += _mcp_datas
-binaries = _mcp_bins
-hiddenimports = ["PIL._tkinter_finder"] + _mcp_hid
+# PyQt6's hooks collect the Qt modules that are imported directly, but a few
+# transitive runtime DLLs (d3dcompiler/opengl and the MSVC side-by-side
+# libraries) are loaded by QtGui only after the frozen process starts.  Keep
+# the complete Qt bin directory beside the Qt DLLs so both the desktop app and
+# the ``--mcp`` entry point can import PyQt6 reliably on a clean machine.
+_qt_bin = Path(PyQt6.__file__).resolve().parent / "Qt6" / "bin"
+_qt_runtime_bins = [(str(path), "PyQt6/Qt6/bin")
+                    for path in _qt_bin.glob("*.dll")]
+binaries = _mcp_bins + _qt_runtime_bins
+hiddenimports = [
+    "PIL._tkinter_finder",
+    "numpy",
+] + _mcp_hid
 
 
 a = Analysis(
@@ -50,10 +74,18 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(project_root / "pyi_rth_qt6.py")],
     excludes=["tkinter"],
     noarchive=False,
 )
+# A transitive Poppler dependency can contribute ICU 78 DLLs.  They shadow
+# Windows' ICU API-set stubs and make Qt6Core fail with WinError 127 on clean
+# Windows installs.  SpriteSheetTool does not load Poppler at runtime, so do
+# not ship those conflicting DLLs in the frozen application.
+a.binaries = TOC([
+    entry for entry in a.binaries
+    if Path(entry[1]).name.lower() not in {"icuuc.dll", "icudt78.dll"}
+])
 
 pyz = PYZ(a.pure)
 exe = EXE(
