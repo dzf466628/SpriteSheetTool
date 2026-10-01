@@ -6,7 +6,7 @@
 
 **把零散精灵图，做成引擎直接能播的动画。**
 
-[![version](https://img.shields.io/badge/version-v1.1.48-E91E63?style=flat-square)](https://github.com/dzf466628/SpriteSheetTool/releases)
+[![version](https://img.shields.io/badge/version-v1.1.49-E91E63?style=flat-square)](https://github.com/dzf466628/SpriteSheetTool/releases)
 [![license](https://img.shields.io/badge/license-GPL--3.0-73df9a?style=flat-square)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.10%2B-ffc76b?style=flat-square)](https://www.python.org/)
 [![windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?style=flat-square)]()
@@ -24,6 +24,12 @@ SpriteSheetTool 是一款精灵图自动检测、动作编排、自由变换与�
 ---
 
 ## 核心能力
+
+### v1.1.49 更新
+
+- MCP 工具扩展到 35 个：新增自动对齐、画笔 / 橡皮、智能抽帧（四档相似度去重）、动作级批量变换，以及动图文档操作链的删除与重排。
+- 智能抽帧按相似度分组（同组号 + 帧序相邻为一串，必留最标准那帧），保留帧的落点自动补偿，抽完画面不位移。
+- 自动对齐复刻软件的三条路：均分格精确、原图锚点精确，以及帧间重合度估算（估算默认关闭，需显式开启）。
 
 ### v1.1.48 更新
 
